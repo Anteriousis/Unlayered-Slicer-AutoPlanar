@@ -35,9 +35,9 @@ Two consequences follow, and the interface is shaped by them:
   widens (§4.1). Those are the slicer's internal data structures; an interface that shovelled them
   to a client would be a much weaker claim to being two programs, quite apart from being a worse
   interface.
-- **Nothing in the slicer's source names a particular application.** The URL, the tab title and
-  every capability gate are configuration. The shipped defaults live in
-  [`resources/web/webapp/default.json`](resources/web/webapp/default.json), which is data.
+- **The bridge itself names no particular application.** The URL, the tab title and every
+  capability gate are per-tab configuration. The Agent and Universe tabs carry Unlayered's
+  addresses as their shipped defaults, and the generic tab ships with none (§7).
 
 If you host a web application that runs Unlayered Slicer **on your server** to produce output for
 remote users, note that AGPL-3.0 §13 asks you to offer those users the Corresponding Source of the
@@ -630,7 +630,8 @@ the header comment of [`src/slic3r/GUI/WebAppBridge.hpp`](src/slic3r/GUI/WebAppB
 
 ## 7. Configuration
 
-Preferences ▸ General ▸ Web application, or directly in the slicer's `.conf`:
+In the slicer's `.conf`, edited while the application is closed. There is no Preferences UI for
+these (see below).
 
 | Key | Default | Meaning |
 |---|---|---|

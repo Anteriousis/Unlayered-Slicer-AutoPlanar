@@ -3,8 +3,7 @@
 # The DEFAULT is per-user: the app installs under %LOCALAPPDATA%\Programs, with
 # no UAC prompt. That is not a preference, it is the prerequisite for the slicer
 # updating itself silently -- a copy living in Program Files can only be
-# replaced by an elevated process, so every update would prompt. See
-# UPDATE_FEEDS.md.
+# replaced by an elevated process, so every update would prompt.
 #
 # The per-machine installer is still available for shared or centrally-managed
 # workstations, where one install has to serve every account:

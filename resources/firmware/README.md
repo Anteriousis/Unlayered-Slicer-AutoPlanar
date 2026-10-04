@@ -14,11 +14,11 @@ Populate the directory as part of cutting an installer:
 
 ```
 python tools/make_firmware_bundle.py \
-    --build-dir C:/rrf/RepRapFirmware/Duet3Mini5plus \
-    --iap       C:/rrf/RepRapFirmware/firmware/Duet3_SDiap32_Mini5plus.bin \
-    --wifi      C:/rrf/RepRapFirmware/firmware/DuetWiFiServer.bin \
-    --paneldue  C:/unlayered-paneldue/build/PanelDueFirmware.bin \
-    --panel-ota C:/unlayered-panel/build/unlayered-panel.bin \
+    --build-dir path/to/RepRapFirmware/Duet3Mini5plus \
+    --iap       path/to/RepRapFirmware/firmware/Duet3_SDiap32_Mini5plus.bin \
+    --wifi      path/to/RepRapFirmware/firmware/DuetWiFiServer.bin \
+    --paneldue  path/to/PanelDueFirmware.bin \
+    --panel-ota path/to/unlayered-panel.bin \
     --board     Mini5plus
 ```
 

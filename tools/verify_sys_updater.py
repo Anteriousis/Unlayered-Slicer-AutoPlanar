@@ -8,7 +8,7 @@ src/slic3r/GUI/Jobs/SysFilesUpdateJob.cpp that would quietly do the wrong thing 
 configuration if the assumption were wrong.
 
   python tools/verify_sys_updater.py
-  python tools/verify_sys_updater.py --probe 192.168.1.80   # read-only, talks to a printer
+  python tools/verify_sys_updater.py --probe <printer-ip>   # read-only, talks to a printer
 
 The probe never writes a file. It calls rr_mkdir on a directory that already exists, which RRF
 answers with err=1 and no change on the card - that answer is itself one of the assumptions.

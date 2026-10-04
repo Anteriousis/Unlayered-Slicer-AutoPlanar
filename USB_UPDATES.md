@@ -149,7 +149,7 @@ between HTTP and USB.
 ```
 python tools/verify_usb_updater.py --list                    # candidate Duet ports
 python tools/verify_usb_updater.py --port COM3               # read-only probe
-python tools/verify_usb_updater.py --port COM3 --write --http 192.168.1.60
+python tools/verify_usb_updater.py --port COM3 --write --http <printer-ip>
 ```
 
 The last form writes a scratch file over USB and then fetches it back over Ethernet with
@@ -161,7 +161,6 @@ to `DuetSerialClient`.
 ## 6. Where the files come from
 
 Unchanged by any of this: both feeds are fetched over HTTP regardless of how the printer is reached.
-See `UPDATE_FEEDS.md`. The `github_api_base` key in `Unlayered Slicer.conf` points the updaters at
-`https://unlayered3d.com/printer-updates-api`, which serves GitHub-shaped release JSON derived from
-the files uploaded through the site's `/printer-updates` admin panel. Firmware is public; config
-needs the customer's slicer access token, sent as `Authorization: Bearer`.
+The `github_api_base` key in `Unlayered Slicer.conf` points the updaters at
+`https://unlayered3d.com/printer-updates-api`, which serves GitHub-shaped release JSON. Firmware is
+public; config needs the customer's slicer access token, sent as `Authorization: Bearer`.

@@ -8,14 +8,14 @@ the notes and a SHA-256 per file so a truncated download cannot be written to a 
 
 Usage:
   python tools/make_sys_bundle.py \
-      --sys      C:/rrf/RepRapFirmware/sys \
+      --sys      path/to/sys \
       --version  1.0.0 \
-      --machine  "Unlayered .80" \
+      --machine  "My printer" \
       --out      dist/sys.zip
 
   # optional extras
-      --macros    C:/path/to/macros
-      --filaments C:/path/to/filaments
+      --macros    path/to/macros
+      --filaments path/to/filaments
       --notes-file CHANGES.md
       --include-machine-specific     # heightmap.csv and friends, normally left out
 
@@ -105,7 +105,7 @@ def main():
     ap.add_argument("--filaments", help="Folder to install as 0:/filaments")
     ap.add_argument("--version", required=True, help="Package version, e.g. 1.0.0")
     ap.add_argument("--date", help="Package date; defaults to today")
-    ap.add_argument("--machine", default="", help="Which machine this is for, e.g. \"Unlayered .80\"")
+    ap.add_argument("--machine", default="", help="Which machine this is for, e.g. \"My printer\"")
     ap.add_argument("--notes", default="", help="Notes shown in the update dialog")
     ap.add_argument("--notes-file", help="Read the notes from a file")
     ap.add_argument("--include-machine-specific", action="store_true",

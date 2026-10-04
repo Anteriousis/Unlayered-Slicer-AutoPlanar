@@ -218,11 +218,10 @@ jobs:
           $size = (Get-Item $installer).Length
           Write-Output "installer: $installerLeaf  $size bytes  sha256=$hash"
 
-          # While the repository is private, release assets need authentication and the download page
-          # is behind a sign-in, so the manifest advertises no assets and the in-app update dialog
-          # offers to open the download page instead. Set the UNLAYERED_PUBLIC_DOWNLOADS repository
-          # variable to 'true' once the files are publicly reachable and in-app installation switches
-          # on with no code change.
+          # The manifest advertises release assets only when the UNLAYERED_PUBLIC_DOWNLOADS repository
+          # variable is 'true'. Without it the manifest lists none and the in-app update dialog offers
+          # to open the download page instead; setting it switches in-app installation on with no code
+          # change.
           $public = "${{ vars.UNLAYERED_PUBLIC_DOWNLOADS }}" -eq 'true'
           $assets = @()
           if ($public) {

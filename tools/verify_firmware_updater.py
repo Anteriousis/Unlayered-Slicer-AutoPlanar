@@ -6,7 +6,7 @@ a decision in src/slic3r/Utils/DuetRrfClient.cpp or FirmwareBundle.cpp that woul
 produce a corrupt flash or a wrong "already up to date" answer if the assumption were wrong.
 
   python tools/verify_firmware_updater.py
-  python tools/verify_firmware_updater.py --probe 192.168.1.80   # read-only, talks to a printer
+  python tools/verify_firmware_updater.py --probe <printer-ip>   # read-only, talks to a printer
 """
 
 import argparse

@@ -1377,8 +1377,8 @@ set (CPACK_RESOURCE_FILE_LICENSE ${CMAKE_SOURCE_DIR}/LICENSE.txt) # must also in
 set(CPACK_PROJECT_CONFIG_FILE "${CMAKE_SOURCE_DIR}/cmake/CPackInstallScope.cmake")
 #
 # Why both exist: only a per-user install can replace its own files without a
-# UAC prompt, which is the prerequisite for the slicer updating itself silently
-# (see UPDATE_FEEDS.md). A per-machine install is still the right answer for
+# UAC prompt, which is the prerequisite for the slicer updating itself silently.
+# A per-machine install is still the right answer for
 # shared or centrally-managed workstations, and it always costs one prompt.
 #
 # The two can coexist on one machine. Each installer's uninstall-before-install

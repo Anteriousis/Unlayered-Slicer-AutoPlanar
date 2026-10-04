@@ -171,7 +171,7 @@ field exists so an agent loop cannot argue with itself.
 
 ## Relationship with the Unlayered Agent
 
-The agent is a separate Python program (`stealth-slice`) with a React front end. Its server never
+The agent is a separate program, a Python server with a React front end. Its server never
 runs inside the slicer and the slicer never starts it: the agent tab is a URL, and
 `resources/web/webapp/unavailable.html` is what the user sees when nothing answers. Inside the tab,
 the agent's model calls **client-executed tools** — the page maps a `slicer_*` tool request from

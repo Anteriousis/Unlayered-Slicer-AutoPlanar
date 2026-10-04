@@ -11,13 +11,13 @@ asset, so the output of this script can also be uploaded to a release verbatim.
 
 Usage:
   python tools/make_firmware_bundle.py \
-      --build-dir C:/rrf/RepRapFirmware/Duet3Mini5plus \
-      --iap       C:/rrf/RepRapFirmware/firmware/Duet3_SDiap32_Mini5plus.bin \
+      --build-dir path/to/RepRapFirmware/Duet3Mini5plus \
+      --iap       path/to/RepRapFirmware/firmware/Duet3_SDiap32_Mini5plus.bin \
       --version   3.7.0-beta.1+unlayered.1 \
       --board     Mini5plus
 
   # optional extras
-      --wifi      C:/rrf/RepRapFirmware/firmware/DuetWiFiServer.bin
+      --wifi      path/to/RepRapFirmware/firmware/DuetWiFiServer.bin
       --notes-file CHANGELOG.md
       --out       resources/firmware
 """

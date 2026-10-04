@@ -93,7 +93,7 @@ public:
     virtual ~DuetClient() = default;
 
     virtual Capabilities       capabilities() const = 0;
-    // What to call this connection in a message to the user: "192.168.1.60" or "COM3".
+    // What to call this connection in a message to the user: "192.0.2.10" or "COM3".
     virtual const std::string &endpoint() const = 0;
 
     virtual ConnectResult connect(std::string &error_out) = 0;

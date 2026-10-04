@@ -19,7 +19,7 @@ Usage:
     python tools/verify_usb_updater.py --list                   # candidate Duet ports
     python tools/verify_usb_updater.py --port COM15             # + read-only probe
     python tools/verify_usb_updater.py --port COM15 --write     # + writes a scratch file
-    python tools/verify_usb_updater.py --port COM15 --write --http 192.168.1.60
+    python tools/verify_usb_updater.py --port COM15 --write --http <printer-ip>
                                                                 # + cross-check against rr_*
 
 --write uploads a scratch file to 0:/sys/, verifies it with M38, reads it back with M1763 if the

@@ -10,7 +10,7 @@ sites in PartPlate.cpp guard for that while others historically did not.
 This harness drives the real binary and asserts it does not die. Each case builds its
 mesh parametrically, so there are no binary fixtures to keep in sync.
 
-    python tools/cli_smoke.py --exe C:/Unlayered-Slicer/build/src/Release/unlayered-slicer.exe
+    python tools/cli_smoke.py --exe build/src/Release/unlayered-slicer.exe
 
 Add a case whenever a headless crash is fixed, so it cannot come back silently.
 """

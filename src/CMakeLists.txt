@@ -118,7 +118,7 @@ if(ORCA_TOOLS)
             MACOSX_BUNDLE_BUNDLE_VERSION "${SLIC3R_VERSION}"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "${SLIC3R_VERSION}"
             MACOSX_BUNDLE_IDENTIFIER "com.unlayered3d.UnlayeredSlicer.profile-validator"
-            MACOSX_BUNDLE_COPYRIGHT "© 2026 Unlayered 3D. All Rights Reserved"
+            MACOSX_BUNDLE_COPYRIGHT "© 2026 OrcaSlicer Pte Ltd All Rights Reserved; modifications © 2026 Unlayered 3D"
             MACOSX_BUNDLE_GUI_IDENTIFIER "com.unlayered3d.UnlayeredSlicer.profile-validator"
         )
     else()
@@ -344,7 +344,7 @@ else ()
         set(MACOSX_BUNDLE_ICON_FILE Icon.icns)
         set(MACOSX_BUNDLE_BUNDLE_NAME "${SLIC3R_APP_NAME}")
         set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${UNLAYERED_VERSION})
-        set(MACOSX_BUNDLE_COPYRIGHT "© 2026 Unlayered 3D. All Rights Reserved")
+        set(MACOSX_BUNDLE_COPYRIGHT "Copyright(C) 2022-2024 Li Jiang All Rights Reserved; modifications Copyright(C) 2026 Unlayered 3D")
         # cmake/modules/MacOSXBundleInfo.plist.in used to HARDCODE CFBundleIdentifier, which
         # meant the profile-validator .app shipped with the main app's identity even though
         # it sets its own MACOSX_BUNDLE_GUI_IDENTIFIER (line 122). The template now expands

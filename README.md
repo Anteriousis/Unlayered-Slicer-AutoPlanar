@@ -4,84 +4,113 @@
   <img alt="Unlayered Slicer logo" src="resources/images/UnlayeredSlicer.png" width="15%" height="15%">
 </picture>
 
-[![Build all](https://github.com/Unlayered3D/Unlayered-Slicer/actions/workflows/build_all.yml/badge.svg?branch=main)](https://github.com/Unlayered3D/Unlayered-Slicer/actions/workflows/build_all.yml)
-
-**Unlayered Slicer**: the slicer for Unlayered 3D printers, with non-planar, multi-axis printing built in.
+**Unlayered Slicer**: the slicer for Unlayered 3D printers, with multiplanar printing built in.
 
 </div>
 
-# Official links
+Unlayered Slicer is Unlayered 3D's fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer). It is built on OrcaSlicer 2.5.0-dev and keeps its feature set: calibration tools, wall and seam control, adaptive layer heights, tree supports, multi-material printing, and network printing through Klipper, PrusaLink, OctoPrint, Duet and others.
 
-- **Website:** <https://unlayered3d.com/slicer/>
-- **Downloads:** <https://unlayered3d.com/slicer/download>
-- **Source and issues:** <https://github.com/Unlayered3D/Unlayered-Slicer>
+This README describes **Unlayered Slicer 0.1.1**.
 
-# What it is
+- **Website:** <https://unlayered3d.com>
+- **Source:** this repository. Each release is tagged; [`v0.1.1`](https://github.com/Unlayered3D/Unlayered-Slicer/tree/v0.1.1) is the exact source of the 0.1.1 installer.
 
-Unlayered Slicer is Unlayered 3D's fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer). On top of the OrcaSlicer feature set it adds:
+# What it adds
 
-- **Non-planar printing.** Split a model with cut planes and slice each chunk on its own tilted plane, so overhangs print without support and surfaces follow the part.
-- **Multi-planar supports.** Support generation that follows the cut-plane geometry instead of assuming a flat bed.
-- **Printer firmware and configuration bundled with the release**, with in-app update checks for the slicer, the firmware and the printer configuration.
-- **Unlayered 3D printer profiles**, plus the printer, filament and process profiles inherited from OrcaSlicer.
+## Multiplanar printing
 
-Everything else you know from OrcaSlicer is still here: calibration tools, precise wall and seam control, adaptive layer heights, tree supports, multi-material printing and network printing through Klipper, PrusaLink, OctoPrint and others.
+Instead of slicing a whole model in flat layers parallel to the bed, you split it into segments with cut planes, and each segment is sliced in its own orientation. Overhangs and surfaces can then be printed in whichever direction suits them.
 
-# Download
+- **Cut Planes** (left toolbar, Prepare view): place planes on an object without splitting it. A coloured preview shows the segments they produce, and each part can be given its own build direction.
+- **Skeleton Cut** (Advanced mode): computes a skeleton of the model and adds a cut plane for each branch.
+- **Supports per segment**: support generation follows the segments rather than assuming one flat bed.
+- **Hotend collision check**: after slicing, a sidebar warning shows where the hotend would hit already-printed material.
+- **Help ▸ Multiplanar Tutorial** walks through the workflow.
 
-Stable and pre-release builds are published on the [releases page](https://github.com/Unlayered3D/Unlayered-Slicer/releases) and on <https://unlayered3d.com/slicer/download>. The application checks for updates itself and offers to install them.
+These features are switched on per printer: **Printer settings ▸ Motion ability ▸ Non-planar printing** (Advanced mode). The printer type there decides what the G-code looks like:
 
-# How to install
+- **A/B, B/C or A/C** for machines with two rotary axes. The segment orientations are written as rotary-axis moves.
+- **Virtual** for an ordinary three-axis printer. Each segment's layers are still tilted, but the nozzle stays upright and no rotary moves are written. Set **Max tilt angle** and **Max total height** to suit your hotend. Both default to 0, which means *no limit*.
 
-## Windows
+## Unlayered printers
 
-Download the Windows installer for your CPU (`x64` or `arm64`) from the releases page and run it. A portable build is also published.
+- **Unlayered 5 Axis Printer** profile (0.4, 0.6 and 0.8 mm nozzles), with its own process presets. Its start G-code calls macros that exist only on an Unlayered printer.
+- **Unlayered host type** for printers running RepRapFirmware. It sends and prints like the Duet host type, and it adds two buttons to the physical printer dialog:
+  - **Firmware**: updates the mainboard, Wi-Fi module and display. It uses releases of [Unlayered3D/RepRapFirmware](https://github.com/Unlayered3D/RepRapFirmware), or the bundle shipped with the installer.
+  - **Config**: installs printer configuration files.
 
-If the application fails to start, install the runtimes it depends on:
+  Both work over the network or USB. They target the Duet 3 Mini 5+ in an Unlayered printer. See [USB_UPDATES.md](USB_UPDATES.md).
 
-- [Microsoft Edge WebView2 Runtime](https://aka.ms/webview2)
-- [Visual C++ Redistributable 2019 (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+## Web application tabs
 
-## macOS
+Two tabs, **Unlayered Agent** and **Unlayered Universe**, embed pages from unlayered3d.com. They are on by default and fetch nothing until you open them. To remove one, set `agent_app_enabled` or `universe_app_enabled` to `false` in `Unlayered Slicer.conf` while the app is closed.
 
-1. Download the universal DMG, which runs on both Apple Silicon and Intel Macs.
-2. Drag `UnlayeredSlicer.app` to the Applications folder.
-3. If macOS refuses to open a build that is not notarized, either hold _cmd_, right-click the app and choose **Open**, or run:
+A page talks to the slicer only through a documented bridge with per-tab permissions. The bridge is specified in [WEB_APP_BRIDGE.md](WEB_APP_BRIDGE.md), and there is an example page in [resources/web/webapp-example](resources/web/webapp-example).
 
-   ```shell
-   xattr -dr com.apple.quarantine /Applications/UnlayeredSlicer.app
-   ```
+## Removed from OrcaSlicer
 
-   Alternatively open the app once, then allow it under `System Settings` -> `Privacy & Security` -> `Open Anyway`:
+- **Orca Cloud** sign-in and preset sync.
+- **Online vendor profile updates.** Profiles come with the app.
+- **The Bambu network plugin.** Bambu Lab cloud and LAN printing do not work in this fork.
 
-   ![mac_cant_open](./docs/images/mac_cant_open.png)
-   ![mac_security_setting](./docs/images/mac_security_setting.png)
+**Stealth mode** is on by default, and it hides the remaining cloud account settings.
 
-## Linux
+## Network access
 
-### AppImage
+These connections are not affected by stealth mode:
 
-AppImages are published for `x86_64` and `aarch64`.
+- **At launch:** the app checks for a new version at `https://unlayered3d.com/slicer/latest.json`. You can also check manually with **Help ▸ Check for Updates**. Builds whose version ends in `-dev` skip the automatic check.
+- **Agent and Universe tabs:** load their pages from unlayered3d.com when opened.
+- **Firmware button:** reads release information from the GitHub API.
 
-1. Download the AppImage matching your CPU from the releases page.
-2. Make it executable and run it:
+# Getting it
 
-   ```shell
-   chmod +x Unlayered_Slicer_Linux_*.AppImage
-   ./Unlayered_Slicer_Linux_*.AppImage
-   ```
+Installers are provided to Unlayered 3D customers. There are no public binary releases, so everyone else builds from source.
 
-### Flatpak
-
-A Flatpak manifest is included at `scripts/flatpak/com.unlayered3d.UnlayeredSlicer.yml`. Build and install it locally with `build_flatpak.sh`.
+Unlayered's own builds are Windows x64. The macOS and Linux build scripts are carried over from OrcaSlicer and use the renamed targets, but they are not regularly tested.
 
 # How to build
 
-The build follows the OrcaSlicer layout: the dependencies are built once from `deps/` into `deps/build`, then the application is configured against them. The upstream [OrcaSlicer build guide](https://www.orcaslicer.com/wiki/how_to_build) applies to this fork; the helper scripts are `build_win.bat`, `build_release_macos.sh`, `build_linux.sh` and `build_flatpak.sh`.
+The build follows OrcaSlicer's layout. The dependencies are built once from `deps/`, then the application is configured against them. The [OrcaSlicer build guide](https://www.orcaslicer.com/wiki/how_to_build) applies; the steps below are the short version.
+
+## Windows
+
+```bat
+build_win.bat --install-vs ide
+```
+
+That sets up a new machine with CMake, Perl, Git and Visual Studio. Restart the shell afterwards, then build the dependencies and the slicer:
+
+```bat
+build_win.bat -ds
+```
+
+When the script finishes, it prints where the executable is. `build_win.bat -h` lists every option.
+
+## Linux
+
+```shell
+./build_linux.sh -u      # install system dependencies (asks for sudo)
+./build_linux.sh -dsi    # dependencies, slicer and AppImage
+```
+
+A Flatpak manifest is at `scripts/flatpak/com.unlayered3d.UnlayeredSlicer.yml`; build it with `build_flatpak.sh`.
+
+## macOS
+
+```shell
+./build_release_macos.sh -a universal
+```
+
+`-h` lists the options. Use `-d` or `-s` to build only the dependencies or only the slicer.
+
+## Bundled firmware
+
+A Windows installer can carry a printer firmware bundle in `resources/firmware/`, as described in [its README](resources/firmware/README.md). It is optional. Without it, the firmware updater uses the GitHub releases alone.
 
 # Klipper note
 
-If you are running Klipper, add the following to your `printer.cfg`:
+If you print through Klipper, add the following to your `printer.cfg`:
 
 ```gcode
 # Enable object exclusion
@@ -99,5 +128,8 @@ Unlayered Slicer is a fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSli
 # License
 
 Unlayered Slicer is licensed under the GNU Affero General Public License, version 3, the same license as OrcaSlicer, Bambu Studio and PrusaSlicer. See [LICENSE.txt](LICENSE.txt).
+
+- The example page in `resources/web/webapp-example/` is MIT licensed, so that web applications can start from it freely.
+- Firmware images bundled with an installer are separate programs under their own licenses. RepRapFirmware is GPLv3, and its source is at [Unlayered3D/RepRapFirmware](https://github.com/Unlayered3D/RepRapFirmware).
 
 The Unlayered 3D name and logo are trademarks of Unlayered 3D and are not covered by the AGPL license.

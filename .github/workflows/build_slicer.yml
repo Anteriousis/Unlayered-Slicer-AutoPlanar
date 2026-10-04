@@ -485,7 +485,7 @@ jobs:
             -OutputPath "${{ github.workspace }}/${{ env.BUILD_DIR }}/UnlayeredSlicer_Windows_MSIX_${{ env.ver }}${{ env.ARCH_SUFFIX }}.msix" `
             -Architecture "${{ inputs.arch }}" `
             -IdentityName "${{ vars.ORCA_MSIX_IDENTITY_NAME || 'Unlayered3D.UnlayeredSlicer' }}" `
-            -Publisher "${{ vars.ORCA_MSIX_PUBLISHER || 'CN=38F7EA55-C73B-4072-B3B2-C8E0EA15BB82' }}" `
+            -Publisher "${{ vars.ORCA_MSIX_PUBLISHER || 'CN=Unlayered 3D' }}" `
             -PublisherDisplayName "${{ vars.ORCA_MSIX_PUBLISHER_DISPLAY_NAME || 'Unlayered 3D' }}"
 
       - name: Upload artifacts Win MSIX

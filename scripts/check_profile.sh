@@ -26,8 +26,10 @@
 
 set -uo pipefail
 
-VALIDATOR_RELEASE_URL="https://github.com/Unlayered3D/Unlayered-Slicer/releases/download/nightly-builds"
-FIXTURE_RELEASE_URL="https://github.com/Unlayered3D/Unlayered-Slicer-profile-validator/releases/download/fixture-archive"
+# Both are OrcaSlicer's: this fork publishes no nightly validator or fixture archive of its own,
+# and the upstream validator checks the same profile format.
+VALIDATOR_RELEASE_URL="https://github.com/OrcaSlicer/OrcaSlicer/releases/download/nightly-builds"
+FIXTURE_RELEASE_URL="https://github.com/OrcaSlicer/OrcaSlicer-profile-validator/releases/download/fixture-archive"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -308,14 +310,14 @@ download_validator() {
                 arm64|aarch64) msg "the nightly Linux validator is x86_64; build it locally for ${HOST_ARCH}" ;;
             esac
             binary="${dest}/UnlayeredSlicer_profile_validator"
-            fetch "${VALIDATOR_RELEASE_URL}/UnlayeredSlicer_profile_validator_Linux_Ubuntu2404_nightly" "${binary}" || return 1
+            fetch "${VALIDATOR_RELEASE_URL}/OrcaSlicer_profile_validator_Linux_Ubuntu2404_nightly" "${binary}" || return 1
             chmod +x "${binary}" || return 1
             ;;
         Darwin*)
             dmg="${dest}/UnlayeredSlicer_profile_validator.dmg"
             app="${dest}/UnlayeredSlicer_profile_validator.app"
-            binary="${app}/Contents/MacOS/UnlayeredSlicer_profile_validator"
-            fetch "${VALIDATOR_RELEASE_URL}/UnlayeredSlicer_profile_validator_Mac_universal_nightly.dmg" "${dmg}" || return 1
+            binary="${app}/Contents/MacOS/OrcaSlicer_profile_validator"
+            fetch "${VALIDATOR_RELEASE_URL}/OrcaSlicer_profile_validator_Mac_universal_nightly.dmg" "${dmg}" || return 1
             if [ ! -x "${binary}" ] || [ "${REFRESH}" -eq 1 ]; then
                 mounted="${dest}/mnt"
                 rm -rf "${mounted}" "${app}"
@@ -332,7 +334,7 @@ download_validator() {
             ;;
         MINGW*|MSYS*|CYGWIN*)
             binary="${dest}/UnlayeredSlicer_profile_validator.exe"
-            fetch "${VALIDATOR_RELEASE_URL}/UnlayeredSlicer_profile_validator_Windows_nightly.exe" "${binary}" || return 1
+            fetch "${VALIDATOR_RELEASE_URL}/OrcaSlicer_profile_validator_Windows_nightly.exe" "${binary}" || return 1
             chmod +x "${binary}" || return 1
             ;;
         *)

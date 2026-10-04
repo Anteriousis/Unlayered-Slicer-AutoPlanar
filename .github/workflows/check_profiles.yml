@@ -87,7 +87,7 @@ jobs:
           output_dir="${{ runner.temp }}/custom-preset-validation"
           combined_log="${{ runner.temp }}/validate_custom.log"
           summary="${output_dir}/summary.md"
-          release_url="https://github.com/Unlayered3D/Unlayered-Slicer-profile-validator/releases/download/fixture-archive"
+          release_url="https://github.com/OrcaSlicer/OrcaSlicer-profile-validator/releases/download/fixture-archive"
 
           rm -rf "${fixtures_dir}" "${output_dir}"
           mkdir -p "${fixtures_dir}" "${output_dir}"

@@ -96,8 +96,10 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol =
     [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$ValidatorReleaseUrl = 'https://github.com/Unlayered3D/Unlayered-Slicer/releases/download/nightly-builds'
-$FixtureReleaseUrl = 'https://github.com/Unlayered3D/Unlayered-Slicer-profile-validator/releases/download/fixture-archive'
+# Both are OrcaSlicer's: this fork publishes no nightly validator or fixture archive of its own,
+# and the upstream validator checks the same profile format.
+$ValidatorReleaseUrl = 'https://github.com/OrcaSlicer/OrcaSlicer/releases/download/nightly-builds'
+$FixtureReleaseUrl = 'https://github.com/OrcaSlicer/OrcaSlicer-profile-validator/releases/download/fixture-archive'
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
@@ -355,7 +357,7 @@ function Save-NightlyValidator {
         Write-Host "the nightly Windows validator is x64; it runs here under emulation"
     }
     $exe = Join-Path $WorkDir 'validator\UnlayeredSlicer_profile_validator.exe'
-    Save-Asset -Url "$ValidatorReleaseUrl/UnlayeredSlicer_profile_validator_Windows_nightly.exe" -Dest $exe
+    Save-Asset -Url "$ValidatorReleaseUrl/OrcaSlicer_profile_validator_Windows_nightly.exe" -Dest $exe
     return $exe
 }
 

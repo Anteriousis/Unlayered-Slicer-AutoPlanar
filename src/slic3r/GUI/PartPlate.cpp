@@ -2494,12 +2494,21 @@ void PartPlate::set_pos_and_size(Vec3d& origin, int width, int depth, double hei
 
 	if (with_instance_move && m_model)
 	{
+		// UNLAYERED_MOD -- the set can hold references into a model that changed underneath this
+		// plate (async multi-part imports racing a plate delete): deleting plate 0 of 5 while an
+		// import was still streaming objects in crashed here on objects[obj_id] with a stale id
+		// (2026-09-02 crash log, AV in get_transformation). Validate before dereferencing and
+		// drop stale entries instead of reading garbage.
+		std::vector<std::pair<int, int>> stale_refs;
 		for (std::set<std::pair<int, int>>::iterator it = obj_to_instance_set.begin(); it != obj_to_instance_set.end(); ++it) {
 			int obj_id = it->first;
 			int instance_id = it->second;
-			if (!valid_instance(obj_id, instance_id))
+			if (!valid_instance(obj_id, instance_id)) {
+				BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": plate %1% holds stale object %2%, instance %3% (model has %4% objects); dropping the reference")
+					% m_plate_index % obj_id % instance_id % m_model->objects.size();
+				stale_refs.push_back(*it);
 				continue;
-
+			}
 			ModelObject* object = m_model->objects[obj_id];
 			ModelInstance* instance = object->instances[instance_id];
 
@@ -2530,6 +2539,8 @@ void PartPlate::set_pos_and_size(Vec3d& origin, int width, int depth, double hei
 			instance->set_offset(offset);
 			object->invalidate_bounding_box();
 		}
+		for (const std::pair<int, int> &s : stale_refs)
+			obj_to_instance_set.erase(s);
 	}
 	else if (do_clear)
 	{

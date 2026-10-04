@@ -293,6 +293,10 @@ NSVGimage* BitmapCache::nsvgParseFromFileWithReplace(const char* filename, const
         image = nsvgParse(data, units, dpi);
     else {
         str.assign(data);
+        // HAZARD: these are applied cumulatively to the SAME string, in std::map key
+        // order (lexicographic), so replacements CHAIN -- the output of one key can be
+        // matched by a later key. Callers must keep their key set and value set
+        // disjoint; see the table in load_svg() below.
         for (auto val : replaces)
             boost::replace_all(str, val.first, val.second);
         image = nsvgParse(str.data(), units, dpi);
@@ -307,56 +311,80 @@ error:
     return NULL;
 }
 
-wxBitmap* BitmapCache::load_svg(const std::string &bitmap_name, unsigned target_width, unsigned target_height, 
-    const bool grayscale/* = false*/, const bool dark_mode/* = false*/, const std::string& new_color /*= ""*/, const float scale_in_center/* = 0*/)
+wxBitmap* BitmapCache::load_svg(const std::string& bitmap_name,
+                                unsigned           target_width,
+                                unsigned           target_height,
+                                const bool         grayscale /* = false*/,
+                                const bool         dark_mode /* = false*/,
+                                const std::string& new_color /*= ""*/,
+                                const float        scale_in_center /* = 0*/)
 {
-    std::string bitmap_key = bitmap_name + ( target_height !=0 ? 
-                                           "-h" + std::to_string(target_height) : 
-                                           "-w" + std::to_string(target_width))
-                                         + (m_scale != 1.0f ? "-s" + float_to_string_decimal_point(m_scale) : "")
-                                         + (dark_mode ? "-dm" : "")
-                                         + (grayscale ? "-gs" : "")
-                                         + new_color;
+    std::string bitmap_key = bitmap_name +
+                             (target_height != 0 ? "-h" + std::to_string(target_height) : "-w" + std::to_string(target_width)) +
+                             (m_scale != 1.0f ? "-s" + float_to_string_decimal_point(m_scale) : "") + (dark_mode ? "-dm" : "") +
+                             (grayscale ? "-gs" : "") + new_color;
 
     auto it = m_map.find(bitmap_key);
     if (it != m_map.end())
         return it->second;
 
-    // map of color replaces
+    // Map of colour replaces, applied to the raw SVG text before parsing.
+    //
+    // The Unlayered accent is BAKED INTO THE ASSETS by tools/theme/recolor-accent.py;
+    // this table only inverts it for dark mode and injects the filament colour. That
+    // split is deliberate: GLTexture, IMTexture, IconManager and load_svg2 never call
+    // nsvgParseFromFileWithReplace(), so anything that relied on runtime recolouring
+    // rendered unrecoloured on the 3D toolbar, the layer slider and the gizmo atlas.
+    //
+    // INVARIANT: the key set and the value set must stay DISJOINT. Replacements are
+    // applied cumulatively, in std::map key order (see nsvgParseFromFileWithReplace),
+    // so overlapping sets make the result depend on lexicographic ordering. The old
+    // table depended on exactly that -- "#009688" -> "#2C2F8F" happened to sort before
+    // "#2C2F8F" -> "#1F225E", and renaming a key would have silently broken dark mode.
+    // Disjoint sets make it order-independent by construction. Keep it that way.
+    //
+    // Accent keys are unquoted on purpose: the quoted form only matches the
+    // presentation-attribute spelling fill="#xxxxxx", which is how 42 of the 400
+    // accented icons are written -- the other 358 use style="fill:#xxxxxx" and were
+    // silently missed for as long as the quoted keys were in use.
     std::map<std::string, std::string> replaces;
-    replaces["\"#0x00AE42\""] = "\"#009688\"";
-    replaces["\"#00FF00\""] = "\"#52c7b8\"";
+
     if (dark_mode) {
+        // Icon accent ramp, light -> dark. Single hop, no chaining.
+        replaces["#5D5D5D"] = "#B8B8B8"; // accent base
+        replaces["#3D3D3D"] = "#DADADA"; // accent hover / on-state
+        // The mark drawn on top of an on-state fill (checkbox tick, toggle thumb). The
+        // fill above inverts light->dark, so the glyph has to invert dark->light with it
+        // or it vanishes. tools/theme/recolor-accent.py bakes #FCFCFC into these icons.
+        replaces["#FCFCFC"] = "#2D2D31";
         replaces["\"#262E30\""] = "\"#EFEFF0\"";
         replaces["\"#323A3D\""] = "\"#B3B3B5\"";
         replaces["\"#808080\""] = "\"#818183\"";
-        //replaces["\"#ACACAC\""] = "\"#54545A\"";
+        // replaces["\"#ACACAC\""] = "\"#54545A\"";
         replaces["\"#CECECE\""] = "\"#54545B\"";
         replaces["\"#6B6B6B\""] = "\"#818182\"";
         replaces["\"#909090\""] = "\"#FFFFFF\"";
-        replaces["\"#00FF00\""] = "\"#FF0000\"";
-        replaces["\"#009688\""] = "\"#00675b\"";
         replaces["\"#F1F1F1\""] = "\"#36363B\"";
-        replaces["#DBDBDB"] = "#4A4A51"; // ORCA border color
-        replaces["#F0F0F1"] = "#333337"; // ORCA disabled background color
-        replaces["#262E30"] = "#EFEFF0"; // ORCA
+        replaces["#DBDBDB"]     = "#4A4A51"; // ORCA border color
+        replaces["#F0F0F1"]     = "#333337"; // ORCA disabled background color
+        replaces["#262E30"]     = "#EFEFF0"; // ORCA
     } else {
         replaces["#949494"] = "#7C8282"; // ORCA replace icon line color for light theme
     }
 
-    if (strstr(bitmap_name.c_str(), "toggle_on") != NULL && dark_mode) // ORCA only replace color of toggle button
-        replaces["#009688"] = "#00675b";
-
+    // Filament chips. #009688 survives on disk in outlined_rect*.svg ONLY, where it is a
+    // sentinel meaning "substitute the caller's colour" -- the asset recolor script skips
+    // those files for exactly this reason. Callers: DragDropPanel::DragDropPanel and,
+    // through the separate load_from_svg_file_change_color() path, ImGuiWrapper.
     if (!new_color.empty())
-        replaces["\"#009688\""] = "\"" + new_color + "\"";
+        replaces["#009688"] = new_color;
 
-     NSVGimage *image = nullptr;
+    NSVGimage* image = nullptr;
     if (strstr(bitmap_name.c_str(), "printer_thumbnail") == NULL) {
-        image =  nsvgParseFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), "px", 96.0f, replaces);
-    }
-    else {
+        image = nsvgParseFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), "px", 96.0f, replaces);
+    } else {
         std::map<std::string, std::string> temp_replaces;
-        image =  nsvgParseFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), "px", 96.0f, temp_replaces);
+        image = nsvgParseFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), "px", 96.0f, temp_replaces);
     }
 
     if (image == nullptr)
@@ -367,19 +395,19 @@ wxBitmap* BitmapCache::load_svg(const std::string &bitmap_name, unsigned target_
 
     target_height != 0 ? target_height *= m_scale : target_width *= m_scale;
 
-    float svg_scale = target_height != 0 ? 
-                  (float)target_height / image->height  : target_width != 0 ?
-                  (float)target_width / image->width    : 1;
+    float svg_scale = target_height != 0 ? (float) target_height / image->height :
+                      target_width != 0  ? (float) target_width / image->width :
+                                           1;
 
-    int   width    = (int)(svg_scale * image->width + 0.5f);
-    int   height   = (int)(svg_scale * image->height + 0.5f);
-    int   n_pixels = width * height;
+    int width    = (int) (svg_scale * image->width + 0.5f);
+    int height   = (int) (svg_scale * image->height + 0.5f);
+    int n_pixels = width * height;
     if (n_pixels <= 0) {
         ::nsvgDelete(image);
         return nullptr;
     }
 
-    NSVGrasterizer *rast = ::nsvgCreateRasterizer();
+    NSVGrasterizer* rast = ::nsvgCreateRasterizer();
     if (rast == nullptr) {
         ::nsvgDelete(image);
         return nullptr;
@@ -388,9 +416,10 @@ wxBitmap* BitmapCache::load_svg(const std::string &bitmap_name, unsigned target_
     std::vector<unsigned char> data(n_pixels * 4, 0);
     // BBS: support resize by fill border
     if (scale_in_center > 0 && scale_in_center < svg_scale) {
-        int w = (int)(image->width * scale_in_center);
-        int h = (int)(image->height * scale_in_center);
-        ::nsvgRasterize(rast, image, 0, 0, scale_in_center, data.data() + int(height - h) / 2 * width * 4 + int(width - w) / 2 * 4, w, h, width * 4);
+        int w = (int) (image->width * scale_in_center);
+        int h = (int) (image->height * scale_in_center);
+        ::nsvgRasterize(rast, image, 0, 0, scale_in_center, data.data() + int(height - h) / 2 * width * 4 + int(width - w) / 2 * 4, w, h,
+                        width * 4);
     } else
         ::nsvgRasterize(rast, image, 0, 0, svg_scale, data.data(), width, height, width * 4);
     ::nsvgDeleteRasterizer(rast);
@@ -567,7 +596,12 @@ bool BitmapCache::load_from_svg_file_change_color(const std::string &filename, u
     temp_color[7]             = '\0';
     unsigned int change_color = nsvg__parseColorHex(temp_color);
     change_color |= (unsigned int) (1.0f * 255) << 24; // opacity
-    unsigned int green_color = 0xFF889600; // #009688
+    // DO NOT "grey this out" with the rest of the accent. 0xFF889600 is the nanosvg ABGR
+    // encoding of #009688 and is a FIND sentinel, not a colour we render: this path calls
+    // nsvgParseFromFile directly (no replace map), so it must match the raw bytes of
+    // outlined_rect*.svg, which the asset recolor script deliberately leaves teal.
+    // Changing it breaks every ImGui filament swatch with no compile error.
+    unsigned int green_color = 0xFF889600; // #009688 sentinel -- see comment above
     for (NSVGshape* shape = image->shapes; shape != nullptr; shape = shape->next) {
         // find green color
         if (shape->fill.color == green_color) {

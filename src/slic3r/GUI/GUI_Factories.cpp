@@ -92,7 +92,7 @@ std::map<std::string, std::vector<SimpleSettingData>>  SettingsFactory::OBJECT_C
                     {"support_bottom_z_distance", "",20},{"support_top_z_distance", "",21},{"support_base_pattern", "",22},{"support_base_pattern_spacing", "",23},
                     {"support_interface_top_layers", "",24},{"support_interface_bottom_layers", "",25},{"support_interface_spacing", "",26},{"support_bottom_interface_spacing", "",27},
                     {"support_object_xy_distance", "",28}, {"bridge_no_support", "",29},{"max_bridge_length", "",30},{"support_critical_regions_only", "",31},{"support_remove_small_overhang","",32},
-                    {"support_object_first_layer_gap","",33}
+                    {"support_object_first_layer_gap","",33}, {"test_input", "", 34}
                     }},
     { L("Speed"), {{"support_speed", "",12}, {"support_interface_speed", "",13}
                   }}
@@ -1290,6 +1290,30 @@ void MenuFactory::append_menu_items_mirror(wxMenu* menu)
         []() { return plater()->can_mirror(); }, m_parent);
 }
 
+// "Order": the keyboard-reachable twin of dragging a row by its grip. Objects move among the
+// objects of their plate, parts among the parts of their object.
+void MenuFactory::append_menu_items_order(wxMenu* menu)
+{
+    wxMenu* order_menu = new wxMenu();
+    if (!order_menu)
+        return;
+
+    using OrderMove = ObjectList::OrderMove;
+    const std::array<std::tuple<OrderMove, wxString, wxString>, 4> moves = {{
+        { OrderMove::Top,    _L("Send to Top"),    _L("Make this the first item of its plate or object") },
+        { OrderMove::Up,     _L("Move Up"),        _L("Swap this item with the one above it") },
+        { OrderMove::Down,   _L("Move Down"),      _L("Swap this item with the one below it") },
+        { OrderMove::Bottom, _L("Send to Bottom"), _L("Make this the last item of its plate or object") },
+    }};
+    for (const auto& [move, label, help] : moves)
+        append_menu_item(order_menu, wxID_ANY, label, help,
+            [move](wxCommandEvent&) { obj_list()->move_in_order(move); }, "", menu,
+            [move]() { return obj_list()->can_move_in_order(move); }, m_parent);
+
+    append_submenu(menu, order_menu, wxID_ANY, _L("Order"), _L("Move this item within its plate or object"), "",
+        []() { return obj_list()->can_move_in_order(OrderMove::Up) || obj_list()->can_move_in_order(OrderMove::Down); }, m_parent);
+}
+
 void MenuFactory::append_menu_item_edit_text(wxMenu *menu)
 {
     wxString name        = _L("Edit text");
@@ -1498,6 +1522,8 @@ void MenuFactory::create_extra_object_menu()
 
     // Mirror
     append_menu_items_mirror(&m_object_menu);
+    // Order within the plate
+    append_menu_items_order(&m_object_menu);
     // Delete
     append_menu_item_delete(&m_object_menu);
     m_object_menu.AppendSeparator();
@@ -1620,6 +1646,7 @@ void MenuFactory::create_bbl_part_menu()
     append_menu_item_center(menu);
     append_menu_item_drop(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_order(menu);
     wxMenu* split_menu = new wxMenu();
     if (!split_menu)
         return;

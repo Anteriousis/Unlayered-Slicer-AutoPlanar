@@ -14,6 +14,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cereal/archives/binary.hpp>
+
 #include <boost/filesystem/operations.hpp>
 
 #include <catch2/catch_tostring.hpp>
@@ -126,6 +128,12 @@ SCENARIO("Export+Import geometry to/from 3mf file cycle", "[3mf]") {
                 load_3mf(test_file.c_str(), dst_config, ctxt, &dst_model, false);
             }
 
+            // UNLAYERED_MOD: this fork's load_3mf() drops a loaded model onto the bed (Model::adjust_min_z(),
+            // re-enabled in 82a4e99ca8; upstream keeps it commented out). The source model here has a
+            // negative min z after its rotated/mirrored instance transform, so apply the same drop to it:
+            // the comparison then tests the transform round-trip, which is the point, not the drop.
+            src_model.adjust_min_z();
+
             // compare meshes
             TriangleMesh src_mesh = src_model.mesh();
             TriangleMesh dst_mesh = dst_model.mesh();
@@ -138,6 +146,57 @@ SCENARIO("Export+Import geometry to/from 3mf file cycle", "[3mf]") {
             }
             THEN("world vertices coordinates after load match") {
                 REQUIRE(res);
+            }
+        }
+    }
+}
+
+// Declarative cut planes are persisted two ways, both modeled on layer_config_ranges:
+//   1. cereal  — in-session undo/redo and model backup (tested here, headless & exact).
+//   2. .3mf    — a Metadata/cut_planes.xml part written by the BBS exporter used for projects.
+//      The .3mf export is verified out-of-band (store a project, unzip, inspect the XML);
+//      an in-process load_bbs_3mf round-trip needs full Plater/plate state to reconstruct
+//      objects, so it is not reproduced as a unit test here.
+SCENARIO("Declarative cut planes survive a cereal round-trip", "[cutplanes]") {
+    GIVEN("a cut-plane stack with two planes, including a non-axis normal") {
+        CutPlaneStack src;
+        src.enabled      = true;
+        src.user_ordered = true;   // manual plane order must survive the round-trip too
+        src.planes.push_back(CutPlane{ Vec3d(1.0, 2.0, 3.0), Vec3d(0.0, 0.0, 1.0) });
+        src.planes.push_back(CutPlane{ Vec3d(-4.5, 6.25, -7.75), Vec3d(1.0, 2.0, 3.0).normalized() });
+        // Exercise the per-plane build-normal override and enabled flag as well.
+        src.planes[1].build_normal     = Vec3d(0.5, -0.25, 2.0).normalized();
+        src.planes[1].has_build_normal = true;
+        src.planes[1].enabled          = false;
+
+        WHEN("serialized to a binary cereal archive and read back") {
+            std::stringstream ss(std::ios::in | std::ios::out | std::ios::binary);
+            {
+                cereal::BinaryOutputArchive oarchive(ss);
+                oarchive(src);
+            }
+            CutPlaneStack dst;
+            {
+                cereal::BinaryInputArchive iarchive(ss);
+                iarchive(dst);
+            }
+
+            THEN("the enabled flag and every plane's point/normal are preserved exactly") {
+                CHECK(dst.enabled == src.enabled);
+                CHECK(dst.user_ordered == src.user_ordered);
+                REQUIRE(dst.planes.size() == src.planes.size());
+
+                using Catch::Matchers::WithinAbs;
+                for (size_t i = 0; i < src.planes.size(); ++i) {
+                    for (int c = 0; c < 3; ++c) {
+                        CHECK_THAT(dst.planes[i].point[c],        WithinAbs(src.planes[i].point[c],        1e-12));
+                        CHECK_THAT(dst.planes[i].normal[c],       WithinAbs(src.planes[i].normal[c],       1e-12));
+                        CHECK_THAT(dst.planes[i].build_normal[c], WithinAbs(src.planes[i].build_normal[c], 1e-12));
+                    }
+                    CHECK(dst.planes[i].has_build_normal == src.planes[i].has_build_normal);
+                    CHECK(dst.planes[i].enabled          == src.planes[i].enabled);
+                }
+                CHECK(dst == src); // exercises CutPlaneStack::operator==
             }
         }
     }

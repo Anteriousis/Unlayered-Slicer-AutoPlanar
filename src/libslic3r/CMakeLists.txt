@@ -104,6 +104,8 @@ set(lisbslic3r_sources
     ContourZ.cpp
     CustomGCode.cpp
     CustomGCode.hpp
+    CutPlaneSegmentation.cpp
+    CutPlaneSegmentation.hpp
     CutUtils.cpp
     CutUtils.hpp
     EdgeGrid.cpp
@@ -230,6 +232,8 @@ set(lisbslic3r_sources
     GCode/AvoidCrossingPerimeters.hpp
     GCode/ConflictChecker.cpp
     GCode/ConflictChecker.hpp
+    GCode/HotendCollisionCheck.cpp
+    GCode/HotendCollisionCheck.hpp
     GCode/CoolingBuffer.cpp
     GCode/CoolingBuffer.hpp
     GCode/TimelapsePosPicker.cpp
@@ -442,6 +446,8 @@ set(lisbslic3r_sources
     SlicingAdaptive.hpp
     Slicing.cpp
     Slicing.hpp
+    Support/SegmentSupportBounds.cpp
+    Support/SegmentSupportBounds.hpp
     Support/SupportCommon.cpp
     Support/SupportCommon.hpp
     Support/SupportLayer.hpp
@@ -537,6 +543,8 @@ add_library(libslic3r_cgal STATIC
     CutSurface.hpp CutSurface.cpp
     IntersectionPoints.hpp IntersectionPoints.cpp
     MeshBoolean.hpp MeshBoolean.cpp
+    Skeleton.hpp Skeleton.cpp
+    SkeletonBuild.hpp SkeletonBuild.cpp
     TryCatchSignal.hpp TryCatchSignal.cpp
     Triangulation.hpp Triangulation.cpp
 )

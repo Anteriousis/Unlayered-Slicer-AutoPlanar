@@ -1,7 +1,7 @@
 #!/bin/bash
 # these are the CachyOS Linux specific build functions
 
-# Additional Dev packages for OrcaSlicer
+# Additional Dev packages for Unlayered Slicer
 export REQUIRED_DEV_PACKAGES=(
     cmake
     curl

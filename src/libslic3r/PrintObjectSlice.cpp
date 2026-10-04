@@ -1,10 +1,13 @@
+#include <limits>
 #include <boost/log/trivial.hpp>
+#include <Eigen/Dense>
 
 #include <tbb/parallel_for.h>
 
 #include "ClipperUtils.hpp"
 #include "ElephantFootCompensation.hpp"
 #include "Exception.hpp"
+#include "Geometry.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
 #include "MultiMaterialSegmentation.hpp"
@@ -141,6 +144,8 @@ static inline bool model_volume_needs_slicing(const ModelVolume &mv)
     return type == ModelVolumeType::MODEL_PART || type == ModelVolumeType::NEGATIVE_VOLUME || type == ModelVolumeType::PARAMETER_MODIFIER;
 }
 
+
+//using Rotation3D = Eige
 // Slice printable volumes, negative volumes and modifier volumes, sorted by ModelVolume::id().
 // Apply closing radius.
 // Apply positive XY compensation to ModelVolumeType::MODEL_PART and ModelVolumeType::PARAMETER_MODIFIER, not to ModelVolumeType::NEGATIVE_VOLUME.
@@ -154,7 +159,12 @@ static std::vector<VolumeSlices> slice_volumes_inner(
     const std::vector<float>                                 &zs,
     const std::function<void()>                              &throw_on_cancel_callback)
 {
-    model_volumes_sort_by_id(model_volumes);
+
+
+    model_volumes_sort_by_id(model_volumes); 
+
+    
+    //Transform3d        trans(rot);
 
     std::vector<VolumeSlices> out;
     out.reserve(model_volumes.size());
@@ -164,11 +174,61 @@ static std::vector<VolumeSlices> slice_volumes_inner(
         slicing_ranges.reserve(layer_ranges.size());
 
     MeshSlicingParamsEx params_base;
+    //params_base.closing_radius = print_object_config.slice_closing_radius.value;
+    //params_base.extra_offset   = 0;
+    //// Apply a 3D rotation of 0.8 radians about the Y axis and multiply it
+    //// with the object's transform so slicing uses the rotated transform.
+    //{
+    //    const double angle = -0.8; // radians
+    //    Eigen::Matrix3d R;
+    //    R << std::cos(angle), 0.0,  std::sin(angle),
+    //         0.0,             1.0,  0.0,
+    //        -std::sin(angle), 0.0,  std::cos(angle);
+
+    //    Transform3d rot = Transform3d::Identity();
+    //    rot.linear() = R;
+
+    //    // Multiply rotation by object transform. This applies the Y-rotation
+    //    // before the object's existing transform.
+    //    params_base.trafo = rot * object_trafo;
+    //    //this does not work since the 
+    //}
     params_base.closing_radius = print_object_config.slice_closing_radius.value;
     params_base.extra_offset   = 0;
-    params_base.trafo          = object_trafo;
-    //BBS: 0.0025mm is safe enough to simplify the data to speed slicing up for high-resolution model.
-    //Also has on influence on arc fitting which has default resolution 0.0125mm.
+    // Apply a 3D rotation of 0.8 radians about the Y axis and multiply it
+    // with the object's transform so slicing uses the rotated transform.
+    // Rotate about the center of the plate (use the translation from object_trafo).
+    {
+        const double    angle = -0.8; // radians
+        Eigen::Matrix3d R;
+        R << std::cos(angle), 0.0, std::sin(angle), 0.0, 1.0, 0.0, -std::sin(angle), 0.0, std::cos(angle);
+
+        // Rotation about origin
+        Transform3d rot = Transform3d::Identity();
+        rot.linear()    = R;
+
+        // Compute plate center from the incoming transform and build
+        // T(center) * R * T(-center) to rotate about that point.
+        const Eigen::Vector3d center = object_trafo.translation();
+
+        Transform3d trans_to_origin   = Transform3d::Identity();
+        trans_to_origin.translation() = -center;
+
+        Transform3d trans_back   = Transform3d::Identity();
+        trans_back.translation() = center;
+
+        Transform3d existing_rot = object_trafo;
+        //rot.pretranslate(object_trafo.translation());
+       
+          
+
+        Transform3d rot_about_plate_center = rot;//        *existing_rot;
+        //params_base
+            
+
+            // Apply the rotation about plate center before the object's transform.
+        params_base.trafo = object_trafo;//        *this->trafo(); // rot * object_trafo;
+    }
     params_base.resolution = print_config.resolution <= 0.001 ? 0.0f : 0.0025;
     switch (print_object_config.slicing_mode.value) {
     case SlicingMode::Regular:    params_base.mode = MeshSlicingParams::SlicingMode::Regular; break;
@@ -280,6 +340,32 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
 {
     model_volumes_sort_by_id(model_volumes);
 
+    // Declarative cut planes: which volume is present at a layer cannot be decided from
+    // VolumeRegion::bbox for a segment. Those boxes are built by PrintApply's trafo_for_bbox, which
+    // composes object and volume transforms and then DELETES the resulting XY translation, in a
+    // frame captured once as PrintObjectRegions::trafo_bboxes -- while a segment's `zs` are in its
+    // own frame, rotated onto its build normal and rebased to its own material. No single matrix
+    // recovers the deleted translation, so mapping the box is approximate at best, and getting it
+    // wrong is severe: judge a volume absent everywhere and the segment ends up with no layers at
+    // all.
+    //
+    // The slices themselves are the ground truth and are already in hand, so ask them instead:
+    // a volume contributes at a layer exactly when its slice there is non-empty. Exact, frame-free,
+    // and it costs an empty() check. Ordinary objects keep the bbox fast path untouched.
+    const bool segment_frame = print_object.is_segment();
+    // Height ranges are authored against OBJECT height, but a segment's zs are rebased to its own
+    // zero, so a lookup with the raw value asks about the wrong part of the model -- an upper
+    // segment physically at 10..20mm would be read as 0..10mm and pick up another range's
+    // temperatures, wall counts or modifier volumes. Shift back into object coordinates for range
+    // lookups only; everything else here stays in the slice frame.
+    const float range_offset = segment_frame ? float(print_object.segment_schedule_base()) : 0.f;
+    auto volume_present_at = [&volume_slices, segment_frame](const PrintObjectRegions::VolumeRegion &region, size_t z_idx, float z) {
+        if (! segment_frame)
+            return region.bbox->min().z() <= z && region.bbox->max().z() >= z;
+        const VolumeSlices &slices = volume_slices_find_by_id(volume_slices, region.model_volume->id());
+        return z_idx < slices.slices.size() && ! slices.slices[z_idx].empty();
+    };
+
     std::vector<std::vector<ExPolygons>> slices_by_region(print_object_regions.all_regions.size(), std::vector<ExPolygons>(zs.size(), ExPolygons()));
 
     // First shuffle slices into regions if there is no overlap with another region possible, collect zs of the complex cases.
@@ -287,7 +373,7 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
     {
         size_t z_idx = 0;
         for (const PrintObjectRegions::LayerRangeRegions &layer_range : print_object_regions.layer_ranges) {
-            for (; z_idx < zs.size() && zs[z_idx] < layer_range.layer_height_range.first; ++ z_idx) ;
+            for (; z_idx < zs.size() && zs[z_idx] + range_offset < layer_range.layer_height_range.first; ++ z_idx) ;
             if (layer_range.volume_regions.empty()) {
             } else if (layer_range.volume_regions.size() == 1) {
                 const ModelVolume *model_volume = layer_range.volume_regions.front().model_volume;
@@ -295,19 +381,19 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                 if (model_volume->is_model_part()) {
                     VolumeSlices &slices_src = volume_slices_find_by_id(volume_slices, model_volume->id());
                     auto         &slices_dst = slices_by_region[layer_range.volume_regions.front().region->print_object_region_id()];
-                    for (; z_idx < zs.size() && zs[z_idx] < layer_range.layer_height_range.second; ++ z_idx)
+                    for (; z_idx < zs.size() && zs[z_idx] + range_offset < layer_range.layer_height_range.second; ++ z_idx)
                         slices_dst[z_idx] = std::move(slices_src.slices[z_idx]);
                 }
             } else {
                 zs_complex.reserve(zs.size());
-                for (; z_idx < zs.size() && zs[z_idx] < layer_range.layer_height_range.second; ++ z_idx) {
+                for (; z_idx < zs.size() && zs[z_idx] + range_offset < layer_range.layer_height_range.second; ++ z_idx) {
                     float z                          = zs[z_idx];
                     int   idx_first_printable_region = -1;
                     bool  complex                    = false;
                     std::vector<int> printable_region_ids;
                     for (int idx_region = 0; idx_region < int(layer_range.volume_regions.size()); ++ idx_region) {
                         const PrintObjectRegions::VolumeRegion &region = layer_range.volume_regions[idx_region];
-                        if (region.bbox->min().z() <= z && region.bbox->max().z() >= z) {
+                        if (volume_present_at(region, z_idx, z)) {
                             if (region.model_volume->is_model_part())
                                 printable_region_ids.push_back(idx_region);
 
@@ -318,7 +404,13 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                                 // Test for overlap with some other region.
                                 for (int idx_region2 = idx_first_printable_region; idx_region2 < idx_region; ++ idx_region2) {
                                     const PrintObjectRegions::VolumeRegion &region2 = layer_range.volume_regions[idx_region2];
-                                    if (region2.bbox->min().z() <= z && region2.bbox->max().z() >= z && overlap_in_xy(*region.bbox, *region2.bbox)) {
+                                    // For a segment the XY-overlap shortcut is skipped too: those boxes
+                                    // live in the same unrecoverable frame, and a false "no overlap"
+                                    // takes the simple path, which assigns only the FIRST present
+                                    // volume and silently drops the other. Two present volumes always
+                                    // go down the complex path, which clips from the real slices.
+                                    if (volume_present_at(region2, z_idx, z) &&
+                                        (segment_frame || overlap_in_xy(*region.bbox, *region2.bbox))) {
                                         complex = true;
                                         break;
                                     }
@@ -351,10 +443,10 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
         }
         tbb::parallel_for(
             tbb::blocked_range<size_t>(0, zs_complex.size()),
-            [&slices_by_region, &print_object_regions, &zs_complex, &layer_ranges_regions_to_slices, clip_multipart_objects, &throw_on_cancel_callback]
+            [&slices_by_region, &print_object_regions, &zs_complex, &layer_ranges_regions_to_slices, clip_multipart_objects, range_offset, &throw_on_cancel_callback]
                 (const tbb::blocked_range<size_t> &range) {
                 float z              = zs_complex[range.begin()].second;
-                auto  it_layer_range = layer_range_first(print_object_regions.layer_ranges, z);
+                auto  it_layer_range = layer_range_first(print_object_regions.layer_ranges, z + range_offset);
                 // Per volume_regions slices at this Z height.
                 struct RegionSlice {
                     ExPolygons  expolygons;
@@ -804,6 +896,17 @@ std::string fix_slicing_errors(PrintObject* object, LayerPtrs &layers, const std
 
 void groupingVolumesForBrim(PrintObject* object, LayerPtrs& layers, int firstLayerReplacedBy)
 {
+    // An object with no layers has no first layer to group: `layers.front()` below would be a
+    // straight out-of-bounds read. Reachable for a cut-plane segment whose cropped layer schedule
+    // ends up empty, which must surface as an empty segment downstream -- not as a segfault inside
+    // brim preparation.
+    if (layers.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "groupingVolumesForBrim: object"
+                                   << (object->is_segment() ? " (cut-plane segment " + std::to_string(object->segment_index()) + ")" : "")
+                                   << " has no layers; skipping first-layer volume grouping";
+        return;
+    }
+
     const auto           scaled_resolution = scaled<double>(object->print()->config().resolution.value);
     auto partsObjSliceByVolume = findPartVolumes(object->firstLayerObjSliceMod(), object->model_object()->volumes);
     groupingVolumes(partsObjSliceByVolume, object->firstLayerObjGroupsMod(), scaled_resolution, firstLayerReplacedBy);
@@ -821,19 +924,205 @@ void groupingVolumesForBrim(PrintObject* object, LayerPtrs& layers, int firstLay
 // 5) Applies size compensation (offsets the slices in XY plane)
 // 6) Replaces bad slices by the slices reconstructed from the upper/lower layer
 // Resulting expolygons of layer regions are marked as Internal.
+// Build this object's slice frame. Kept OUT of slice() deliberately: the frame must be valid
+// whenever slicing parameters are prepared, including when posSlice is already marked done and
+// slice() early-returns. Leaving it as a side effect of the slicing step means any path that
+// completes posSlice without calling slice() sees an identity frame -- which would silently
+// mis-place cascade geometry, support bounds and the G-code un-rotation with no error anywhere.
+// Idempotent; called from slice() for every object and, for cut-plane segments only, from
+// update_slicing_parameters() (ordinary objects skip that call: it costs a full mesh merge per
+// Print::apply and nothing reads their frame before slice()).
+void PrintObject::update_slice_frame()
+{
+    // Compute plate center from the incoming transform and build
+    // T(center) * R * T(-center) to rotate about that point.
+    Eigen::Vector3d center = this->model_object()->bounding_box_exact().center();
+
+    //allows for corrections when coordiante frames get slightly out of sync
+    center -= Eigen::Vector3d(unscale<double>(m_center_offset[0]), unscale<double>(m_center_offset[1]), 0);
+    center[2] = 0;
+
+    Transform3d trans_to_origin   = Transform3d::Identity();
+    trans_to_origin.translation() = center;
+
+    Transform3d trans_back   = Transform3d::Identity();
+    trans_back.translation() = -center;
+
+    // Combined rotation. An ordinary object goes through the shared helper -- config B/C, gated on
+    // the machine's non-planar master switch (layer_rotation_trafo() in PrintConfig.cpp). A
+    // declarative cut-plane segment must NOT: it derives its B/C from the segment's build normal
+    // rather than the per-object config, so it goes through effective_layer_rotation_bc(). Handing a
+    // segment to the config-reading helper would slice every non-root segment unrotated.
+    Transform3d tempTrafo = Transform3d::Identity();
+    if (this->is_segment()) {
+        double b_deg = 0., c_deg = 0.;
+        this->effective_layer_rotation_bc(b_deg, c_deg);
+        tempTrafo.linear() = Geometry::layer_rotation_matrix(b_deg, c_deg);
+    } else {
+        tempTrafo = layer_rotation_trafo(m_config, m_print->config().enable_nonplanar.value);
+    }
+
+    if (this->is_segment()) {
+        // Place THIS SEGMENT's own minimum at slice z = 0, not the whole object's, so it slices
+        // over its own range (no leading empty layers) and its floor sits where support
+        // generation expects the ground to be.
+        //
+        // Exact, not empirical: R maps the segment's build normal onto +Z, so for any
+        // object-local vertex v
+        //     (R * m_trafo * v).z  ==  build_normal_world . (m_trafo * v)
+        // because (R y).z == (R^T z_hat) . y == build_normal_world . y. That right-hand side is
+        // precisely what CutSegmentDescriptor::build_z_min minimises over the segment's
+        // materialized piece, so -build_z_min lands that minimum on zero.
+        //
+        // Deliberately NOT derived from the full-object bounding-box line below: that one measures
+        // model_object()->mesh() (object-local, WITHOUT m_trafo) while post_trafo also carries
+        // m_trafo, so the two are different frames. It is left untouched for ordinary objects,
+        // whose behaviour must not change.
+        //
+        // UNLAYERED_MOD -- but do not rebase the ROOT segment UP out of the bed. The root is the only
+        // segment that rests on the build plate, and it slices along +Z exactly, so its build_z_min is
+        // a genuine bed height. When the object sits low, an unconditional -build_z_min lifted that
+        // below-plate material into positive slice z, where it was sliced and printed: measured 2496
+        // extruding moves down to -1.132 mm on a real project, all of them in this upright root chunk.
+        // Clamping at 0 preserves the sinking instead, exactly as the ordinary-object branch below
+        // does with std::min(box_min.z(), 0.0), so the layer generator -- which starts above z = 0 --
+        // simply never slices what is under the plate. That is how stock copes with a model clipped
+        // into the bed, and it leaves no empty leading layers for the preview to trip over.
+        //
+        // Non-root segments keep the unconditional rebase: they rest on their parent, their build_z_min
+        // is measured along their own tilted build normal rather than bed height, and the rebase is what
+        // keeps them from growing leading empty layers.
+        tempTrafo.translation() = Eigen::Vector3d(0., 0., - m_segment->slice_z_base());
+    } else {
+        const Eigen::Vector3d box_min = this->model_object()->bounding_box_exact().min;
+        //calculate the minimum of the print correctly!
+        const Eigen::Vector3d new_box_min = this->model_object()->mesh().transformed_bounding_box(trans_to_origin * tempTrafo * trans_back).min;
+        //offset so it sits flat on bed. Also subtract out any amount it sits under bed at the beginning
+        tempTrafo.translation() = Eigen::Vector3d(0, 0, std::min(box_min.z(), 0.0) - new_box_min.z());
+    }
+
+    m_post_trafo     = tempTrafo * m_trafo;
+    m_post_trafo_inv = trans_to_origin * tempTrafo.inverse() * trans_back;
+
+    // Authoritative pair: object-local -> the exact centered coordinates handed to
+    // slice_volumes_inner(), and its true inverse. See PrintObject::object_to_slice().
+    m_object_to_slice = m_post_trafo;
+    m_object_to_slice.pretranslate(Vec3d(- unscale<double>(m_center_offset.x()),
+                                         - unscale<double>(m_center_offset.y()), 0.));
+    m_slice_to_object = m_object_to_slice.inverse();
+    assert((m_object_to_slice * m_slice_to_object).isApprox(Transform3d::Identity(), 1e-9));
+}
+
 void PrintObject::slice()
 {
+    //update the transformation UNLAYERED_MOD
+    this->update_slice_frame();
+
+    BOOST_LOG_TRIVIAL(info) << "slice frame: segment=" << (this->is_segment() ? this->segment_index() : -1)
+                            << " post_trafo translation = (" << m_post_trafo.translation().x() << ", "
+                            << m_post_trafo.translation().y() << ", " << m_post_trafo.translation().z()
+                            << ") center offset = (" << unscale<double>(m_center_offset[0]) << ", "
+                            << unscale<double>(m_center_offset[1]) << ")";
+
+
     if (! this->set_started(posSlice))
         return;
     //BBS: add flag to reload scene for shell rendering
     m_print->set_status(5, L("Slicing mesh"), PrintBase::SlicingStatus::RELOAD_SCENE);
     std::vector<coordf_t> layer_height_profile;
-    this->update_layer_height_profile(*this->model_object(), m_slicing_params, layer_height_profile);
+    //m_model_object->rotate(0.1, Y);
+
+    //what this would do is make sure that the object starts printing at the bottom of the bounding 
+    //coordf_t old_min                    = m_slicing_params.object_print_z_min;
+    //coordf_t old_max                    = m_slicing_params.object_print_z_max;
+    //m_slicing_params.object_print_z_min = m_model_object->bounding_box_exact().transformed(m_post_trafo).min.z();
+    //m_slicing_params.object_print_z_max = m_model_object->bounding_box_exact().transformed(m_post_trafo).max.z();
+
+  /*  m_model_object->scale(2);
+    m_model_object->scale(0.5);*/
+    //m_model_object->
+    //if we wanted to do a better approach, we would allow the "layer_height_profile" to embed the angle of the layers.
+    //this means angle would be set in the slicing parameters
+    std::vector<coordf_t> object_layers;
+    if (this->is_segment()) {
+        // A segment's slicing parameters are sized to its own extent (see
+        // update_slicing_parameters), so validating the object's layer-height profile against that
+        // shortened height would fail and silently DISCARD it -- taking any painted variable-layer
+        // profile with it, and re-deriving height ranges against segment-local z, which lands
+        // ranged settings (temperatures, speeds, wall counts) on the wrong part of the model.
+        //
+        // Instead: build the schedule for the FULL object in this segment's build frame, then crop
+        // and rebase it. Layer boundaries and height-range transitions are therefore inherited from
+        // the object's real schedule rather than regenerated.
+        SlicingParameters full_params = m_slicing_params;
+        // slice_z_base(), not build_z_min: the crop is rebased to the segment's own zero to match
+        // the slice frame, and for a sunk ROOT that zero is the build plate, not the material's
+        // lowest point (see CutSegmentDescriptor::slice_z_base).
+        const coordf_t seg_lo = m_segment->slice_z_base();
+        const coordf_t seg_hi = m_segment->build_z_max;
+        // Full object extent along the same build axis. R maps the build normal onto +Z, so this
+        // is the same projection build_z_min/max were measured with.
+        Transform3d rot = Transform3d::Identity();
+        {
+            double b_deg = 0., c_deg = 0.;
+            this->effective_layer_rotation_bc(b_deg, c_deg);
+            rot.linear() = Geometry::layer_rotation_matrix(b_deg, c_deg);
+        }
+        // raw_mesh(), NOT mesh(): mesh() bakes in the INSTANCE transform (and merges every
+        // instance), so transforming it again by m_trafo applies the instance twice and measures
+        // this extent in a different frame than CutSegmentDescriptor::build_z_min/max, which
+        // derive_cut_segments takes from model-part volumes under their volume matrices and the
+        // same m_trafo (PrintApply.cpp:184, with XY already zeroed at :166). The two agree only
+        // when the build normal is +Z and the instance sits at z=0 -- i.e. exactly the
+        // axis-aligned cases -- and diverge by n . d for a tilted segment, which shifts the crop
+        // window off the schedule and can leave the segment with no layers at all.
+        const BoundingBoxf3 full_bb  = this->model_object()->raw_mesh().transformed_bounding_box(rot * m_trafo);
+        const coordf_t      full_lo  = full_bb.min.z();
+        full_params.object_print_z_min = 0.;
+        full_params.object_print_z_max = full_bb.max.z() - full_lo;
+        full_params.object_print_z_uncompensated_max = full_params.object_print_z_max;
+
+        this->update_layer_height_profile(*this->model_object(), full_params, layer_height_profile);
+        const std::vector<coordf_t> full_layers =
+            generate_object_layers(full_params, layer_height_profile, m_config.precise_z_height.value);
+
+        // Keep the (lo, hi) pairs that overlap this segment, then rebase so the first retained
+        // boundary sits at the segment's own zero -- matching the slice-frame rebase.
+        const coordf_t lo_in_schedule = seg_lo - full_lo;
+        const coordf_t hi_in_schedule = seg_hi - full_lo;
+        coordf_t       base           = 0.;
+        bool           have_base      = false;
+        for (size_t i = 0; i + 1 < full_layers.size(); i += 2) {
+            const coordf_t lo = full_layers[i], hi = full_layers[i + 1];
+            if (hi <= lo_in_schedule + EPSILON || lo >= hi_in_schedule - EPSILON)
+                continue;   // entirely below or above this segment
+            if (! have_base) { base = lo; have_base = true; m_segment_schedule_base = base; }
+            object_layers.push_back(lo - base);
+            object_layers.push_back(hi - base);
+        }
+        BOOST_LOG_TRIVIAL(info) << "segment " << this->segment_index() << ": cropped "
+                                << (full_layers.size() / 2) << " object layers to "
+                                << (object_layers.size() / 2) << " over ["
+                                << lo_in_schedule << ", " << hi_in_schedule << "]"
+                                << " seg_lo=" << seg_lo << " seg_hi=" << seg_hi
+                                << " full_lo=" << full_lo << " full_hi=" << full_bb.max.z()
+                                << " full_layers_max=" << (full_layers.empty() ? -1. : full_layers.back());
+    } else {
+        this->update_layer_height_profile(*this->model_object(), m_slicing_params, layer_height_profile); //ok so this line of code would need to be replaced. All it does is update layer height profile
+        object_layers = generate_object_layers(m_slicing_params, layer_height_profile, m_config.precise_z_height.value);
+    }
     m_print->throw_if_canceled();
     m_typed_slices = false;
     this->clear_layers();
-    m_layers = new_layers(this, generate_object_layers(m_slicing_params, layer_height_profile, m_config.precise_z_height.value));
-    this->slice_volumes();
+
+
+    //lots of important things in here too
+    m_layers = new_layers(this, object_layers);
+
+    
+    //m_slicing_params.object_print_z_min = old_min;
+    //m_slicing_params.object_print_z_max = old_max;
+    this->slice_volumes(); 
     m_print->throw_if_canceled();
     int firstLayerReplacedBy = 0;
 
@@ -870,11 +1159,14 @@ void PrintObject::slice()
                 layer.backup_untyped_slices();
             }
         });
-    if (m_layers.empty())
+    // A declarative plane may create a geometrically valid sliver thinner than the first
+    // printable layer. It contributes no toolpaths; keep it as an empty segment so the remaining
+    // partition can finish normally. Ordinary empty objects still indicate broken input.
+    if (m_layers.empty() && ! this->is_segment())
         throw Slic3r::SlicingError(L("No layers were detected. You might want to repair your STL file(s) or check their size or thickness and retry.\n"));
-
-    // BBS
+    
     this->set_done(posSlice);
+    //m_model_object->rotate(-0.1, Y);
 }
 
 template<typename ThrowOnCancel>
@@ -1160,7 +1452,7 @@ void PrintObject::slice_volumes()
     const auto   throw_on_cancel_callback   = std::function<void()>([print](){ print->throw_if_canceled(); });
 
     // Clear old LayerRegions, allocate for new PrintRegions.
-    for (Layer* layer : m_layers) {
+    for (Layer* layer : m_layers) { //m_layers is global
         //BBS: should delete all LayerRegionPtr to avoid memory leak
         while (!layer->m_regions.empty()) {
             if (layer->m_regions.back())
@@ -1169,15 +1461,95 @@ void PrintObject::slice_volumes()
         }
         layer->m_regions.reserve(m_shared_regions->all_regions.size());
         for (const std::unique_ptr<PrintRegion> &pr : m_shared_regions->all_regions)
-            layer->m_regions.emplace_back(new LayerRegion(layer, pr.get()));
+            layer->m_regions.emplace_back(new LayerRegion(layer, pr.get())); //this creates a "layer region"
     }
 
     std::vector<float>                   slice_zs      = zs_from_layers(m_layers);
     std::vector<VolumeSlices> objSliceByVolume;
     if (!slice_zs.empty()) {
+
+       
+        //what needs to be done is the object needs to be rotated in place temporarily
+        // then the bounding box needs to be found to get the amount above or below the build plate when rotated
+        // this is then used to find an offset to the rotation that allows the object to always have a first layer. Top bounds can be defined later
+        // but we arent doing this since an easier method is probably to set min and max Z
+        //float height_offset = this->model_object()->bounding_box_exact().transformed(m_post_trafo).min.z();
+
+
+
+
+        //need this to deal with offcenter origins. It has been tested at various xy but not z
+        // The authoritative slice frame (see PrintObject::object_to_slice()). It is post_trafo
+        // pre-translated to center the object in XY, exactly like trafo_centered() and contour_z():
+        // slice_volumes_inner must receive centered coordinates, because set_instances() adds
+        // +m_center_offset to each instance's shift and G-code set_origin(shift) relies on the
+        // slices being centered by -m_center_offset. Without it, a part whose rotated bounding-box
+        // center is offset from its origin (e.g. after using the rotate tool) is placed off by
+        // +m_center_offset between Prepare and Slice. Taken from the shared member rather than
+        // rebuilt here so cascade geometry and the slicer cannot drift apart.
+        const Transform3d &newTrafo = m_object_to_slice;
+
         objSliceByVolume = slice_volumes_inner(
-            print->config(), this->config(), this->trafo_centered(),
+            print->config(), this->config(), newTrafo,
             this->model_object()->volumes, m_shared_regions->layer_ranges, slice_zs, throw_on_cancel_callback);
+
+        // Declarative cut planes: confine this PrintObject's slices to its segment. Clipping a
+        // solid by half-spaces and then slicing at z is identical to slicing the full solid and
+        // intersecting each layer with the planes' 2D half-plane traces, so the mesh is never cut.
+        // All volume slices (parts, negatives, modifiers) are clipped uniformly BEFORE
+        // firstLayerObjSliceByVolume is copied, so brim/region/paint logic downstream sees
+        // segment-confined geometry with no further changes.
+        //
+        // Part build directions: a segment owns either exactly one directed part or all the
+        // undirected ones (segment_includes_volume). The volume list is shared by every segment of
+        // the object, so the parts outside this segment were sliced too; they simply keep no
+        // material here. Negative volumes and modifiers stay in every segment.
+        if (this->is_segment()) {
+            for (VolumeSlices &vs : objSliceByVolume) {
+                const ModelVolume *mv = nullptr;
+                for (const ModelVolume *candidate : this->model_object()->volumes)
+                    if (candidate->id() == vs.volume_id) {
+                        mv = candidate;
+                        break;
+                    }
+                if (mv != nullptr && ! segment_includes_volume(&*m_segment, *mv))
+                    for (ExPolygons &expolys : vs.slices)
+                        expolys.clear();
+            }
+        }
+        if (this->is_segment() && ! m_segment->clips.empty()) {
+            // Clips are object-local; map them into the sliced frame q = A p + t (A = linear part
+            // of newTrafo): n_s = A^-T n, d_s = d + n_s . t.
+            struct SlicedClip { Vec3d n; double d; };
+            std::vector<SlicedClip> sliced_clips;
+            sliced_clips.reserve(m_segment->clips.size());
+            const Eigen::Matrix3d a_inv_t = newTrafo.linear().inverse().transpose();
+            for (const CutSegmentClip &clip : m_segment->clips) {
+                const Vec3d n_s = a_inv_t * clip.normal;
+                sliced_clips.push_back({ n_s, clip.offset + n_s.dot(newTrafo.translation()) });
+            }
+            for (VolumeSlices &vs : objSliceByVolume)
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, vs.slices.size()),
+                    [&vs, &sliced_clips, &slice_zs](const tbb::blocked_range<size_t> &range) {
+                        for (size_t i = range.begin(); i < range.end(); ++ i) {
+                            ExPolygons &expolys = vs.slices[i];
+                            const double z = double(slice_zs[i]);
+                            for (const SlicedClip &clip : sliced_clips) {
+                                if (expolys.empty())
+                                    break;
+                                const Vec2d ab(clip.n.x(), clip.n.y());
+                                const double c = clip.d - clip.n.z() * z;
+                                if (ab.norm() < 1e-9 * clip.n.norm()) {
+                                    // Horizontal plane in the sliced frame: this layer is wholly
+                                    // kept or wholly dropped.
+                                    if (c < 0.)
+                                        expolys.clear();
+                                } else
+                                    expolys = clip_expolygons_by_half_plane(std::move(expolys), ab, c, get_extents(expolys));
+                            }
+                        }
+                    });
+        }
     }
 
     //BBS: "model_part" volumes are grouded according to their connections
@@ -1208,6 +1580,22 @@ void PrintObject::slice_volumes()
     }
     if (! m_layers.empty())
         m_layers.back()->upper_layer = nullptr;
+
+    // A segment that sliced to nothing is an anomaly, not a normal outcome: its descriptor claims
+    // material over a range the slicer then found empty. Downstream code (brim preparation, the
+    // support generators) assumes at least one layer, so say so loudly rather than letting it
+    // surface as a crash somewhere else.
+    if (this->is_segment() && m_layers.empty())
+        BOOST_LOG_TRIVIAL(warning) << "cut planes: segment " << this->segment_index()
+                                   << " sliced to ZERO layers over build range ["
+                                   << m_segment->build_z_min << ", " << m_segment->build_z_max
+                                   << "], base-plane gap " << m_segment->base_plane_distance_below_material;
+
+    // Declarative cut planes: segments now slice over their OWN extent (the slice frame is rebased
+    // so the segment's minimum lands at z=0, see update_slice_frame), so the run of empty leading
+    // layers this used to strip should no longer exist. A remaining one means the rebase and the
+    // clipped geometry disagree -- surface it rather than papering over it.
+    assert(! this->is_segment() || m_layers.empty() || ! m_layers.front()->empty());
     m_print->throw_if_canceled();
 
     this->apply_conical_overhang();
@@ -1256,8 +1644,9 @@ void PrintObject::slice_volumes()
         const size_t num_extruders = print->config().filament_diameter.size();
         const auto   xy_hole_scaled = (num_extruders > 1 && this->is_mm_painted()) ? scaled<float>(0.f) : scaled<float>(m_config.xy_hole_compensation.value);
         const auto   xy_contour_scaled            = (num_extruders > 1 && this->is_mm_painted()) ? scaled<float>(0.f) : scaled<float>(m_config.xy_contour_compensation.value);
-        const float  elephant_foot_compensation_scaled = (m_config.raft_layers == 0) ?
+        const float  elephant_foot_compensation_scaled = (m_config.raft_layers == 0 && this->is_root_segment()) ?
         	// Only enable Elephant foot compensation if printing directly on the print bed.
+            // (A non-root cut-plane segment rests on the segment below it, never on the bed.)
             float(scale_(m_config.elefant_foot_compensation.value)) :
         	0.f;
         // Uncompensated slices for the layers in case the Elephant foot compensation is applied.
@@ -1320,7 +1709,7 @@ void PrintObject::slice_volumes()
                         ExPolygons merged_poly_for_holes_growing;
                         if (max_growth > 0) {
                             //BBS: merge polygons because region can cut "holes".
-                            //Then, cut them to give them again later to their region
+                            //Then, cut them to give them again to their region
                             merged_poly_for_holes_growing = layer->merged(float(SCALED_EPSILON));
                             merged_poly_for_holes_growing = _shrink_contour_holes(std::max(0.f, xy_contour_scaled),
                                                                                   std::max(0.f, xy_hole_scaled),
@@ -1333,6 +1722,8 @@ void PrintObject::slice_volumes()
                                 if (max_growth > 0.f) {
                                     slices = intersection_ex(offset_ex(slices, max_growth), merged_poly_for_holes_growing);
                                 }
+                                
+
 
                                 //BBS: Trim by the slices of already processed regions.
                                 if (region_id > 0)
@@ -1370,6 +1761,7 @@ void PrintObject::slice_volumes()
 	                }
 	                // Merge all regions' slices to get islands, chain them by a shortest path.
 	                layer->make_slices();
+
 	            }
 	        });
 	    if (elephant_foot_compensation_scaled > 0.f && ! m_layers.empty()) {
@@ -1459,7 +1851,7 @@ void PrintObject::apply_conical_overhang() {
         if (scaled_max_hole_area > 0.0) {
 
             // Now go through all the holes in the current layer and check if they intersect anything in the layer above
-            // If not, then they're the top of a hole and should be cut from the layer above before the union
+            // If not, then they're the top of a hole and should be cut from the layer above
             for (auto layer_polygon : current_poly) {
                 for (auto hole : layer_polygon.holes) {
                     if (std::abs(hole.area()) < scaled_max_hole_area) {

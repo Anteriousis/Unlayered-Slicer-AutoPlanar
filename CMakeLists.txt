@@ -66,7 +66,7 @@ if (POLICY CMP0092)
     cmake_policy(SET CMP0092 NEW)
 endif ()
 
-project(OrcaSlicer)
+project(UnlayeredSlicer)
 
 # Backward compatibility for old CMake versions
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_VERSION VERSION_LESS "3.25")
@@ -81,8 +81,8 @@ set(SLIC3R_RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
 file(TO_NATIVE_PATH "${SLIC3R_RESOURCES_DIR}" SLIC3R_RESOURCES_DIR_WIN)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-  message(STATUS "No build type selected, default to Release")
-  set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type (default Release)" FORCE)
+    message(STATUS "No build type selected, default to Release")
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type (default Release)" FORCE)
 endif()
 
 if (DEFINED BBL_RELEASE_TO_PUBLIC)
@@ -101,12 +101,12 @@ else()
     set(SLIC3R_STATIC_INITIAL 1)
 endif()
 
-option(SLIC3R_STATIC            "Compile OrcaSlicer with static libraries (Boost, TBB)" ${SLIC3R_STATIC_INITIAL})
-option(SLIC3R_GUI               "Compile OrcaSlicer with GUI components (OpenGL, wxWidgets)" 1)
-option(SLIC3R_FHS               "Assume OrcaSlicer is to be installed in a FHS directory structure" 0)
-option(SLIC3R_PROFILE           "Compile OrcaSlicer with an invasive Shiny profiler" 0)
+option(SLIC3R_STATIC            "Compile Unlayered Slicer with static libraries (Boost, TBB)" ${SLIC3R_STATIC_INITIAL})
+option(SLIC3R_GUI               "Compile Unlayered Slicer with GUI components (OpenGL, wxWidgets)" 1)
+option(SLIC3R_FHS               "Assume Unlayered Slicer is to be installed in a FHS directory structure" 0)
+option(SLIC3R_PROFILE           "Compile Unlayered Slicer with an invasive Shiny profiler" 0)
 option(SLIC3R_PCH               "Use precompiled headers" 1)
-option(SLIC3R_WARNINGS          "Emit compiler warnings for OrcaSlicer sources" 1)
+option(SLIC3R_WARNINGS          "Emit compiler warnings for Unlayered Slicer sources" 1)
 option(SLIC3R_BUNDLED_WARNINGS  "Emit compiler warnings for bundled third-party sources" 0)
 option(SLIC3R_MSVC_COMPILE_PARALLEL "Compile on Visual Studio in parallel" 1)
 option(SLIC3R_MSVC_PDB          "Generate PDB files on MSVC in Release mode" 1)
@@ -258,7 +258,7 @@ endif ()
 if (APPLE)
     list(LENGTH CMAKE_OSX_ARCHITECTURES _arch_len)
     if (_arch_len GREATER 1)
-        message(FATAL_ERROR "OrcaSlicer only supports building for one architecture at a time. Please make sure only one architecture is specified in CMAKE_OSX_ARCHITECTURES")
+        message(FATAL_ERROR "Unlayered Slicer only supports building for one architecture at a time. Please make sure only one architecture is specified in CMAKE_OSX_ARCHITECTURES")
     endif ()
     set(CMAKE_FIND_FRAMEWORK LAST)
     set(CMAKE_FIND_APPBUNDLE LAST)
@@ -269,7 +269,7 @@ if (APPLE)
     if (CMAKE_MACOSX_BUNDLE)
         set(CMAKE_INSTALL_RPATH @executable_path/../Frameworks)
     endif()
-    SET(CMAKE_XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.orcaslicer.OrcaSlicer")
+    SET(CMAKE_XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.unlayered3d.UnlayeredSlicer")
 
     message(STATUS "Orca: IS_CROSS_COMPILE: ${IS_CROSS_COMPILE}")
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -310,7 +310,7 @@ endif ()
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     message(STATUS "Automatically setting CMAKE_INSTALL_PREFIX")
-    set_property(CACHE CMAKE_INSTALL_PREFIX PROPERTY VALUE "${CMAKE_BINARY_DIR}/OrcaSlicer")
+    set_property(CACHE CMAKE_INSTALL_PREFIX PROPERTY VALUE "${CMAKE_BINARY_DIR}/UnlayeredSlicer")
 endif()
 
 message(STATUS "CMAKE_INSTALL_PREFIX: ${CMAKE_INSTALL_PREFIX}")
@@ -397,7 +397,7 @@ if (MINGW)
 endif ()
 
 if (NOT MSVC)
-    # ARMs (Raspberry PI) use an unsigned char by default. Let's make it consistent for OrcaSlicer on all platforms.
+    # ARMs (Raspberry PI) use an unsigned char by default. Let's make it consistent for Unlayered Slicer on all platforms.
     add_compile_options(-fsigned-char)
 endif ()
 
@@ -646,9 +646,9 @@ if (APPLE)
 endif ()
 
 if(MSVC)
-# Ignore truncating casts in initializers & constructors
-# https://learn.microsoft.com/en-us/cpp/error-messages/compiler-warnings/compiler-warning-level-1-c4305
-add_compile_options(/wd4305)
+    # Ignore truncating casts in initializers & constructors
+    # https://learn.microsoft.com/en-us/cpp/error-messages/compiler-warnings/compiler-warning-level-1-c4305
+    add_compile_options(/wd4305)
 endif()
 
 # Where all the bundled libraries reside?
@@ -669,7 +669,7 @@ if(WIN32)
     if(MSVC)
         # BOOST_ALL_NO_LIB: Avoid the automatic linking of Boost libraries on Windows. Rather rely on explicit linking.
         add_definitions(-DBOOST_ALL_NO_LIB -DBOOST_USE_WINAPI_VERSION=0x602 -DBOOST_SYSTEM_USE_UTF8 )
-        # Force the source code encoding to UTF-8. See OrcaSlicer GH pull request #5583
+        # Force the source code encoding to UTF-8. See upstream OrcaSlicer GH pull request #5583
         add_compile_options("$<$<C_COMPILER_ID:MSVC>:/utf-8>")
         add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
     endif(MSVC)
@@ -681,7 +681,7 @@ add_definitions(-DwxUSE_UNICODE -D_UNICODE -DUNICODE -DWXINTL_NO_GETTEXT_MACRO)
 add_definitions(-DwxNO_UNSAFE_WXSTRING_CONV)
 
 if (SLIC3R_PROFILE)
-    message("OrcaSlicer will be built with a Shiny invasive profiler")
+    message("Unlayered Slicer will be built with a Shiny invasive profiler")
     add_definitions(-DSLIC3R_PROFILE)
 endif ()
 
@@ -733,7 +733,7 @@ endif()
 # boost::process was introduced first in version 1.64.0,
 # boost::beast::detail::base64 was introduced first in version 1.66.0
 if(POLICY CMP0167)
-  cmake_policy(SET CMP0167 NEW)
+    cmake_policy(SET CMP0167 NEW)
 endif()
 set(Boost_NO_SYSTEM_PATHS TRUE)
 find_package(Boost 1.83.0 REQUIRED COMPONENTS system filesystem thread log log_setup locale regex chrono atomic date_time iostreams program_options nowide)
@@ -867,7 +867,7 @@ set(BBL_L18N_DIR "${CMAKE_CURRENT_SOURCE_DIR}/localization/i18n")
 add_custom_target(gettext_make_pot
     COMMAND xgettext --keyword=L --keyword=_L --keyword=_u8L --keyword=L_CONTEXT:1,2c --keyword=_L_CONTEXT:1,2c --keyword=_u8L_CONTEXT:1,2c --keyword=_L_PLURAL:1,2 --add-comments=TRN --from-code=UTF-8 --no-location --debug --boost
         -f "${BBL_L18N_DIR}/list.txt"
-        -o "${BBL_L18N_DIR}/OrcaSlicer.pot"
+        -o "${BBL_L18N_DIR}/UnlayeredSlicer.pot"
     COMMAND hintsToPot ${SLIC3R_RESOURCES_DIR} ${BBL_L18N_DIR}
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     COMMENT "Generate pot file from strings in the source tree"
@@ -876,24 +876,24 @@ add_custom_target(gettext_merge_po_with_pot
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     COMMENT "Merge localization po with new generated pot file"
 )
-file(GLOB BBL_L10N_PO_FILES "${BBL_L18N_DIR}/*/OrcaSlicer*.po")
+file(GLOB BBL_L10N_PO_FILES "${BBL_L18N_DIR}/*/UnlayeredSlicer*.po")
 foreach(po_file ${BBL_L10N_PO_FILES})
     GET_FILENAME_COMPONENT(po_dir "${po_file}" DIRECTORY)
-    SET(po_new_file "${po_dir}/OrcaSlicer_.po")
+    SET(po_new_file "${po_dir}/UnlayeredSlicer_.po")
     add_custom_command(
         TARGET gettext_merge_po_with_pot PRE_BUILD
-        COMMAND msgmerge -N -o ${po_file} ${po_file} "${BBL_L18N_DIR}/OrcaSlicer.pot"
+        COMMAND msgmerge -N -o ${po_file} ${po_file} "${BBL_L18N_DIR}/UnlayeredSlicer.pot"
     )
 endforeach()
 add_custom_target(gettext_po_to_mo
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     COMMENT "Generate localization po files (binary) from mo files (texts)"
 )
-file(GLOB L10N_PO_FILES "${BBL_L18N_DIR}/*/OrcaSlicer*.po")
+file(GLOB L10N_PO_FILES "${BBL_L18N_DIR}/*/UnlayeredSlicer*.po")
 foreach(po_file ${BBL_L10N_PO_FILES})
     GET_FILENAME_COMPONENT(SECOND_FOLDER_ABSOLUTE ${po_file} DIRECTORY)
     string(REGEX REPLACE ".*/(.*)" "\\1" po_dir "${SECOND_FOLDER_ABSOLUTE}" )
-    SET(mo_file "${L10N_DIR}/${po_dir}/OrcaSlicer.mo")
+    SET(mo_file "${L10N_DIR}/${po_dir}/UnlayeredSlicer.mo")
     add_custom_command(
         TARGET gettext_po_to_mo PRE_BUILD
         COMMAND msgfmt ARGS --check-format -o ${mo_file} ${po_file}
@@ -1013,7 +1013,7 @@ else()
 endif()
 
 set(TOP_LEVEL_PROJECT_DIR ${PROJECT_SOURCE_DIR})
-function(orcaslicer_copy_dlls target config postfix output_dlls)
+function(unlayered_copy_dlls target config postfix output_dlls)
     if ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "AMD64")
         set(_arch "x64")
     elseif ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "X86")
@@ -1041,6 +1041,14 @@ function(orcaslicer_copy_dlls target config postfix output_dlls)
     file(COPY ${TOP_LEVEL_PROJECT_DIR}/deps/GMP/gmp/lib/win-${_arch}/libgmp-10.dll
             ${TOP_LEVEL_PROJECT_DIR}/deps/MPFR/mpfr/lib/win-${_arch}/libmpfr-4.dll
             ${TOP_LEVEL_PROJECT_DIR}/deps/WebView2/lib/win-${_arch}/WebView2Loader.dll
+        DESTINATION ${_out_dir})
+
+    # OpenSSL 3 runtime DLLs are statically imported by UnlayeredSlicer.dll. They come from the system
+    # OpenSSL found by find_package(OpenSSL) (only on the dev PATH), so they must be copied and shipped
+    # or the app fails to load on a clean machine. Derive the bin dir from the found include dir.
+    get_filename_component(_openssl_bin_dir "${OPENSSL_INCLUDE_DIR}/../bin" ABSOLUTE)
+    file(COPY ${_openssl_bin_dir}/libcrypto-3-x64.dll
+            ${_openssl_bin_dir}/libssl-3-x64.dll
         DESTINATION ${_out_dir})
 
     file(COPY ${CMAKE_PREFIX_PATH}/bin/occt/TKBO.dll
@@ -1081,6 +1089,9 @@ function(orcaslicer_copy_dlls target config postfix output_dlls)
         ${_out_dir}/libmpfr-4.dll
         ${_out_dir}/WebView2Loader.dll
 
+        ${_out_dir}/libcrypto-3-x64.dll
+        ${_out_dir}/libssl-3-x64.dll
+
         ${_out_dir}/TKBO.dll
         ${_out_dir}/TKBRep.dll
         ${_out_dir}/TKCAF.dll
@@ -1118,7 +1129,7 @@ function(orcaslicer_copy_dlls target config postfix output_dlls)
 
 endfunction()
 
-function(orcaslicer_copy_sos target config postfix output_sos)
+function(unlayered_copy_sos target config postfix output_sos)
 
     get_property(_is_multi GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
     get_target_property(_alt_out_dir ${target} RUNTIME_OUTPUT_DIRECTORY)
@@ -1166,10 +1177,10 @@ endfunction()
 # (= -Weverything) under clang-cl. Target options are applied after the ones a target
 # set on itself, so these win. Targets are discovered rather than listed so a newly
 # bundled library needs no maintenance here.
-function(orcaslicer_silence_third_party_warnings _dir)
+function(unlayered_silence_third_party_warnings _dir)
     get_property(_subdirs DIRECTORY "${_dir}" PROPERTY SUBDIRECTORIES)
     foreach (_subdir IN LISTS _subdirs)
-        orcaslicer_silence_third_party_warnings("${_subdir}")
+        unlayered_silence_third_party_warnings("${_subdir}")
     endforeach ()
     get_property(_targets DIRECTORY "${_dir}" PROPERTY BUILDSYSTEM_TARGETS)
     foreach (_target IN LISTS _targets)
@@ -1195,11 +1206,11 @@ function(orcaslicer_silence_third_party_warnings _dir)
 endfunction()
 
 
-# libslic3r, OrcaSlicer GUI and the OrcaSlicer executable.
+# libslic3r, the Unlayered Slicer GUI and the Unlayered Slicer executable.
 add_subdirectory(deps_src)
 
 if (NOT SLIC3R_BUNDLED_WARNINGS)
-    orcaslicer_silence_third_party_warnings("${CMAKE_CURRENT_SOURCE_DIR}/deps_src")
+    unlayered_silence_third_party_warnings("${CMAKE_CURRENT_SOURCE_DIR}/deps_src")
 endif ()
 
 # Warning level for the targets added below: our sources, plus glad and libvgcode,
@@ -1214,7 +1225,7 @@ elseif (MSVC AND NOT IS_CLANG_CL)
 endif ()
 
 add_subdirectory(src)
-set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT OrcaSlicer_app_gui)
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT UnlayeredSlicer_app_gui)
 
 add_dependencies(gettext_make_pot hintsToPot)
 
@@ -1226,18 +1237,33 @@ if(BUILD_TESTS)
     add_subdirectory(tests)
     if (NOT SLIC3R_BUNDLED_WARNINGS)
         # Catch2 is vendored under tests/ and sets its own warning flags too.
-        orcaslicer_silence_third_party_warnings("${CMAKE_CURRENT_SOURCE_DIR}/tests/catch2")
+        unlayered_silence_third_party_warnings("${CMAKE_CURRENT_SOURCE_DIR}/tests/catch2")
     endif ()
 endif()
 
 if (NOT WIN32 AND NOT APPLE)
-    set(SLIC3R_APP_CMD "orca-slicer")
+    set(SLIC3R_APP_CMD "unlayered-slicer")
     configure_file(${LIBDIR}/dev-utils/platform/unix/build_appimage.sh.in ${CMAKE_CURRENT_BINARY_DIR}/build_appimage.sh USE_SOURCE_PERMISSIONS @ONLY)
 endif()
 
 # Resources install target, configure fhs.hpp on UNIX
+# webapp-example is the reference page that exercises every WebAppBridge method (see
+# WEB_APP_BRIDGE.md). It is a developer harness, not product: it has no entry point in the
+# application and is only ever opened by hand, so it is kept out of the shipped resources.
+# Resources that must not reach a customer install. webapp-example is a developer harness with no
+# entry point. The seed files are a development overlay only -- the shipped defaults live in
+# WebAppSlot, so a customer install has nothing to read and the files would only describe switches
+# that are not there. tab_webapp_active.svg belongs to the generic Web application tab, which does
+# not ship. The Agent and Universe icons DO ship: those two tabs are features of this edition.
+set(SLIC3R_RESOURCES_EXCLUDE
+    PATTERN "web/webapp-example" EXCLUDE
+    PATTERN "web/webapp/agent.json" EXCLUDE
+    PATTERN "web/webapp/universe.json" EXCLUDE
+    PATTERN "web/webapp/default.json" EXCLUDE
+    PATTERN "images/tab_webapp_active.svg" EXCLUDE)
+
 if (WIN32)
-    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "./resources")
+    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "./resources" ${SLIC3R_RESOURCES_EXCLUDE})
     if(ORCA_BUNDLED_UV_EXECUTABLE)
         install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "./resources/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
     endif()
@@ -1246,27 +1272,27 @@ if (WIN32)
     install (PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION ".")
 elseif (SLIC3R_FHS)
     # CMAKE_INSTALL_FULL_DATAROOTDIR: read-only architecture-independent data root (share)
-    set(SLIC3R_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/OrcaSlicer")
+    set(SLIC3R_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/UnlayeredSlicer")
     install(DIRECTORY ${SLIC3R_RESOURCES_DIR}/ DESTINATION ${SLIC3R_FHS_RESOURCES}
         PATTERN "*/udev" EXCLUDE
     )
     if(ORCA_BUNDLED_UV_EXECUTABLE)
         install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "${SLIC3R_FHS_RESOURCES}/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
     endif()
-    install(FILES src/dev-utils/platform/unix/com.orcaslicer.OrcaSlicer.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
+    install(FILES src/dev-utils/platform/unix/com.unlayered3d.UnlayeredSlicer.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
     foreach(SIZE 32 128 192)
-        install(FILES ${SLIC3R_RESOURCES_DIR}/images/OrcaSlicer_${SIZE}px.png
-            DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${SIZE}x${SIZE}/apps RENAME OrcaSlicer.png
+        install(FILES ${SLIC3R_RESOURCES_DIR}/images/UnlayeredSlicer_${SIZE}px.png
+            DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${SIZE}x${SIZE}/apps RENAME UnlayeredSlicer.png
         )
     endforeach()
 elseif (CMAKE_MACOSX_BUNDLE)
-    # install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/OrcaSlicer.app/Contents/resources")
+    # install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/UnlayeredSlicer.app/Contents/resources")
     if(ORCA_BUNDLED_UV_EXECUTABLE)
-        install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "${CMAKE_INSTALL_PREFIX}/OrcaSlicer.app/Contents/Resources/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
+        install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "${CMAKE_INSTALL_PREFIX}/UnlayeredSlicer.app/Contents/Resources/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
     endif()
 else ()
-    install(FILES src/dev-utils/platform/unix/com.orcaslicer.OrcaSlicer.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
-    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
+    install(FILES src/dev-utils/platform/unix/com.unlayered3d.UnlayeredSlicer.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
+    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources" ${SLIC3R_RESOURCES_EXCLUDE})
     if(ORCA_BUNDLED_UV_EXECUTABLE)
         install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
     endif()
@@ -1289,15 +1315,15 @@ endif ()
 install(FILES ${CMAKE_SOURCE_DIR}/LICENSE.txt DESTINATION ".")
 configure_file(${LIBDIR}/dev-utils/platform/unix/fhs.hpp.in ${LIBDIR_BIN}/dev-utils/platform/unix/fhs.hpp)
 
-set (CPACK_PACKAGE_NAME "OrcaSlicer")
-set (CPACK_PACKAGE_VENDOR "SoftFever")
+set (CPACK_PACKAGE_NAME "Unlayered Slicer")
+set (CPACK_PACKAGE_VENDOR "Unlayered 3D")
 set (CPACK_PACKAGE_VERSION_MAJOR "${ORCA_VERSION_MAJOR}")
 set (CPACK_PACKAGE_VERSION_MINOR "${ORCA_VERSION_MINOR}")
 set (CPACK_PACKAGE_VERSION_PATCH "${ORCA_VERSION_PATCH}")
-set (CPACK_PACKAGE_FILE_NAME "OrcaSlicer_Windows_Installer_V${SoftFever_VERSION}")
+set (CPACK_PACKAGE_FILE_NAME "Unlayered_Slicer_Windows_Installer_V${UNLAYERED_VERSION}")
 # Suffix the Windows installer with its target arch so the x64 and arm64 builds
-# produce distinct filenames (matches ARCH_SUFFIX in build_orca.yml). Same
-# CMAKE_SYSTEM_PROCESSOR mapping used by orcaslicer_copy_dlls() above.
+# produce distinct filenames (matches ARCH_SUFFIX in build_slicer.yml). Same
+# CMAKE_SYSTEM_PROCESSOR mapping used by unlayered_copy_dlls() above.
 if (WIN32)
     if (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
         string (APPEND CPACK_PACKAGE_FILE_NAME "_arm64")
@@ -1305,21 +1331,63 @@ if (WIN32)
         string (APPEND CPACK_PACKAGE_FILE_NAME "_x64")
     endif ()
 endif ()
-set (CPACK_PACKAGE_DESCRIPTION_SUMMARY "Orca Slicer is an open source slicer for FDM printers")
-set (CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/OrcaSlicer/OrcaSlicer")
+set (CPACK_PACKAGE_DESCRIPTION_SUMMARY "Unlayered Slicer is an open source slicer for FDM printers")
+set (CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/Unlayered3D/Unlayered-Slicer")
 set (CPACK_PACKAGE_INSTALL_DIRECTORY ${CPACK_PACKAGE_NAME})
-set (CPACK_PACKAGE_ICON "${CMAKE_SOURCE_DIR}/resources/images\\\\OrcaSlicer.ico")
+set (CPACK_PACKAGE_ICON "${CMAKE_SOURCE_DIR}/resources/images\\\\UnlayeredSlicer.ico")
 set (CPACK_NSIS_MUI_ICON "${CPACK_PACKAGE_ICON}")
 set (CPACK_NSIS_MUI_UNIICON "${CPACK_PACKAGE_ICON}")
-set (CPACK_NSIS_INSTALLED_ICON_NAME  "$INSTDIR\\\\orca-slicer.exe")
+set (CPACK_NSIS_INSTALLED_ICON_NAME  "$INSTDIR\\\\unlayered-slicer.exe")
+set(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
+    CreateShortCut \\\"$DESKTOP\\\\UnlayeredSlicer.lnk\\\" \\\"$INSTDIR\\\\unlayered-slicer.exe\\\"
+")
 set (CPACK_PACKAGE_CHECKSUM SHA256)
-set (CPACK_PACKAGE_INSTALL_REGISTRY_KEY "OrcaSlicer")
+set (CPACK_PACKAGE_INSTALL_REGISTRY_KEY "Unlayered Slicer")
 set (CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
 set (CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
 # set (CPACK_NSIS_MODIFY_PATH "ON")
-set(CPACK_PACKAGE_EXECUTABLES "orca-slicer;OrcaSlicer")
-set(CPACK_CREATE_DESKTOP_LINKS "orca-slicer")
+set(CPACK_PACKAGE_EXECUTABLES "unlayered-slicer;Unlayered Slicer")
+set(CPACK_CREATE_DESKTOP_LINKS "unlayered-slicer")
 set (CPACK_RESOURCE_FILE_LICENSE ${CMAKE_SOURCE_DIR}/LICENSE.txt) # must also include in install command
+
+# --- Install scope: per-machine and per-user installers ----------------------
+#
+# cmake/modules/NSIS.template.in is a copy of CMake 3.31's stock NSIS template
+# with four values parameterised, so a single template builds both flavours.
+# It must sit FLAT in a directory on CMAKE_MODULE_PATH: CPack looks for
+# "NSIS.template.in" and only falls back to its built-in copy (which it keeps
+# under Internal/CPack/) when that is missing. Mirroring CMake's own
+# Internal/CPack/ layout looks tidier and silently does not work -- CPack uses
+# the builtin, ignores the parameterisation, and every installer comes out
+# per-machine with no warning of any kind.
+#
+# The DEFAULT installer is now per-user (%LOCALAPPDATA%\Programs, no UAC
+# prompt), because only a user-writable install location lets the slicer update
+# itself silently. The per-machine build, for shared workstations, is one flag:
+#
+#   cpack -G NSIS -C Release -D CPACK_INSTALL_SCOPE=machine
+#
+# The four values that flag switches -- execution level, registry hive, shell
+# var context and the JustMe install root -- are set ONLY in
+# cmake/CPackInstallScope.cmake, deliberately not here. Anything assigned with
+# set(CPACK_...) in this file is written into the generated CPackConfig.cmake
+# as an unconditional SET which wins over both `cpack -D` and the project
+# config file, so a variable set here can never be switched at package time.
+# The failure is silent: the package builds and is simply the wrong flavour.
+set(CPACK_PROJECT_CONFIG_FILE "${CMAKE_SOURCE_DIR}/cmake/CPackInstallScope.cmake")
+#
+# Why both exist: only a per-user install can replace its own files without a
+# UAC prompt, which is the prerequisite for the slicer updating itself silently
+# (see UPDATE_FEEDS.md). A per-machine install is still the right answer for
+# shared or centrally-managed workstations, and it always costs one prompt.
+#
+# The two can coexist on one machine. Each installer's uninstall-before-install
+# check reads its OWN registry root, so the per-user installer will not see, nor
+# remove, an existing per-machine install -- a user who has the old Program
+# Files build and runs the user installer ends up with both, each with its own
+# shortcuts. VS Code behaves the same way with its User and System setups.
+# Migrating existing installs cleanly needs a deliberate one-time step; it is
+# not handled here.
 
 set(CPACK_WIX_UPGRADE_GUID "058245e8-20e0-4a95-9ab7-1acfe17ad511")
 set(CPACK_GENERATOR NSIS)

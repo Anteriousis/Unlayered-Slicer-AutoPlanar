@@ -1,0 +1,9 @@
+#Content {
+	padding: 10px 15px 5px;
+}
+
+#TutorialArea {
+	margin-top: 24px;
+	display: flex;
+	justify-content: center;
+}

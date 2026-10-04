@@ -90,6 +90,9 @@ Polyline3 to_polyline(const Points3 &points);
 Points to_points(const Points3 &points);
 Points3   to_points3(const Points& points);
 
+//added by Alex Stedman
+using Rotation3d     = Eigen::RotationBase<double, 3>;
+
 // using ColorRGBA      = std::array<float, 4>;
 // I don't know why Eigen::Transform::Identity() return a const object...
 template<int N, class T> Transform<N, T> identity() { return Transform<N, T>::Identity(); }

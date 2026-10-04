@@ -102,7 +102,56 @@ optional<unsigned long> sysfs_tty_prop_hex(const std::string &tty_dev, const std
 	try { return std::stoul(*prop, 0, 16); }
 	catch (const std::exception&) { return boost::none; }
 }
+
 #endif
+
+#if _WIN32
+
+// Declared here rather than pulled in from <devpkey.h>: that header only declares the keys unless
+// INITGUID is defined before it, and defining INITGUID in a translation unit that already includes
+// half of Windows is a good way to collide with somebody else's GUID definitions.
+static const DEVPROPKEY kDevPkeyLocationPaths =
+	{ { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 37 };
+static const DEVPROPKEY kDevPkeyProblemCode =
+	{ { 0x4340a6c5, 0x93fa, 0x4706, { 0x97, 0x2c, 0x7b, 0x64, 0x80, 0x08, 0xa5, 0xa7 } }, 3 };
+
+// Fills in topology_key, usb_interface and problem_code.
+//
+// The location path looks like "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(6)#USBMI(0)". Everything up to
+// the "#USBMI(n)" is the physical socket and survives a firmware update; the USBMI part is the
+// interface of a composite device and does not. Keeping them apart is what lets a board be found
+// again after it reboots with a different product id and a different number of ports.
+static void read_device_location(HDEVINFO hDeviceInfo, SP_DEVINFO_DATA &devInfoData, SerialPortInfo &port_info)
+{
+	DEVPROPTYPE type = 0;
+	DWORD       reqSize = 0;
+
+	SetupDiGetDevicePropertyW(hDeviceInfo, &devInfoData, &kDevPkeyLocationPaths, &type, nullptr, 0, &reqSize, 0);
+	if (reqSize > 0) {
+		std::vector<BYTE> buf(reqSize);
+		if (SetupDiGetDevicePropertyW(hDeviceInfo, &devInfoData, &kDevPkeyLocationPaths, &type, buf.data(), reqSize, nullptr, 0)) {
+			// REG_MULTI_SZ; the first string is the one we want.
+			const std::string path = boost::nowide::narrow(reinterpret_cast<const wchar_t*>(buf.data()));
+			const size_t mi = path.rfind("#USBMI(");
+			if (mi != std::string::npos) {
+				port_info.topology_key = path.substr(0, mi);
+				try {
+					port_info.usb_interface = std::stoi(path.substr(mi + 7), nullptr, 16);
+				} catch (const std::exception&) {}
+			} else {
+				port_info.topology_key = path;
+			}
+		}
+	}
+
+	type = 0;
+	DWORD problem = 0;
+	if (SetupDiGetDevicePropertyW(hDeviceInfo, &devInfoData, &kDevPkeyProblemCode, &type,
+								  reinterpret_cast<BYTE*>(&problem), sizeof(problem), nullptr, 0))
+		port_info.problem_code = problem;
+}
+#endif
+
 
 std::vector<SerialPortInfo> scan_serial_ports_extended()
 {
@@ -144,8 +193,9 @@ std::vector<SerialPortInfo> scan_serial_ports_extended()
 			// Find the size required to hold the friendly name.
 			reqSize = 0;
 			SetupDiGetDeviceRegistryProperty(hDeviceInfo, &devInfoData, SPDRP_FRIENDLYNAME, nullptr, nullptr, 0, &reqSize);
-			std::vector<wchar_t> friendly_name;
-			friendly_name.reserve(reqSize > 1 ? reqSize : 1);
+			// Sized, not reserved: reserve() leaves size() at 0, so writing through data() below
+			// would be writing past the end of the vector. hardware_id above gets this right.
+			std::vector<wchar_t> friendly_name(reqSize > 1 ? reqSize : 1);
 			// Now store it in a buffer.
 			if (! SetupDiGetDeviceRegistryProperty(hDeviceInfo, &devInfoData, SPDRP_FRIENDLYNAME, nullptr, (BYTE*)friendly_name.data(), reqSize, nullptr)) {
 				port_info.friendly_name = port_info.port;
@@ -153,6 +203,7 @@ std::vector<SerialPortInfo> scan_serial_ports_extended()
 				port_info.friendly_name = boost::nowide::narrow(friendly_name.data());
 				port_info.is_printer = looks_like_printer(port_info.friendly_name);
 			}
+			read_device_location(hDeviceInfo, devInfoData, port_info);
 			output.emplace_back(std::move(port_info));
 		}
 	}
@@ -268,6 +319,24 @@ std::vector<std::string> scan_serial_ports()
 	output.reserve(ports.size());
 	for (const SerialPortInfo &spi : ports)
 		output.emplace_back(std::move(spi.port));
+	return output;
+}
+
+std::vector<SerialPortInfo> scan_duet_ports()
+{
+	std::vector<SerialPortInfo> output;
+	for (SerialPortInfo &spi : scan_serial_ports_extended())
+		if (spi.id_vendor == DUET_USB_VENDOR_ID)
+			output.emplace_back(std::move(spi));
+
+	// Healthy first, then the lower USB interface. A board on RRF 3.7 presents two CDC ports and
+	// both are full G-code channels, so the choice is only about picking a sensible default; a
+	// board whose driver failed to start is listed, but never picked.
+	std::stable_sort(output.begin(), output.end(), [](const SerialPortInfo &a, const SerialPortInfo &b) {
+		if ((a.problem_code == 0) != (b.problem_code == 0))
+			return a.problem_code == 0;
+		return a.usb_interface < b.usb_interface;
+	});
 	return output;
 }
 

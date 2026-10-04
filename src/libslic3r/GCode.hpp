@@ -202,7 +202,8 @@ public:
         m_layer(nullptr),
         m_object_layer_over_raft(false),
         //m_volumetric_speed(0),
-        m_last_pos_defined(false),
+        m_last_pos_defined(false), 
+        m_last_trafo(Transform3d::Identity()),
         m_last_extrusion_role(erNone),
         m_last_width(0.0f),
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
@@ -230,6 +231,12 @@ public:
     void            set_origin(const Vec2d &pointf);
     void            set_origin(const coordf_t x, const coordf_t y) { this->set_origin(Vec2d(x, y)); }
     Point           last_pos() const { return m_last_pos.to_point(); }
+    const Transform3d& last_trafo() const { return m_last_trafo; }
+    // UNLAYERED_MOD — true when the export may carry B/C rotary words: only when non-planar
+    // printing is enabled for this machine and virtual (3-axis) 5-axis output was not requested.
+    // Note this must NOT be `enable_nonplanar && virtual_5axis`: with the feature off there are no
+    // rotary axes at all, so B/C words would be invalid G-code on an ordinary 3-axis printer.
+    bool            emit_rotary_axes() const { return m_config.enable_nonplanar.value && ! m_config.virtual_5axis.value; }
     Vec2d           point_to_gcode(const Point &point) const;
     Vec3d                    point_to_gcode(const Point3& point) const;
     Point           gcode_to_point(const Vec2d &point) const;
@@ -257,7 +264,7 @@ public:
     void            set_layer_count(unsigned int value) { m_layer_count = value; }
     void            apply_print_config(const PrintConfig &print_config);
 
-    std::string     travel_to(const Point& point, ExtrusionRole role, std::string comment, double z = DBL_MAX);
+    std::string travel_to(const Point& point, ExtrusionRole role, std::string comment, double z = DBL_MAX, const Transform3d& trafo = Transform3d::Identity());
     bool            needs_retraction(const Polyline& travel, ExtrusionRole role, LiftType& lift_type);
     std::string     retract(bool toolchange = false, bool is_last_retraction = false, LiftType lift_type = LiftType::NormalLift, bool apply_instantly = false, ExtrusionRole role = erNone);
     // extra_retract forwards a PETG pre-extrusion over-extrusion; default 0 -> identical to the plain deretract.
@@ -416,10 +423,13 @@ private:
     void            set_last_pos(const Point &pos) { m_last_pos = Point3(pos, 0); m_last_pos_defined = true; }
     void            set_last_pos(const Point3 &pos) { m_last_pos = pos; m_last_pos_defined = true; }
     bool            last_pos_defined() const { return m_last_pos_defined; }
+
+    void            set_last_trafo(const Transform3d& trafo) { m_last_trafo = trafo; }
+
     void            set_extruders(const std::vector<unsigned int> &extruder_ids);
     std::string     preamble();
     // BBS
-    std::string     change_layer(coordf_t print_z);
+    std::string     change_layer(coordf_t print_z, const Transform3d &trafo = Transform3d::Identity());
     // Bedslinger model: derive the Y-axis acceleration limit from the machine force/bed-mass config
     // and the mass already printed. Yields the min machine Y acceleration when the A2L config keys are
     // unset (i.e. every existing printer), so it is inert for them.
@@ -430,16 +440,16 @@ private:
     std::string extrude_entity(const ExtrusionEntity&      entity,
                                const std::string&          description       = "",
                                double                      speed             = -1.,
-                               const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr());
+                               const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr(), const Transform3d& trafo = Transform3d::Identity());
     // Orca: pass the complete collection of region perimeters to the extrude loop to check whether the wipe before external loop
     // should be executed
     std::string extrude_loop(const ExtrusionLoop&        loop,
                              const std::string&          description,
                              double                      speed             = -1.,
                              const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr(),
-                             const Point*                start_point       = nullptr);
-    std::string extrude_multi_path(const ExtrusionMultiPath& multipath, const std::string& description = "", double speed = -1.);
-    std::string extrude_path(const ExtrusionPath& path, const std::string& description = "", double speed = -1.);
+                             const Point*                start_point       = nullptr, const Transform3d& trafo = Transform3d::Identity());
+    std::string extrude_multi_path(const ExtrusionMultiPath& multipath, const std::string& description = "", double speed = -1., const Transform3d& trafo = Transform3d::Identity());
+    std::string extrude_path(const ExtrusionPath& path, const std::string& description = "", double speed = -1., const Transform3d& trafo = Transform3d::Identity());
 
     // Orca: Adaptive PA variables
     // Used for adaptive PA when extruding paths with multiple, varying flow segments.
@@ -519,9 +529,13 @@ private:
 		// For sequential print, the instance of the object to be printing has to be defined.
 		const size_t                     				 single_object_instance_idx);
 
-    std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first);
-    std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing);
-    std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
+    std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first, const Transform3d &trafo = Transform3d::Identity());
+    std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing, const Transform3d &trafo = Transform3d::Identity());
+    // trafo un-rotates support toolpaths out of the owning segment's slice frame, exactly as the
+    // object body is un-rotated (see the post_trafo_inverse() use in process_layer). Support and
+    // object extrusion for one segment MUST share these frame semantics: mixing them prints the
+    // support in the slice frame while the part it holds up is un-rotated.
+    std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role, const Transform3d& trafo = Transform3d::Identity());
 
     // Farthest-point timelapse: find the extrusion point farthest from camera (0,0)
     void compute_farthest_point(const std::vector<LayerToPrint> &layers, int most_used_extruder,
@@ -705,6 +719,8 @@ private:
     Point3                              m_last_pos;
     bool                                m_last_pos_defined;
 
+    Transform3d m_last_trafo;
+
     std::unique_ptr<CoolingBuffer>      m_cooling_buffer;
     std::unique_ptr<SpiralVase>         m_spiral_vase;
 
@@ -753,6 +769,18 @@ private:
     double   m_sub_layer_flow_ratio = 0.0;
     double   m_sub_layer_height     = 0.0;
     bool m_need_change_layer_lift_z = false;
+    // UNLAYERED_MOD — ByGroup: set when a cross-orientation hop to the next group member is
+    // pending. The next travel_to must traverse at machine-vertical height and descend straight
+    // down onto the destination (tool-axis lifts tilt/dive through the bed). One-shot.
+    // UNLAYERED_MOD — shared four-move inter-chunk transition (ByObject + ByGroup).
+    std::string chunk_transition_gcode(const Print &print, const PrintObject &object, const Transform3d &trafo, double staging_z_local);
+    bool m_bygroup_safe_hop = false;
+    // UNLAYERED_MOD — ByGroup cross-orientation hop: target rotary orientation (deg) and total
+    // angular travel, carried from the orientation change to the deferred hop travel so the B/C
+    // swing runs simultaneously with the XY traverse at a whip-safe feedrate.
+    double m_bygroup_hop_b_deg = 0.;
+    double m_bygroup_hop_c_deg = 0.;
+    double m_bygroup_hop_bc_dist_deg = 0.;
     int m_start_gcode_filament = -1;
     std::string m_filament_instances_code;
 
@@ -769,7 +797,7 @@ private:
     void update_layer_related_config(int layer_id);
 
     double      calc_max_volumetric_speed(const double layer_height, const double line_width, const std::string co_str);
-    std::string _extrude(const ExtrusionPath &path, std::string description = "", double speed = -1);
+    std::string _extrude(const ExtrusionPath &path, std::string description = "", double speed = -1, const Transform3d &trafo = Transform3d::Identity());
     bool _needSAFC(const ExtrusionPath &path);
     void print_machine_envelope(GCodeOutputStream& file, Print& print);
     void _print_first_layer_bed_temperature(GCodeOutputStream &file, Print &print, const std::string &gcode, unsigned int first_printing_extruder_id, bool wait);

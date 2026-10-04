@@ -86,8 +86,8 @@ Environment Variables:
   }
   console.log("[DEBUG] GitHub token found");
 
-  const owner = "OrcaSlicer";
-  const repo = "OrcaSlicer";
+  const owner = "Unlayered3D";
+  const repo = "Unlayered-Slicer";
   const dryRun = process.env.DRY_RUN !== "false";
   const maxIssueNumber = parseInt(process.env.MAX_ISSUE_NUMBER || "11000", 10);
   const minIssueNumber = parseInt(process.env.MIN_ISSUE_NUMBER || "1", 10);

@@ -314,7 +314,7 @@ void Field::PostInitialize()
         }
 		getWindow()->Bind(wxEVT_KEY_UP, [](wxKeyEvent& evt) {
 		    if ((evt.GetModifiers() & wxMOD_CONTROL) != 0) {
-			    int tab_id = -1;
+			    int tab_id = -1;   // index into kShortcutTabIds below
 			    switch (evt.GetKeyCode()) {
 			    case '1': { tab_id = 0; break; }
 			    case '2': { tab_id = 1; break; }
@@ -873,6 +873,13 @@ void TextCtrl::BUILD() {
 	case coFloats:
 	case coFloat:
 	{
+        BOOST_LOG_TRIVIAL(info) << "TextCtrl::BUILD called for: " << m_opt_idx;
+        BOOST_LOG_TRIVIAL(info) << "TextCtrl::BUILDeee value: " << m_opt.type;
+        //BOOST_LOG_TRIVIAL(info) << "TextCtrl::BUILD value2: " << m_opt.default_value->getFloat();
+
+
+
+
 		double val = m_opt.type == coFloats ?
 			m_opt.get_default_value<ConfigOptionFloats>()->get_at(m_opt_idx) :
 			m_opt.type == coFloat ?
@@ -2678,7 +2685,7 @@ void ColourPicker::draw_bmp_btn(wxColourPickerCtrl* field, wxColour color)
         if (!dc.IsOk()) return bmp;
         wxGCDC dc2(dc); // just use wxGCDC since bitmap button only used for windows
 
-        dc2.SetPen(focus ? wxPen(wxColour(StateColor::darkModeColorFor(wxColour("#009688"))), 1) : *wxTRANSPARENT_PEN);
+        dc2.SetPen(focus ? wxPen(wxColour(StateColor::darkModeColorFor(wxColour("#767676"))), 1) : *wxTRANSPARENT_PEN);
         dc2.SetBrush(wxBrush(StateColor::darkModeColorFor(bg_color)));
         dc2.DrawRoundedRectangle(btn->GetRect(), btn->FromDIP(4));
 

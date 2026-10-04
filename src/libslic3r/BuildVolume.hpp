@@ -12,6 +12,7 @@
 namespace Slic3r {
 
 struct GCodeProcessorResult;
+
 enum class BuildVolume_Type : char {
   // Not set yet or undefined.
   Invalid = -1,

@@ -4,6 +4,12 @@ add_executable(${_TEST_NAME}_tests
 	test_helpers.cpp
 	test_helpers.hpp
 	test_cooling.cpp
+	test_cut_plane_apply.cpp
+	test_segment_frames.cpp
+	test_gcode_baseline.cpp
+	test_hotend_collision.cpp
+	test_segment_support_cascade.cpp
+	test_skeleton_containment.cpp
 	test_extrusion_entity.cpp
 	test_extrusion_processor.cpp
 	test_fill.cpp
@@ -26,6 +32,6 @@ add_executable(${_TEST_NAME}_tests
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r Catch2::Catch2WithMain)
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
-orcaslicer_copy_test_dlls()
+unlayered_copy_test_dlls()
 
-orcaslicer_discover_tests(${_TEST_NAME}_tests)
+unlayered_discover_tests(${_TEST_NAME}_tests)

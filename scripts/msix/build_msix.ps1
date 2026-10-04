@@ -8,31 +8,31 @@ Developer Mode loose-layout registration instead:
 Requires the Windows SDK (makeappx.exe) unless -StageOnly is used.
 #>
 param(
-    [string]$InstallDir = "build/OrcaSlicer",
-    [string]$OutputPath = "build/OrcaSlicer_Windows_MSIX.msix",
+    [string]$InstallDir = "build/UnlayeredSlicer",
+    [string]$OutputPath = "build/Unlayered_Slicer_Windows_MSIX.msix",
     [ValidateSet("x64", "arm64")]
     [string]$Architecture = "x64",
     [string]$StagingDir = "",
     [switch]$StageOnly,
-    [string]$IdentityName = "OrcaSlicer.OrcaSlicer",
+    [string]$IdentityName = "Unlayered3D.UnlayeredSlicer",
     [string]$Publisher = "CN=38F7EA55-C73B-4072-B3B2-C8E0EA15BB82",
-    [string]$PublisherDisplayName = "OrcaSlicer"
+    [string]$PublisherDisplayName = "Unlayered 3D"
 )
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 
-# MSIX version = MAJOR.MINOR.PATCH.0 from the SoftFever_VERSION semver triplet
+# MSIX version = MAJOR.MINOR.PATCH.0 from the UNLAYERED_VERSION semver triplet
 # (Store requires the revision field to be 0).
 $versionContent = Get-Content (Join-Path $repoRoot 'version.inc') -Raw
-if ($versionContent -notmatch 'set\(SoftFever_VERSION "(\d+)\.(\d+)\.(\d+)') {
-    throw "Could not parse SoftFever_VERSION from version.inc"
+if ($versionContent -notmatch 'set\(UNLAYERED_VERSION "(\d+)\.(\d+)\.(\d+)') {
+    throw "Could not parse UNLAYERED_VERSION from version.inc"
 }
 $msixVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
 Write-Output "MSIX version: $msixVersion"
 
-if (-not (Test-Path (Join-Path $InstallDir 'orca-slicer.exe'))) {
-    throw "orca-slicer.exe not found in '$InstallDir' - build the install tree first"
+if (-not (Test-Path (Join-Path $InstallDir 'unlayered-slicer.exe'))) {
+    throw "unlayered-slicer.exe not found in '$InstallDir' - build the install tree first"
 }
 
 if ([string]::IsNullOrEmpty($StagingDir)) {

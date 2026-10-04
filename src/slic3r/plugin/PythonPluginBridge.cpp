@@ -233,7 +233,7 @@ std::vector<CapturedCapability> PythonPluginBridge::finalize_plugin_capture(cons
     capabilities.reserve(classes.size());
 
     // Phase 3: instantiate each registered capability class and convert it to the common
-    // C++ interface used by the rest of OrcaSlicer.
+    // C++ interface used by the rest of Unlayered Slicer.
     for (auto& cls : classes) {
         try {
             py::object instance = cls();
@@ -356,7 +356,7 @@ void PythonPluginBridge::clear_pending_captures()
 
 void bind_python_api(pybind11::module_& m)
 {
-    m.doc() = "OrcaSlicer plugin API";
+    m.doc() = "Unlayered Slicer plugin API";
 
     py::enum_<PluginCapabilityType>(m, "PluginType", "Available plugin capability groups")
         .value("PrinterConnection", PluginCapabilityType::PrinterConnection)
@@ -486,7 +486,7 @@ void bind_python_api(pybind11::module_& m)
             g_pending_capabilities[g_active_plugin_key].push_back(std::move(plugin_cls));
             BOOST_LOG_TRIVIAL(debug) << "Registered Python plugin capability class for key " << g_active_plugin_key;
         },
-        R"pbdoc(Register a PluginCapability subclass while OrcaSlicer loads your module.)pbdoc");
+        R"pbdoc(Register a PluginCapability subclass while Unlayered Slicer loads your module.)pbdoc");
 
     m.def(
         "request_permissions",
@@ -504,7 +504,7 @@ void bind_python_api(pybind11::module_& m)
             }
         },
         py::arg("fs_read") = std::vector<std::string>{},
-        R"pbdoc(Request filesystem read permissions while OrcaSlicer loads your module.
+        R"pbdoc(Request filesystem read permissions while Unlayered Slicer loads your module.
 
 The host presents the request to the user after register_capabilities() returns. Denying the
 request aborts the plugin load.)pbdoc");

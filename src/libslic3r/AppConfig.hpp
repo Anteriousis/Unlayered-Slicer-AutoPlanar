@@ -46,6 +46,79 @@ using namespace nlohmann;
 #define PLUGIN_PAGES_VISIBLE_COUNT_DEFAULT 5
 #define PLUGIN_PAGES_VISIBLE_COUNT_MAX 10
 
+// Embedded web application tab. Deliberately generic: any web application at any URL the user
+// configures may drive the slicer through the documented bridge in WEB_APP_BRIDGE.md. Nothing
+// here is specific to a particular application, and the shipped defaults live in
+// resources/web/webapp/default.json rather than in this source tree.
+#define SETTING_WEB_APP_ENABLED        "web_app_enabled"
+#define SETTING_WEB_APP_URL            "web_app_url"
+#define SETTING_WEB_APP_TITLE          "web_app_title"
+#define SETTING_WEB_APP_ALLOW_LOCAL    "web_app_allow_local_files"
+#define SETTING_WEB_APP_PATH_ROOTS     "web_app_path_roots"
+#define SETTING_WEB_APP_DOWNLOAD_HOSTS "web_app_download_hosts"
+// Additional https origins the tab may NAVIGATE to (vendor shops, docs, an OAuth provider).
+// Navigable is not the same as trusted: the bridge session token is injected only on the
+// configured origin, so a page reached this way can never drive the slicer.
+#define SETTING_WEB_APP_EXTRA_ORIGINS  "web_app_extra_origins"
+#define SETTING_WEB_APP_SEEDED         "web_app_seeded"
+// Lets the page in this tab read and change print settings through the bridge (the settings
+// family of methods, gated per slot -- see WEB_APP_BRIDGE.md). Off by default, and with it off
+// the bridge is exactly the surface it was before that family existed.
+#define SETTING_WEB_APP_ALLOW_SETTINGS "web_app_allow_settings"
+// Lets the tab ask the slicer to export the open project and read the bytes back, which is how a
+// page publishes what is on the plate. A separate key from ALLOW_SETTINGS because it is a
+// different kind of permission: settings are the slicer's state, this is the user's model leaving.
+#define SETTING_WEB_APP_ALLOW_EXPORT "web_app_allow_export"
+// Marker for the one-shot visibility change described in WebAppPanel::ensure_seeded. Holds the
+// tag of the last one the slot asked for, in either direction, so the same release never does it
+// twice and the user's own choice afterwards sticks. Named for the switch-off it did first.
+#define SETTING_WEB_APP_DISABLE_ONCE "web_app_disable_once"
+
+// Second web-application slot, home of the Unlayered Agent tab (WebAppSlot::agent()). Same panel,
+// same bridge, its own keys so the two tabs are configured independently; seeded once from
+// resources/web/webapp/agent.json. Mirrors the web_app_* family above key for key.
+#define SETTING_AGENT_APP_ENABLED        "agent_app_enabled"
+#define SETTING_AGENT_APP_URL            "agent_app_url"
+#define SETTING_AGENT_APP_TITLE          "agent_app_title"
+#define SETTING_AGENT_APP_ALLOW_LOCAL    "agent_app_allow_local_files"
+#define SETTING_AGENT_APP_PATH_ROOTS     "agent_app_path_roots"
+#define SETTING_AGENT_APP_DOWNLOAD_HOSTS "agent_app_download_hosts"
+#define SETTING_AGENT_APP_EXTRA_ORIGINS  "agent_app_extra_origins"
+#define SETTING_AGENT_APP_SEEDED         "agent_app_seeded"
+#define SETTING_AGENT_APP_ALLOW_SETTINGS "agent_app_allow_settings"
+#define SETTING_AGENT_APP_ALLOW_EXPORT "agent_app_allow_export"
+#define SETTING_AGENT_APP_DISABLE_ONCE "agent_app_disable_once"
+
+// Unlayered: the third slot, the Unlayered Universe tab -- the model-sharing site embedded so a
+// print can be opened straight onto the plate instead of going through the browser and the
+// Downloads folder. Seeded once from resources/web/webapp/universe.json. Mirrors the two
+// families above key for key. Note universe_app_download_hosts carries the blob host the site
+// redirects downloads to: it is a different host from the page's own, so without it every
+// "open in the slicer" is refused by openProjectFromUrl's allow-list.
+#define SETTING_UNIVERSE_APP_ENABLED        "universe_app_enabled"
+#define SETTING_UNIVERSE_APP_URL            "universe_app_url"
+#define SETTING_UNIVERSE_APP_TITLE          "universe_app_title"
+#define SETTING_UNIVERSE_APP_ALLOW_LOCAL    "universe_app_allow_local_files"
+#define SETTING_UNIVERSE_APP_PATH_ROOTS     "universe_app_path_roots"
+#define SETTING_UNIVERSE_APP_DOWNLOAD_HOSTS "universe_app_download_hosts"
+#define SETTING_UNIVERSE_APP_EXTRA_ORIGINS  "universe_app_extra_origins"
+#define SETTING_UNIVERSE_APP_SEEDED         "universe_app_seeded"
+#define SETTING_UNIVERSE_APP_ALLOW_SETTINGS "universe_app_allow_settings"
+#define SETTING_UNIVERSE_APP_ALLOW_EXPORT "universe_app_allow_export"
+#define SETTING_UNIVERSE_APP_DISABLE_ONCE "universe_app_disable_once"
+
+// Access token for the printer-configuration update feed. A customer copies this from their
+// account page and pastes it in once; it identifies them to the feed, which re-checks their
+// eligibility on every request. Nothing is compiled in -- an empty value is the norm for anyone
+// not entitled to configuration updates, and firmware updates never need it.
+#define SETTING_PRINTER_UPDATES_TOKEN  "printer_updates_token"
+
+// External nonplanar slicing service: the address the plate is handed to when the user picks
+// "Slice nonplanar". Deliberately generic in the same way as the web application above -- any
+// service implementing the protocol in NONPLANAR_SLICE_SERVICE.md may be configured here, this
+// source tree carries no address, and with none set the feature is absent from the UI.
+#define SETTING_NONPLANAR_SLICE_URL    "nonplanar_slice_url"
+
 #if defined(_WIN32) || defined(_WIN64)
 #define BAMBU_NETWORK_AGENT_VERSION_LEGACY "01.10.01.09"
 #else
@@ -336,12 +409,20 @@ public:
 	bool 				legacy_datadir() const { return m_legacy_datadir; }
 	void 				set_legacy_datadir(bool value) { m_legacy_datadir = value; }
 
-	// Get the Slic3r version check url.
+	// Get the Unlayered Slicer update manifest url.
 	// This returns a hardcoded string unless it is overriden by "version_check_url" in the ini file.
 	std::string 		version_check_url() const;
 
-	// Get the Orca profile update url.
-	std::string 		profile_update_url() const;
+	// Base URL for the GitHub releases API the firmware and printer-config updaters use.
+	// Hardcoded unless overridden by "github_api_base" in the ini file.
+	std::string 		github_api_base() const;
+
+	// The customer's access token for the printer-configuration feed, whitespace trimmed.
+	// Empty when none has been entered, which is the case the updaters must keep working for.
+	std::string 		printer_updates_token() const;
+
+	// Unlayered: there is deliberately no profile_update_url(). Vendor profiles are shipped in
+	// resources/profiles and installed locally; nothing is fetched from a remote profile service.
 
 	// Returns the original Slic3r version found in the ini file before it was overwritten
 	// by the current version

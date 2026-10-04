@@ -499,6 +499,13 @@ void MediaPlayCtrl::ToggleStream()
                             package_name = "camera_tools.zip";
                         }
                     };
+                    // Unlayered: this MUST match the base signature exactly
+                    // (DownloadProgressDialog.hpp: virtual std::unique_ptr<UpgradeNetworkJob> make_job()).
+                    // It used to take a ProgressIndicator and return shared_ptr, so it HID the virtual
+                    // instead of overriding it -- the base ran, handing back a plain UpgradeNetworkJob
+                    // whose ctor sets name="plugins"/networking_plugins.zip. Agreeing to install the
+                    // camera tools therefore downloaded and installed the Bambu NETWORK PLUGIN, and
+                    // install_plugin() then set installed_networking=true.
                     std::unique_ptr<UpgradeNetworkJob> make_job() override
                     { return std::make_unique<UpgradeNetworkJob2>(); }
                     void                               on_finish() override
@@ -514,7 +521,7 @@ void MediaPlayCtrl::ToggleStream()
         }
     }
     if (!url.empty() && wxGetApp().app_config->get("not_show_vcamera_stop_prev") != "1") {
-        MessageDialog dlg(this->GetParent(), _L("Another virtual camera is running.\nOrca Slicer supports only a single virtual camera.\nDo you want to stop this virtual camera?"), _L("Warning"),
+        MessageDialog dlg(this->GetParent(), _L("Another virtual camera is running.\nUnlayered Slicer supports only a single virtual camera.\nDo you want to stop this virtual camera?"), _L("Warning"),
                                  wxYES | wxCANCEL | wxICON_INFORMATION);
         dlg.show_dsa_button();
         auto          res = dlg.ShowModal();

@@ -6,6 +6,7 @@
 #include "Fill/FillLightning.hpp"
 
 #include "BoundingBox.hpp"
+#include "CutPlaneSegmentation.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"
 #include "Point.hpp"
@@ -23,6 +24,7 @@
 #include <Eigen/Geometry>
 
 #include <functional>
+#include <optional>
 #include <set>
 #include <unordered_map>
 
@@ -350,6 +352,56 @@ public:
     // Trafo with the center_offset() applied after the transformation, to center the object in XY before slicing.
     Transform3d                  trafo_centered() const
         { Transform3d t = this->trafo(); t.pretranslate(Vec3d(- unscale<double>(m_center_offset.x()), - unscale<double>(m_center_offset.y()), 0)); return t; }
+
+    //for multi-planar shit we add another transformation since we are cool :)
+    const Transform3d            post_trafo() const { return m_post_trafo; }
+    const Transform3d            post_trafo_inverse() const { return m_post_trafo_inv; }
+
+    // Authoritative slice frame. object_to_slice() is object-local -> the exact centered
+    // coordinates handed to slice_volumes_inner(); slice_to_object() is its true inverse.
+    // Geometry crossing between two objects (e.g. a cut-plane segment handing a support footprint
+    // to its parent) MUST compose these:
+    //     parent.object_to_slice() * child.slice_to_object()
+    // and must NOT use parent.post_trafo() * child.post_trafo().inverse(): the shared XY centering
+    // translation C does not cancel across a relative rotation. With A = C*P the two differ by
+    // (L - I)*c, where L is the relative rotation and c the object's XY bbox centre -- routinely
+    // tens of millimetres. Both are refreshed by update_slice_frame().
+    const Transform3d&           object_to_slice() const { return m_object_to_slice; }
+    const Transform3d&           slice_to_object() const { return m_slice_to_object; }
+
+    // Declarative cut planes: when this PrintObject is one segment of a ModelObject partitioned by
+    // its cut_planes, Print::apply stores the segment descriptor here (see CutPlaneSegmentation.hpp).
+    // Ordinary objects have no descriptor and behave exactly as before.
+    bool  is_segment() const       { return m_segment.has_value(); }
+    // Root == the segment resting on the bed. Non-segment objects count as roots so all
+    // bed-contact logic (brim, skirt, elephant foot) can gate on this uniformly.
+    bool  is_root_segment() const  { return ! m_segment || m_segment->is_root(); }
+    int   segment_index() const    { return m_segment ? m_segment->index : -1; }
+    const std::optional<CutSegmentDescriptor>& segment() const { return m_segment; }
+
+    // Declarative cut planes: support demand handed UP from this segment's children -- the load a
+    // child could not carry to its own floor, expressed in THIS object's slice frame and indexed
+    // 1:1 with layers(). Transient: rebuilt by Print::run_segment_support_cascade() before each
+    // support generation and never serialized, so it is not part of the step state or the project
+    // file. Empty for ordinary objects and for leaf segments.
+    const std::vector<Polygons>& segment_support_demand() const { return m_segment_support_demand; }
+    void                         clear_segment_support_demand() { m_segment_support_demand.clear(); }
+    // Union in one child's contribution. A parent may have several children (the partition is a
+    // tree, not a stack), so this accumulates -- the old single-chunk cascade could assign.
+    void                         add_segment_support_demand(const std::vector<Polygons> &demand);
+
+    // Declarative cut planes: where this segment's layer schedule was cut out of the FULL object
+    // schedule, in the object's own build coordinates. A segment's layer print_z is rebased to its
+    // own zero, so anything configured against object height -- height ranges and the per-range
+    // modifier/negative regions they carry -- has to add this back to ask the right question.
+    // Zero for an ordinary object. Exact for a segment building along +Z; for a tilted segment a
+    // slice plane covers a span of object heights and this is its representative height.
+    double                       segment_schedule_base() const { return m_segment_schedule_base; }
+    // The B/C angles this object slices under: the per-object config for ordinary objects, the
+    // segment's build normal (root: exactly 0/0) for cut-plane segments.
+    void  effective_layer_rotation_bc(double &b_deg, double &c_deg) const;
+
+
     const PrintInstances&        instances() const      { return m_instances; }
     PrintInstances &instances() { return m_instances; }
 
@@ -386,7 +438,9 @@ public:
     bool                         has_brim() const       {
         return ((this->config().brim_type != btNoBrim && this->config().brim_width.value > 0.) || this->config().brim_type == btAutoBrim
             || (this->config().brim_type == btPainted && !this->model_object()->brim_points.empty()))
-            && ! this->has_raft();
+            && ! this->has_raft()
+            // A non-root cut-plane segment rests on the segment below it, never on the bed.
+            && this->is_root_segment();
     }
 
     // BBS
@@ -512,6 +566,10 @@ public:
         const ConfigOptionResolver &old_config, const ConfigOptionResolver &new_config, const std::vector<t_config_option_key> &opt_keys);
     // If ! m_slicing_params.valid, recalculate.
     void                    update_slicing_parameters();
+    // Recompute m_post_trafo / m_post_trafo_inv / m_object_to_slice / m_slice_to_object. Idempotent
+    // and independent of the slicing STEP, so the frame is valid even when posSlice is already done
+    // and slice() early-returns.
+    void                    update_slice_frame();
 
     static PrintObjectConfig object_config_from_model_object(const PrintObjectConfig &default_object_config, const ModelObject &object, size_t num_extruders, std::vector<int>& variant_index);
 
@@ -568,6 +626,21 @@ private:
     PrintObjectConfig                       m_config;
     // Translation in Z + Rotation + Scaling / Mirroring.
     Transform3d                             m_trafo = Transform3d::Identity();
+
+    // extra trafo for multi-planar
+    Transform3d m_post_trafo = Transform3d::Identity();
+    Transform3d m_post_trafo_inv = Transform3d::Identity();
+    // See object_to_slice(). Kept in sync with m_post_trafo by update_slice_frame().
+    Transform3d m_object_to_slice = Transform3d::Identity();
+    Transform3d m_slice_to_object = Transform3d::Identity();
+
+    // Declarative cut planes: segment descriptor, set by Print::apply right after construction.
+    std::optional<CutSegmentDescriptor> m_segment;
+    // See segment_support_demand(). Transient, per-layer, this object's slice frame.
+    std::vector<Polygons>               m_segment_support_demand;
+    // See segment_schedule_base().
+    double                              m_segment_schedule_base { 0. };
+
     // Slic3r::Point objects in scaled G-code coordinates
     std::vector<PrintInstance>              m_instances;
     // The mesh is being centered before thrown to Clipper, so that the Clipper's fixed coordinates require less bits.
@@ -1152,7 +1225,9 @@ public:
     {
         std::string result;
         if (m_conflict_result) {
-            result = "Found gcode path conflicts between object " + m_conflict_result.value()._objName1 + " and " + m_conflict_result.value()._objName2;
+            result = m_conflict_result.value().message.empty()
+                ? "Found gcode path conflicts between object " + m_conflict_result.value()._objName1 + " and " + m_conflict_result.value()._objName2
+                : m_conflict_result.value().message; // UNLAYERED_MOD: hotend collision report
         }
 
         return result;
@@ -1280,6 +1355,24 @@ private:
 
     bool                has_tpu_filament() const;
     bool                invalidate_state_by_config_options(const ConfigOptionResolver &new_config, const std::vector<t_config_option_key> &opt_keys);
+
+    // Declarative cut planes: slice a segment's whole family and run the cascade over it, for the
+    // support-painting preview. Called by PrintObject::generate_support_preview(), which reaches it
+    // through the existing friendship.
+    void                run_segment_support_preview(PrintObject *member);
+
+    // Declarative cut planes: the segments derived from one ModelObject under one effective
+    // instance transform form a FAMILY. Support inside a family must be generated child-first,
+    // because a child hands the load it cannot carry down to its parent, so the returned families
+    // are ordered deepest-first (an explicit postorder over the segment.parent graph). Ordinary
+    // objects and objects with no cut planes are never returned.
+    std::vector<std::vector<PrintObject*>> segment_families() const;
+    // The PrintObject holding this segment's parent, or nullptr for a root/ordinary object.
+    PrintObject*        segment_parent_of(const PrintObject *object) const;
+    // Generate support for one family child-first, transferring each child's unsupported footprint
+    // to its parent in between. PrintObject::generate_support_material() is private to PrintObject
+    // and Print is its friend, which is why this lives here.
+    void                run_segment_support_cascade(const std::vector<PrintObject*> &family);
 
     void                _make_skirt();
     void                _make_wipe_tower();

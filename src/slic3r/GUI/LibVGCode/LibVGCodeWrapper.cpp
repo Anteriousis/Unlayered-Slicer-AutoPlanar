@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <cassert>
 #include <cinttypes>
 
@@ -18,6 +19,7 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
+#include "slic3r/GUI/3DScene.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Line.hpp"
 #include "libslic3r/Polyline.hpp"
@@ -206,6 +208,31 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
         ret.color_print_colors.emplace_back(convert(color));
     }
 
+    // UNLAYERED_MOD: tool-axis palette (see PathVertex::tool_axis_id). Index 0 is always +Z.
+    ret.tool_axes.reserve(result.tool_axes.size());
+    for (const Slic3r::Vec3f& axis : result.tool_axes)
+        ret.tool_axes.emplace_back(convert(axis));
+
+    // Declarative cut planes: PathVertex stores the section id in an int16_t while the processor
+    // uses an int. A print can in principle derive more sections than that holds; clamp rather
+    // than wrap a huge id onto some other section's colour.
+    auto to_section_id = [](int id) -> int16_t {
+        return (id < 0 || id > int(std::numeric_limits<int16_t>::max())) ? int16_t(-1) : int16_t(id);
+    };
+
+    // Declarative cut planes: the section palette. Taken from Slic3r::GUI::cut_segment_color so the
+    // preview colours a section exactly as the Prepare tab's chunk preview does -- one palette,
+    // defined once, rather than a second copy that can drift. Sized to the highest section id
+    // actually present, so the legend lists only sections that exist.
+    {
+        int max_segment_id = -1;
+        for (const Slic3r::GCodeProcessorResult::MoveVertex& move : result.moves)
+            max_segment_id = std::max(max_segment_id, int(to_section_id(move.cut_segment_id)));
+        ret.cut_segment_colors.reserve(size_t(max_segment_id + 1));
+        for (int i = 0; i <= max_segment_id; ++i)
+            ret.cut_segment_colors.emplace_back(convert(::cut_segment_color(size_t(i))));
+    }
+
     const std::vector<Slic3r::GCodeProcessorResult::MoveVertex>& moves = result.moves;
     ret.vertices.reserve(2 * moves.size());
     for (size_t i = 1; i < moves.size(); ++i) {
@@ -216,7 +243,11 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
         if (option_type == EOptionType::COUNT || option_type == EOptionType::Travels || option_type == EOptionType::Wipes) {
             if (ret.vertices.empty() || prev.type != curr.type || prev.extrusion_role != curr.extrusion_role
                 // ORCA: Split the path when a preview value changes.
-                || prev.mm3_per_mm != curr.mm3_per_mm || prev.acceleration != curr.acceleration || prev.jerk != curr.jerk) {
+                || prev.mm3_per_mm != curr.mm3_per_mm || prev.acceleration != curr.acceleration || prev.jerk != curr.jerk
+                // Declarative cut planes: a section boundary must start a new path too, or the
+                // first move of a section renders as one line continuing out of the previous
+                // section -- one colour spanning the cut plane.
+                || prev.cut_segment_id != curr.cut_segment_id) {
                 // to allow libvgcode to properly detect the start/end of a path we need to add a 'phantom' vertex
                 // equal to the current one with the exception of the position, which should match the previous move position,
                 // and the times, which are set to zero
@@ -227,7 +258,9 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
                     static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), { 0.0f, 0.0f },
                     /* ORCA: Add Pressure Advance visualization support */ 0.0f, curr.pressure_advance,
                     /* ORCA: Add Acceleration visualization support */ curr.acceleration,
-                    /* ORCA: Add Jerk visualization support */ curr.jerk };
+                    /* ORCA: Add Jerk visualization support */ curr.jerk,
+                    /* UNLAYERED_MOD: tilted-layer tool axis */ curr.tool_axis_id,
+                    /* cut planes: section id */ to_section_id(curr.cut_segment_id) };
 #else
               const libvgcode::PathVertex vertex = { convert(prev.position), curr.height, curr.width, curr.feedrate, prev.actual_feedrate,
                     curr.mm3_per_mm, curr.fan_speed, curr.temperature, convert(curr.extrusion_role), curr_type,
@@ -235,7 +268,9 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
                     static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), { 0.0f, 0.0f },
                     /* ORCA: Add Pressure Advance visualization support */ 0.0f, curr.pressure_advance,
                     /* ORCA: Add Acceleration visualization support */ curr.acceleration,
-                    /* ORCA: Add Jerk visualization support */ curr.jerk };
+                    /* ORCA: Add Jerk visualization support */ curr.jerk,
+                    /* UNLAYERED_MOD: tilted-layer tool axis */ curr.tool_axis_id,
+                    /* cut planes: section id */ to_section_id(curr.cut_segment_id) };
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
                 ret.vertices.emplace_back(vertex);
             }
@@ -249,7 +284,9 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
             static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), curr.time,
             /* ORCA: Add Pressure Advance visualization support */ 0.0f, curr.pressure_advance,
             /* ORCA: Add Acceleration visualization support */ curr.acceleration,
-            /* ORCA: Add Jerk visualization support */ curr.jerk };
+            /* ORCA: Add Jerk visualization support */ curr.jerk,
+            /* UNLAYERED_MOD: tilted-layer tool axis */ curr.tool_axis_id,
+            /* cut planes: section id */ to_section_id(curr.cut_segment_id) };
 #else
         const libvgcode::PathVertex vertex = { convert(curr.position), curr.height, curr.width, curr.feedrate, curr.actual_feedrate,
             curr.mm3_per_mm, curr.fan_speed, curr.temperature, convert(curr.extrusion_role), curr_type,
@@ -257,7 +294,9 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
             static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), curr.time,
             /* ORCA: Add Pressure Advance visualization support */ 0.0f, curr.pressure_advance,
             /* ORCA: Add Acceleration visualization support */ curr.acceleration,
-            /* ORCA: Add Jerk visualization support */ curr.jerk };
+            /* ORCA: Add Jerk visualization support */ curr.jerk,
+            /* UNLAYERED_MOD: tilted-layer tool axis */ curr.tool_axis_id,
+            /* cut planes: section id */ to_section_id(curr.cut_segment_id) };
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
         ret.vertices.emplace_back(vertex);
     }

@@ -23,6 +23,8 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Utils.hpp"
+#include <set>
 
 #include "Tab.hpp"
 #include "ProgressStatusBar.hpp"
@@ -38,6 +40,8 @@
 #include "GLCanvas3D.hpp"
 #include "Plater.hpp"
 #include "WebViewDialog.hpp"
+#include "WebAppPanel.hpp"
+#include "../Utils/NonplanarSliceClient.hpp"
 #include "../Utils/Process.hpp"
 // BBS
 #include "PartPlate.hpp"
@@ -211,10 +215,10 @@ private:
 #endif // __WXGTK__
 
 #ifdef __APPLE__
-class OrcaSlicerTaskBarIcon : public wxTaskBarIcon
+class UnlayeredSlicerTaskBarIcon : public wxTaskBarIcon
 {
 public:
-    OrcaSlicerTaskBarIcon(wxTaskBarIconType iconType = wxTBI_DEFAULT_TYPE) : wxTaskBarIcon(iconType) {}
+    UnlayeredSlicerTaskBarIcon(wxTaskBarIconType iconType = wxTBI_DEFAULT_TYPE) : wxTaskBarIcon(iconType) {}
     wxMenu *CreatePopupMenu() override {
         wxMenu *menu = new wxMenu;
         if (wxGetApp().app_config->get("single_instance") == "false") {
@@ -265,7 +269,7 @@ static wxIcon main_frame_icon(GUI_App::EAppMode app_mode)
     }
     return wxIcon(path, wxBITMAP_TYPE_ICO);
 #else // _WIN32
-    return wxIcon(Slic3r::var("OrcaSlicer_128px.png"), wxBITMAP_TYPE_PNG);
+    return wxIcon(Slic3r::var("UnlayeredSlicer_128px.png"), wxBITMAP_TYPE_PNG);
 #endif // _WIN32
 }
 
@@ -391,8 +395,8 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     switch (wxGetApp().get_app_mode()) {
     default:
     case GUI_App::EAppMode::Editor:
-        m_taskbar_icon = std::make_unique<OrcaSlicerTaskBarIcon>(wxTBI_DOCK);
-        m_taskbar_icon->SetIcon(wxIcon(Slic3r::var("OrcaSlicer-mac_256px.ico"), wxBITMAP_TYPE_ICO), "OrcaSlicer");
+        m_taskbar_icon = std::make_unique<UnlayeredSlicerTaskBarIcon>(wxTBI_DOCK);
+        m_taskbar_icon->SetIcon(wxIcon(Slic3r::var("UnlayeredSlicer-mac_256px.ico"), wxBITMAP_TYPE_ICO), SLIC3R_APP_NAME);
         break;
     case GUI_App::EAppMode::GCodeViewer:
         break;
@@ -1345,6 +1349,37 @@ void MainFrame::init_tabpanel() {
     // (plugin.<plugin_key>.<name>) so they can't collide with the built-in TAB_ID_* constants.
     m_plugin_pages.initialize(m_tabpanel);
 
+    // Unlayered: optional tabs hosting embedded web applications, one WebAppPanel per WebAppSlot
+    // (its own configuration keys, seed file and environment overrides; see WebAppSlot.hpp).
+    // Nothing here is specific to a particular application -- the URLs are user configurable and
+    // the bridge a page may drive is documented in WEB_APP_BRIDGE.md. Gated on is_editor() so the
+    // G-code viewer is untouched.
+    //
+    // These are the TRAILING pages, after Project and Calibration. Order matters twice over:
+    // fit_tab_labels() compacts labels from the right, so the agent tab goes before the generic
+    // one and keeps its label longer; and show_device() re-inserts Calibration on every
+    // printer-vendor change, which it does positionally (PositionAfter(TAB_ID_PROJECT)) rather
+    // than by appending, so Calibration never lands on the wrong side of these tabs.
+    if (wxGetApp().is_editor() && WebAppPanel::is_enabled(WebAppSlot::agent())) {
+        m_agent_view = new WebAppPanel(m_tabpanel, WebAppSlot::agent());
+        m_agent_view->SetBackgroundColour(*wxWHITE);
+        m_tabpanel->AddPage(TAB_ID_AGENT, m_agent_view, WebAppPanel::configured_title(WebAppSlot::agent()), "tab_agent_active");
+        m_agent_view->load_home(); // deferred: nothing is fetched until the tab is shown
+    }
+    if (wxGetApp().is_editor() && WebAppPanel::is_enabled(WebAppSlot::universe())) {
+        m_universe_view = new WebAppPanel(m_tabpanel, WebAppSlot::universe());
+        m_universe_view->SetBackgroundColour(*wxWHITE);
+        m_tabpanel->AddPage(TAB_ID_UNIVERSE, m_universe_view,
+                            WebAppPanel::configured_title(WebAppSlot::universe()), "tab_universe_active");
+        m_universe_view->load_home(); // deferred: nothing is fetched until the tab is shown
+    }
+    if (wxGetApp().is_editor() && WebAppPanel::is_enabled()) {
+        m_web_app_view = new WebAppPanel(m_tabpanel);
+        m_web_app_view->SetBackgroundColour(*wxWHITE);
+        m_tabpanel->AddPage(TAB_ID_WEB_APP, m_web_app_view, WebAppPanel::configured_title(), "tab_webapp_active");
+        m_web_app_view->load_home(); // deferred: nothing is fetched until the tab is shown
+    }
+
     if (m_plater) {
         // load initial config
         auto full_config = wxGetApp().preset_bundle->full_config();
@@ -1360,6 +1395,41 @@ void MainFrame::init_tabpanel() {
 }
 
 // SoftFever
+void MainFrame::refresh_web_app() { refresh_web_app(WebAppSlot::generic()); }
+
+bool MainFrame::web_app_slot_view(const WebAppSlot& slot, WebAppPanel*& panel, const char*& tab_id)
+{
+    const std::string id = slot.id;
+    if (id == WebAppSlot::agent().id) {
+        panel = m_agent_view;    tab_id = TAB_ID_AGENT;    return true;
+    }
+    if (id == WebAppSlot::universe().id) {
+        panel = m_universe_view; tab_id = TAB_ID_UNIVERSE; return true;
+    }
+    if (id == WebAppSlot::generic().id) {
+        panel = m_web_app_view;  tab_id = TAB_ID_WEB_APP;  return true;
+    }
+    panel = nullptr; tab_id = nullptr;
+    return false;
+}
+
+// Each slot maps to one tab and one panel. The enable flag is deliberately not re-read here: it
+// needs a restart, as its Preferences entry says.
+void MainFrame::refresh_web_app(const WebAppSlot& slot)
+{
+    WebAppPanel* panel  = nullptr;
+    const char*  tab_id = nullptr;
+    if (!web_app_slot_view(slot, panel, tab_id) || panel == nullptr)
+        return;
+
+    const int idx = m_tabpanel->FindPageByName(tab_id);
+    if (idx != wxNOT_FOUND) {
+        m_tabpanel->SetPageText(idx, WebAppPanel::configured_title(slot));
+        fit_tab_labels();
+    }
+    panel->load_home();
+}
+
 void MainFrame::show_device(bool should_use_native) {
     auto idx = -1;
 
@@ -1794,6 +1864,10 @@ bool MainFrame::can_export_gcode() const
     if (m_plater == nullptr)
         return false;
 
+    // Preview-only mode: no model, but there is a G-code file to save (Plater::export_loaded_gcode).
+    if (m_plater->only_gcode_mode())
+        return m_plater->can_export_loaded_gcode();
+
     if (m_plater->model().objects.empty())
         return false;
 
@@ -2005,6 +2079,14 @@ wxBoxSizer* MainFrame::create_side_tools()
             m_plater->exit_gizmo();
             m_plater->update(true, true);
 
+            // Nonplanar goes to an external service: no local slicing, so none of the checks
+            // below (which are about this program's own slice) apply. It switches to the Preview
+            // tab itself once the G-code comes back, rather than ahead of time on an empty one.
+            if (m_slice_select == eSliceNonplanar) {
+                m_plater->slice_nonplanar();
+                return;
+            }
+
             bool slice = true;
 
             auto curr_plate = m_plater->get_partplate_list().get_curr_plate();
@@ -2094,6 +2176,24 @@ wxBoxSizer* MainFrame::create_side_tools()
                 });
             m_slice_option_pop_up->append_button(slice_all_btn);
             m_slice_option_pop_up->append_button(slice_plate_btn);
+
+            // Only when a service address is configured -- with none, the feature does not exist
+            // as far as the UI is concerned (NONPLANAR_SLICE_SERVICE.md).
+            if (NonplanarSliceClient::is_configured()) {
+                SideButton* slice_nonplanar_btn = new SideButton(m_slice_option_pop_up, _L("Slice nonplanar"), "");
+                slice_nonplanar_btn->SetCornerRadius(0);
+                slice_nonplanar_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                    m_slice_btn->SetLabel(_L("Slice nonplanar"));
+                    m_slice_select = eSliceNonplanar;
+                    m_slice_enable = get_enable_slice_status();
+                    m_slice_btn->Enable(m_slice_enable);
+                    this->Layout();
+                    fit_tab_labels(); // ORCA on label change
+                    if (m_slice_option_pop_up)
+                        m_slice_option_pop_up->Dismiss();
+                    });
+                m_slice_option_pop_up->append_button(slice_nonplanar_btn);
+            }
             m_slice_option_pop_up->Popup(m_slice_btn);
         }
     );
@@ -2155,7 +2255,7 @@ wxBoxSizer* MainFrame::create_side_tools()
                 p->append_button(export_gcode_btn);
             }
             else {
-                //Orca Slicer Buttons
+                //Unlayered Slicer Buttons
                 SideButton* print_plate_btn = new SideButton(p, _L("Print plate"), "");
                 print_plate_btn->SetCornerRadius(0);
 
@@ -2319,6 +2419,11 @@ bool MainFrame::get_enable_slice_status()
         return false;
     }
 
+    // Nonplanar is an external service, so the plate's own slice state says nothing about
+    // whether it can run: it needs geometry, a configured address and a free job worker.
+    if (m_slice_select == eSliceNonplanar)
+        return m_plater->can_slice_nonplanar();
+
     PartPlateList &part_plate_list = m_plater->get_partplate_list();
     PartPlate *current_plate = part_plate_list.get_curr_plate();
 
@@ -2359,6 +2464,24 @@ bool MainFrame::get_enable_slice_status()
 bool MainFrame::get_enable_print_status()
 {
     bool enable = true;
+
+    // Preview-only mode: the G-code was LOADED, not sliced, so there is no plate slice result to
+    // validate -- every check below would fail on a file that is perfectly good. Gate on having
+    // the file (and, to send it, a print host) instead; Plater::export_loaded_gcode /
+    // send_loaded_gcode are what these actions run. Anything that genuinely needs a slice (a
+    // sliced-file export, the SD-card and multi-machine flows) stays disabled.
+    if (m_plater != nullptr && m_plater->only_gcode_mode()) {
+        switch (m_print_select) {
+        case eExportGcode:
+            return m_plater->can_export_loaded_gcode();
+        case eSendGcode:
+        case ePrintPlate:
+        case ePrintAll:
+            return m_plater->can_send_loaded_gcode();
+        default:
+            return false;
+        }
+    }
 
     PartPlateList &part_plate_list = m_plater->get_partplate_list();
     PartPlate *current_plate = part_plate_list.get_curr_plate();
@@ -2458,9 +2581,9 @@ void MainFrame::update_side_button_style()
     m_slice_btn->SetExtraSize(wxSize(FromDIP(38), FromDIP(10)));
     m_slice_btn->SetBottomColour(wxColour(0x3B4446));*/
     StateColor m_btn_bg_enable = StateColor(
-        std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed),
-        std::pair<wxColour, int>(wxColour(48, 221, 112), StateColor::Hovered),
-        std::pair<wxColour, int>(wxColour(0, 150, 136), StateColor::Normal)
+        std::pair<wxColour, int>(wxColour(92, 92, 92), StateColor::Pressed),
+        std::pair<wxColour, int>(wxColour(136, 136, 136), StateColor::Hovered),
+        std::pair<wxColour, int>(wxColour(118, 118, 118), StateColor::Normal)
     );
 
     // m_publish_btn->SetMinSize(wxSize(FromDIP(125), FromDIP(24)));
@@ -2676,6 +2799,13 @@ static wxMenu* generate_help_menu()
     // Show Beginner's Tutorial
     append_menu_item(helpMenu, wxID_ANY, _L("Setup Wizard"), _L("Setup Wizard"), [](wxCommandEvent &) {wxGetApp().ShowUserGuide();});
 
+    // Multiplanar tutorial: a bundled offline page (resources/web/tutorial), opened in the browser
+    // like the Calibration Guide. Also reachable from the Cut Planes gizmo panel.
+    append_menu_item(helpMenu, wxID_ANY, _L("Multiplanar Tutorial"), _L("How to print one object in several build directions"),
+        [](wxCommandEvent&) {
+            wxLaunchDefaultBrowser(wxString::Format("file://%s/web/tutorial/multiplanar.html", from_u8(Slic3r::resources_dir())), wxBROWSER_NEW_WINDOW);
+        });
+
     helpMenu->AppendSeparator();
 
     // Open Config Folder
@@ -2708,7 +2838,7 @@ static wxMenu* generate_help_menu()
     // Check New Version
     append_menu_item(helpMenu, wxID_ANY, _L("Check for Updates"), _L("Check for Updates"),
         [](wxCommandEvent&) {
-            wxGetApp().check_new_version_sf(true, 1);
+            wxGetApp().check_new_version_sf(1);
         }, "", nullptr, []() {
             return true;
         });
@@ -3216,6 +3346,16 @@ void MainFrame::init_menubar_as_editor()
             [this]() { return is_prepare_or_preview_tab(); },
             []() { return wxGetApp().show_plate_gridlines(); }, this);
 
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Color Cut Chunks"),
+            _L("Draw each chunk of an object with cut planes in its own color in the Prepare view."),
+            [this](wxCommandEvent&) {
+                wxGetApp().toggle_show_cut_chunk_colors();
+                m_plater->get_view3D_canvas3D()->set_as_dirty();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            }, this,
+            [this]() { return is_prepare_or_preview_tab(); },
+            []() { return wxGetApp().show_cut_chunk_colors(); }, this);
+
         append_menu_item(
             viewMenu, wxID_ANY, _L("Reset Window Layout"), _L("Reset to default window layout"),
             [this](wxCommandEvent&) { m_plater->reset_window_layout(); }, "", this,
@@ -3269,7 +3409,7 @@ void MainFrame::init_menubar_as_editor()
 #ifdef __APPLE__
     wxWindowID bambu_studio_id_base = wxWindow::NewControlId(int(2));
     wxMenu* parent_menu = m_menubar->OSXGetAppleMenu();
-    //auto preference_item = new wxMenuItem(parent_menu, OrcaSlicerMenuPreferences + bambu_studio_id_base, _L("Preferences") + "\t" + ctrl + ",", "");
+    //auto preference_item = new wxMenuItem(parent_menu, UnlayeredSlicerMenuPreferences + bambu_studio_id_base, _L("Preferences") + "\t" + ctrl + ",", "");
 #else
     wxMenu* parent_menu = m_topbar->GetTopMenu();
     auto preference_item = new wxMenuItem(parent_menu, ConfigMenuPreferences + config_id_base, _L("Preferences") + "\t" + ctrl + "P", "");
@@ -3344,13 +3484,13 @@ void MainFrame::init_menubar_as_editor()
 
 #ifdef __APPLE__
     wxString about_title = wxString::Format(_L("&About %s"), SLIC3R_APP_FULL_NAME);
-    //auto about_item = new wxMenuItem(parent_menu, OrcaSlicerMenuAbout + bambu_studio_id_base, about_title, "");
+    //auto about_item = new wxMenuItem(parent_menu, UnlayeredSlicerMenuAbout + bambu_studio_id_base, about_title, "");
         //parent_menu->Bind(wxEVT_MENU, [this, bambu_studio_id_base](wxEvent& event) {
         //    switch (event.GetId() - bambu_studio_id_base) {
-        //        case OrcaSlicerMenuAbout:
+        //        case UnlayeredSlicerMenuAbout:
         //            Slic3r::GUI::about();
         //            break;
-        //        case OrcaSlicerMenuPreferences:
+        //        case UnlayeredSlicerMenuPreferences:
         //            CallAfter([this] {
         //                PreferencesDialog dlg(this);
         //                dlg.ShowModal();
@@ -3867,6 +4007,63 @@ void MainFrame::export_config()
 }
 
 // Load a config file containing a Print, Filament & Printer preset.
+namespace {
+// Unlayered: a preset bundle exported elsewhere inherits from that machine's vendor presets. If
+// the vendor is not installed here but ships with the application, install it (and enable the
+// printer model, as the setup wizard would) before importing, with the user's consent. Without
+// this every preset inheriting from the vendor is skipped and the import appears to do nothing.
+// Returns true when presets were reloaded.
+bool install_missing_import_parents(wxWindow *parent, const std::vector<std::string> &files)
+{
+    PresetBundle &bundle = *wxGetApp().preset_bundle;
+    AppConfig    &cfg    = *wxGetApp().app_config;
+
+    std::vector<std::string> to_install;
+    std::set<std::string>    declined;
+    bool                     enabled_model = false;
+    for (const auto &[subdir, parent_name] : PresetBundle::collect_import_parents(files)) {
+        PresetCollection &collection = subdir == PRESET_PRINTER_NAME ? bundle.printers :
+                                       subdir == PRESET_PRINT_NAME   ? bundle.prints :
+                                                                       bundle.filaments;
+        if (collection.find_preset2(parent_name) != nullptr)
+            continue; // parent already available
+        std::string       model, variant;
+        const std::string vendor = PresetBundle::find_resource_vendor_for_preset(subdir, parent_name, &model, &variant);
+        if (vendor.empty() || declined.count(vendor) != 0)
+            continue; // not shipped: import_presets() reports it as missing
+        const bool installed = bundle.vendors.find(vendor) != bundle.vendors.end();
+        if (installed && model.empty())
+            continue; // vendor is there, the parent just does not exist in it
+        if (std::find(to_install.begin(), to_install.end(), vendor) == to_install.end() && !installed) {
+            MessageDialog dlg(parent,
+                wxString::Format(_L("The presets being imported are based on \"%s\" from the %s printer profiles, which are not installed.\n\n"
+                                    "Install the %s profiles now? Otherwise those presets will be skipped."),
+                                 from_u8(parent_name), from_u8(vendor), from_u8(vendor)),
+                _L("Import result"), wxYES_NO | wxICON_QUESTION);
+            if (dlg.ShowModal() != wxID_YES) {
+                declined.insert(vendor);
+                continue;
+            }
+            to_install.push_back(vendor);
+        }
+        if (!model.empty() && !cfg.get_variant(vendor, model, variant)) {
+            cfg.set_variant(vendor, model, variant, true);
+            enabled_model = true;
+        }
+    }
+    if (to_install.empty() && !enabled_model)
+        return false;
+
+    if (!to_install.empty() && !Slic3r::install_vendor_bundles_from_resources(to_install)) {
+        show_error(parent, _L("Failed to install the printer profiles from the application resources."));
+        return false;
+    }
+    cfg.save();
+    bundle.load_presets(cfg, ForwardCompatibilitySubstitutionRule::EnableSilent);
+    return true;
+}
+} // namespace
+
 void MainFrame::load_config_file()
 {
     //BBS do not load config file
@@ -3885,6 +4082,8 @@ void MainFrame::load_config_file()
         m_last_config = file;
     }
     bool update = false;
+    install_missing_import_parents(this, cfiles);
+    PresetBundle::ImportReport report;
     wxGetApp().preset_bundle->import_presets(cfiles, [this](std::string const & name) {
             ConfigsOverwriteConfirmDialog dlg(this, from_u8(name), false);
             int           res = dlg.ShowModal();
@@ -3892,7 +4091,7 @@ void MainFrame::load_config_file()
             return std::find(ids, ids + 4, res) - ids;
         },
         ForwardCompatibilitySubstitutionRule::Enable,
-        *wxGetApp().app_config);
+        *wxGetApp().app_config, &report);
     if (!cfiles.empty()) {
         wxGetApp().app_config->update_config_dir(get_dir_name(cfiles.back()));
         wxGetApp().load_current_presets();
@@ -3904,9 +4103,18 @@ void MainFrame::load_config_file()
     }
     wxGetApp().preset_bundle->update_compatible(PresetSelectCompatibleType::Always);
     update_side_preset_ui();
+    // Unlayered: report what was actually imported, not how many files were picked.
+    const size_t imported = report.imported.size();
     auto msg = wxString::Format(_L_PLURAL("There is %d config imported. (Only non-system and compatible configs)",
-        "There are %d configs imported. (Only non-system and compatible configs)", cfiles.size()), cfiles.size());
-    if(cfiles.empty())
+        "There are %d configs imported. (Only non-system and compatible configs)", imported), imported);
+    for (const std::string &name : report.imported)
+        msg += "\n  " + from_u8(name);
+    if (!report.missing_parents.empty()) {
+        msg += "\n\n" + _L("Skipped because the preset they are based on is not installed:");
+        for (const auto &[name, parent_name] : report.missing_parents)
+            msg += "\n  " + wxString::Format(_L("%s (needs \"%s\")"), from_u8(name), from_u8(parent_name));
+    }
+    if (imported == 0)
         msg += _L("\nHint: Make sure you have added the corresponding printer before importing the configs.");
     MessageDialog dlg2(this,msg ,
                         _L("Import result"), wxOK);
@@ -4555,7 +4763,7 @@ SettingsDialog::SettingsDialog(MainFrame* mainframe)
         SetIcon(wxIcon(szExeFileName, wxBITMAP_TYPE_ICO));
     }
 #else
-    SetIcon(wxIcon(var("OrcaSlicer_128px.png"), wxBITMAP_TYPE_PNG));
+    SetIcon(wxIcon(var("UnlayeredSlicer_128px.png"), wxBITMAP_TYPE_PNG));
 #endif // _WIN32
 
     //just hide the Frame on closing

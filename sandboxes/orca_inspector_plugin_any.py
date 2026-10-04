@@ -10,7 +10,7 @@
 # ///
 """Orca Inspector — a guided tour of `orca.host` and `orca.host.ui`.
 
-Run it from the Plugins dialog. It opens a NON-MODAL window (OrcaSlicer stays
+Run it from the Plugins dialog. It opens a NON-MODAL window (Unlayered Slicer stays
 usable) with a sidebar of sections, each exercising one part of the API:
 
   Overview   plater state, scene statistics, current printer/process/filaments
@@ -195,7 +195,7 @@ def build_overview():
 
 
 # PresetCollection attribute -> label, in the order the Presets tab stacks its groups.
-# The bundle also exposes sla_prints/sla_materials, omitted as OrcaSlicer has no SLA.
+# The bundle also exposes sla_prints/sla_materials, omitted as Unlayered Slicer has no SLA.
 COLLECTIONS = [
     ("printers", "Printer"),
     ("filaments", "Filament"),
@@ -281,7 +281,7 @@ def volume_dict(index, volume):
 
 def assemble_dict(instance):
     """Assemble-view placement of one instance; needs bindings added 2026-07.
-    getattr-guarded so the panel still runs on an older OrcaSlicer build."""
+    getattr-guarded so the panel still runs on an older Unlayered Slicer build."""
     if not hasattr(instance, "assemble_offset"):
         return {"available": False}
     return {
@@ -900,7 +900,7 @@ function renderVolume(o, v) {
 function renderInstance(o, i) {
   const a = i.assemble;
   const asmRows = !a.available
-    ? [['assemble', '<span class="muted">needs a newer OrcaSlicer build</span>']]
+    ? [['assemble', '<span class="muted">needs a newer Unlayered Slicer build</span>']]
     : [['assemble init', yn(a.initialized)],
        ['assemble offset', esc(vec3(a.offset))],
        ['assemble rotation', esc(a.rotation.map(deg).join(', '))],

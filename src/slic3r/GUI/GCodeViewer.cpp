@@ -6,6 +6,8 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Model.hpp"
+// UNLAYERED_MOD -- its_make_cone(), for the hotend collision envelope
+#include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -91,6 +93,8 @@ static std::string get_view_type_string(libvgcode::EViewType view_type)
         return _u8L("Actual Flow");
     else if (view_type == libvgcode::EViewType::Tool)
         return _u8L("Tool");
+    else if (view_type == libvgcode::EViewType::CutSegment)
+        return _u8L("Section");
     else if (view_type == libvgcode::EViewType::ColorPrint)
         return _u8L("Filament");
     else if (view_type == libvgcode::EViewType::LayerTimeLinear)
@@ -189,7 +193,7 @@ int GCodeViewer::SequentialView::ActualSpeedImguiWidget::plot(const char* label,
         const float y0 = y_range.first;
 
         const ImU32 grid_main_color = ImGui::GetColorU32(ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-        const ImU32 grid_secondary_color = ImGui::GetColorU32(ImVec4(0.0f, 150.f / 255.0f, 136.0f / 255.f, 0.5f)); // ORCA color with opacity
+        const ImU32 grid_secondary_color = ImGui::GetColorU32(ImVec4(118.f / 255.0f, 118.f / 255.0f, 118.0f / 255.f, 0.5f)); // ORCA color with opacity
 
         // horizontal levels
         for (const auto& [level, color] : levels) {
@@ -209,7 +213,7 @@ int GCodeViewer::SequentialView::ActualSpeedImguiWidget::plot(const char* label,
 
         // profiile
         const ImU32 col_base = ImGui::GetColorU32(ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
-        const ImU32 col_hovered = ImGui::GetColorU32(ImVec4(0.0f, 150.f / 255.0f, 136.0f / 255.f, 1.0f)); // ORCA color
+        const ImU32 col_hovered = ImGui::GetColorU32(ImVec4(118.f / 255.0f, 118.f / 255.0f, 118.0f / 255.f, 1.0f)); // ORCA color
         for (int n = 0; n < values_count - 1; ++n) {
             const ImVec2 tp1(ImSaturate((data[n].pos - x0) * inv_scale_x), 1.0f - ImSaturate((data[n].speed - y0) * inv_scale_y));
             const ImVec2 tp2(ImSaturate((data[n + 1].pos - x0) * inv_scale_x), 1.0f - ImSaturate((data[n + 1].speed - y0) * inv_scale_y));
@@ -240,6 +244,23 @@ void GCodeViewer::SequentialView::Marker::init(std::string filename)
     m_model.set_color({ 1.0f, 1.0f, 1.0f, 0.5f });
 }
 
+// UNLAYERED_MOD
+void GCodeViewer::SequentialView::Marker::set_envelope(bool enabled, float cone_height, float cone_angle_deg)
+{
+    // A zero height or angle is how the config disables the collision check, so it disables the
+    // drawing too -- an envelope nothing is tested against would be a lie.
+    enabled = enabled && cone_height > 0.0f && cone_angle_deg > 0.0f && cone_angle_deg < 180.0f;
+
+    if (enabled == m_envelope_enabled && cone_height == m_envelope_height && cone_angle_deg == m_envelope_angle)
+        return;
+
+    m_envelope_enabled = enabled;
+    m_envelope_height  = cone_height;
+    m_envelope_angle   = cone_angle_deg;
+    // Drop the mesh; render() rebuilds it from the new dimensions when a GL context is current.
+    m_envelope.reset();
+}
+
 //BBS: GUI refactor: add canvas size from parameters
 void GCodeViewer::SequentialView::Marker::render(int canvas_width, int canvas_height, const libvgcode::EViewType& view_type)
 {
@@ -259,8 +280,16 @@ void GCodeViewer::SequentialView::Marker::render(int canvas_width, int canvas_he
     const Camera& camera = wxGetApp().plater()->get_camera();
     const Transform3d& view_matrix = camera.get_view_matrix();
     float scale_factor = m_scale_factor;
-    const Transform3d model_matrix = (Geometry::translation_transform((m_world_position + m_model_z_offset * Vec3f::UnitZ()).cast<double>()) *
-        Geometry::translation_transform(scale_factor * m_model.get_bounding_box().size().z() * Vec3d::UnitZ()) * Geometry::rotation_transform({ M_PI, 0.0, 0.0 })) *
+    // The hotend mesh points +Z with its nozzle tip at its top: rotation_transform({PI,0,0}) flips it
+    // to point down and the translation by the model height then lands the tip on the origin.
+    // UNLAYERED_MOD: swing that whole assembly so the nozzle points back along the tool axis. The
+    // rotation is applied about the tip, which is the point that has to stay on the toolpath, and it
+    // is the minimal rotation from +Z (the hotend has no meaningful spin about its own axis).
+    const Vec3d tip = (m_world_position + m_model_z_offset * Vec3f::UnitZ()).cast<double>();
+    const Transform3d tool_rotation(Eigen::Quaterniond::FromTwoVectors(Vec3d::UnitZ(), m_tool_axis.cast<double>()));
+    const Transform3d model_matrix = Geometry::translation_transform(tip) * tool_rotation *
+        (Geometry::translation_transform(scale_factor * m_model.get_bounding_box().size().z() * Vec3d::UnitZ()) *
+         Geometry::rotation_transform({ M_PI, 0.0, 0.0 })) *
         Geometry::scale_transform(scale_factor);
     shader->set_uniform("view_model_matrix", view_matrix * model_matrix);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
@@ -268,6 +297,31 @@ void GCodeViewer::SequentialView::Marker::render(int canvas_width, int canvas_he
     shader->set_uniform("view_normal_matrix", view_normal_matrix);
 
     m_model.render();
+
+    // UNLAYERED_MOD: the collision envelope -- apex on the nozzle tip, opening along the tool
+    // axis. its_make_cone() puts its base at z=0 and its apex at z=h, so the flip-and-raise here
+    // is the same one the hotend mesh above uses to land its tip on the origin.
+    if (m_envelope_enabled) {
+        if (!m_envelope.is_initialized()) {
+            const double radius = double(m_envelope_height) * std::tan(0.5 * Geometry::deg2rad(double(m_envelope_angle)));
+            m_envelope.init_from(its_make_cone(radius, double(m_envelope_height)));
+            m_envelope.set_color(m_is_dark ? ColorRGBA{ 0.85f, 0.85f, 0.85f, 0.16f }
+                                           : ColorRGBA{ 0.25f, 0.25f, 0.25f, 0.16f });
+        }
+        // No scale_factor: the cone is a true millimetre dimension taken from the config, unlike
+        // the hotend mesh, which scale_factor exists to hold at a fixed size on screen.
+        const Transform3d envelope_matrix = Geometry::translation_transform(tip) * tool_rotation *
+            Geometry::translation_transform(double(m_envelope_height) * Vec3d::UnitZ()) *
+            Geometry::rotation_transform({ M_PI, 0.0, 0.0 });
+        shader->set_uniform("view_model_matrix", view_matrix * envelope_matrix);
+        const Matrix3d envelope_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) *
+            envelope_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
+        shader->set_uniform("view_normal_matrix", envelope_normal_matrix);
+        // A translucent hint must not occlude the toolpaths it is drawn over.
+        glsafe(::glDepthMask(GL_FALSE));
+        m_envelope.render();
+        glsafe(::glDepthMask(GL_TRUE));
+    }
 
     shader->stop_using();
 
@@ -614,7 +668,7 @@ void GCodeViewer::SequentialView::Marker::render_position_window(const libvgcode
                     for (const ActualSpeedImguiWidget::Item& item : m_actual_speed_imgui_widget.data) {
                         const bool highlight = hover_id >= 0 && (counter == hover_id || counter == hover_id + 1);
                         ImGui::TableNextRow();
-                        const ImU32 row_bg_color = ImGui::GetColorU32(item.internal ? ImVec4(0.0f, 150.f / 255.0f, 136.0f / 255.f, 0.15f) : ImVec4(0.2f, 0.2f, 0.2f, 0.25f)); // ORCA
+                        const ImU32 row_bg_color = ImGui::GetColorU32(item.internal ? ImVec4(118.f / 255.0f, 118.f / 255.0f, 118.0f / 255.f, 0.15f) : ImVec4(0.2f, 0.2f, 0.2f, 0.25f)); // ORCA
                         ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, row_bg_color);
                         ImGui::TableSetColumnIndex(0);
                         sprintf(buff, "%.3f", item.pos);
@@ -1133,6 +1187,10 @@ void GCodeViewer::update_by_mode(ConfigOptionMode mode)
     view_type_items.push_back(libvgcode::EViewType::Temperature);
 // ORCA: Add Pressure Advance visualization support
     view_type_items.push_back(libvgcode::EViewType::PressureAdvance);
+    // Declarative cut planes: colour toolpaths by the section they belong to. Only worth offering
+    // when the print actually has sections -- on an ordinary print every move would be neutral.
+    if (m_viewer.get_used_cut_segments_count() > 1)
+        view_type_items.push_back(libvgcode::EViewType::CutSegment);
     //if (mode == ConfigOptionMode::comDevelop) {
     //    view_type_items.push_back(EViewType::Tool);
     //}
@@ -1316,6 +1374,28 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     // send data to the viewer
     m_viewer.reset_default_extrusion_roles_colors();
     m_viewer.load(std::move(data));
+
+    // Declarative cut planes: the view-type list is otherwise built once at GL init and on a mode
+    // change, i.e. always BEFORE any G-code is loaded -- so a data-dependent entry like Section
+    // (offered only when the print actually has sections) could never appear. Rebuild it now that
+    // the viewer knows what it holds, then make sure the current selection is still valid.
+    update_by_mode(m_user_mode);
+    {
+        const auto it = std::find(view_type_items.begin(), view_type_items.end(), get_view_type());
+        if (it == view_type_items.end()) {
+            // The previously selected view is not available for this G-code (e.g. Section, on a
+            // print without sections): fall back to the default rather than to a stale index.
+            const auto def = std::find(view_type_items.begin(), view_type_items.end(), libvgcode::EViewType::FeatureType);
+            m_view_type_sel = (def == view_type_items.end()) ? 0 : int(std::distance(view_type_items.begin(), def));
+            set_view_type(libvgcode::EViewType::FeatureType);
+        }
+        else
+            m_view_type_sel = int(std::distance(view_type_items.begin(), it));
+        // view_type_items carries a trailing Tool entry that view_type_items_str does not (see
+        // update_by_mode), so an index found in the former can be one past the end of the latter.
+        if (m_view_type_sel >= int(view_type_items_str.size()))
+            m_view_type_sel = std::max(0, int(view_type_items_str.size()) - 1);
+    }
 
 // #if !VGCODE_ENABLE_COG_AND_TOOL_MARKERS
 //     const size_t vertices_count = m_viewer.get_vertices_count();
@@ -1522,6 +1602,22 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     m_conflict_result = gcode_result.conflict_result;
     if (m_conflict_result) { m_conflict_result.value().layer = m_viewer.get_layer_id_at(static_cast<float>(m_conflict_result.value()._height)); }
 
+    // UNLAYERED_MOD: under virtual-5-axis output the machine has no rotary axes -- the layers
+    // tilt but the physical nozzle stays vertical, and so must the hotend marker.
+    m_virtual_5axis = gcode_result.virtual_5axis;
+
+    // UNLAYERED_MOD: size the hotend collision envelope from the same two options
+    // HotendCollisionCheck uses, and only offer it when the print actually tilts -- tool_axes
+    // always holds +Z at entry 0, so a planar print has exactly one entry and keeps a clean
+    // preview. Under virtual 5-axis the marker's axis is pinned to +Z, which is right: there the
+    // envelope stands vertical because the physical nozzle does.
+    {
+        const PrintConfig& print_config = wxGetApp().plater()->get_partplate_list().get_current_fff_print().config();
+        m_sequential_view.marker.set_envelope(gcode_result.tool_axes.size() > 1,
+                                              float(print_config.nonplanar_hotend_cone_height.value),
+                                              float(print_config.nonplanar_hotend_cone_angle.value));
+    }
+
     m_gcode_check_result = gcode_result.gcode_check_result;
 
     filament_printable_reuslt = gcode_result.filament_printable_reuslt;
@@ -1643,6 +1739,11 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
     const libvgcode::PathVertex& curr_vertex = m_viewer.get_current_vertex();
     m_sequential_view.marker.set_world_position(libvgcode::convert(curr_vertex.position));
     m_sequential_view.marker.set_z_offset(m_z_offset + 0.5f);
+    // UNLAYERED_MOD: tilt the hotend to the orientation this move was actually printed at --
+    // except under virtual 5-axis output, where the tool axis is only the layer's build
+    // direction and the physical nozzle stays vertical.
+    m_sequential_view.marker.set_tool_axis(m_virtual_5axis ? Vec3f::UnitZ()
+                                                           : libvgcode::convert(m_viewer.get_tool_axis(curr_vertex.tool_axis_id)));
     // BBS fixed buttom margin. m_moves_slider.pos_y
     m_sequential_view.render(!m_no_render_path, legend_height, &m_viewer, m_viewer.get_current_vertex().gcode_id, canvas_width, canvas_height - bottom_margin * m_scale, right_margin * m_scale, m_viewer.get_view_type());
 
@@ -1935,7 +2036,7 @@ public:
 
         // write header to geometry file
         fprintf(f_geo.f, "# G-Code Toolpaths\n");
-        fprintf(f_geo.f, "# Generated by %s-%s based on Slic3r\n", SLIC3R_APP_NAME, SoftFever_VERSION);
+        fprintf(f_geo.f, "# Generated by %s-%s based on Slic3r\n", SLIC3R_APP_NAME, UNLAYERED_VERSION);
         fprintf(f_geo.f, "\nmtllib ./%s\n", materials_filename.filename().string().c_str());
 
         // open material file
@@ -1947,7 +2048,7 @@ public:
 
         // write header to material file
         fprintf(f_mat.f, "# G-Code Toolpaths Materials\n");
-        fprintf(f_mat.f, "# Generated by %s-%s based on Slic3r\n", SLIC3R_APP_NAME, SoftFever_VERSION);
+        fprintf(f_mat.f, "# Generated by %s-%s based on Slic3r\n", SLIC3R_APP_NAME, UNLAYERED_VERSION);
 
         libvgcode::Interval visible_range = m_viewer.get_view_visible_range();
         if (m_viewer.is_top_layer_only_view_range())
@@ -2557,8 +2658,8 @@ void GCodeViewer::render_all_plates_stats(const std::vector<const GCodeProcessor
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f * m_scale); // ORCA add window rounding to modernize / match style
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0, 10.0 * m_scale));
     ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(1.0f, 1.0f, 1.0f, 0.6f));
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.00f, 0.68f, 0.26f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.00f, 0.68f, 0.26f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.463f, 0.463f, 0.463f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.463f, 0.463f, 0.463f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0.42f, 0.42f, 0.42f, 1.00f));
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
@@ -2870,7 +2971,7 @@ void GCodeViewer::render_legend_color_arr_recommen(float window_padding)
     auto link_text = [&](const std::string &label) {
         ImVec2 wiki_part_size = ImGui::CalcTextSize(label.c_str());
 
-        ImColor HyperColor = ImColor(0, 150, 136, 255).Value;
+        ImColor HyperColor = ImColor(118, 118, 118, 255).Value;
         ImGui::PushStyleColor(ImGuiCol_Text, HyperColor.Value);
         imgui.text(label.c_str());
         ImGui::PopStyleColor();
@@ -2896,7 +2997,7 @@ void GCodeViewer::render_legend_color_arr_recommen(float window_padding)
     auto link_text_set_to_optional = [&](const std::string &label) {
         ImVec2 wiki_part_size = ImGui::CalcTextSize(label.c_str());
 
-        ImColor HyperColor = ImColor(0, 150, 136, 255).Value;
+        ImColor HyperColor = ImColor(118, 118, 118, 255).Value;
         ImGui::PushStyleColor(ImGuiCol_Text, HyperColor.Value);
         imgui.text(label.c_str());
         ImGui::PopStyleColor();
@@ -2923,7 +3024,8 @@ void GCodeViewer::render_legend_color_arr_recommen(float window_padding)
 
     auto link_filament_group_wiki = [&](const std::string& label) {
         ImVec2 wiki_part_size = ImGui::CalcTextSize(label.c_str());
-        ImColor HyperColor = ImColor(0, 150, 136, 255); // ORCA match color
+
+        ImColor HyperColor = ImColor(118, 118, 118, 255);
         ImGui::PushStyleColor(ImGuiCol_Text, HyperColor.Value);
         imgui.text(label.c_str());
         ImGui::PopStyleColor();
@@ -3171,8 +3273,8 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f * m_scale); // ORCA add window rounding to modernize / match style
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0,0.0));
     ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(1.0f,1.0f,1.0f,0.6f));
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.00f, 0.59f, 0.53f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.00f, 0.59f, 0.53f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.463f, 0.463f, 0.463f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.463f, 0.463f, 0.463f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0.42f, 0.42f, 0.42f, 1.00f));
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
@@ -3296,7 +3398,7 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.0 * m_scale, 0.0));
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.00f, 0.68f, 0.26f, 0.0f));
             ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(1.00f, 0.68f, 0.26f, 0.0f));
-            ImGui::PushStyleColor(ImGuiCol_BorderActive, ImVec4(0.00f, 0.59f, 0.53f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_BorderActive, ImVec4(0.463f, 0.463f, 0.463f, 1.00f));
             float max_height = 0.f;
             for (auto column_offset : columns_offsets) {
                 if (ImGui::CalcTextSize(column_offset.first.c_str()).y > max_height)
@@ -4033,6 +4135,27 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
     case libvgcode::EViewType::LayerTimeLogarithmic:     { append_range(m_viewer.get_color_range(libvgcode::EViewType::LayerTimeLogarithmic), true); break; }
     case libvgcode::EViewType::VolumetricFlowRate:       { append_range(m_viewer.get_color_range(libvgcode::EViewType::VolumetricFlowRate), 2); break; }
     case libvgcode::EViewType::ActualVolumetricFlowRate: { append_range(m_viewer.get_color_range(libvgcode::EViewType::ActualVolumetricFlowRate), 2); break; }
+    case libvgcode::EViewType::CutSegment:
+    {
+        // One entry per section actually present, in the same colours as the Prepare tab. Each row
+        // is a visibility toggle, so a single section can be inspected on its own.
+        ImGui::Dummy({ window_padding, window_padding });
+        ImGui::SameLine();
+        offsets = calculate_offsets({ { _u8L("Sections"), { _u8L("Section 00") } }, { _u8L("Display"), {""} } }, icon_size);
+        append_headers({ { _u8L("Sections"), offsets[0] }, { _u8L("Display"), offsets[1] } });
+        const std::string section_word = _u8L("Section");
+        for (int16_t segment_id : m_viewer.get_used_cut_segments_ids()) {
+            const std::string label = section_word + " " + std::to_string(int(segment_id) + 1);
+            const bool visible = m_viewer.is_cut_segment_visible(segment_id);
+            append_item(EItemType::Rect, libvgcode::convert(m_viewer.get_cut_segment_color(segment_id)),
+                        { { label, offsets[0] } }, true, offsets.back()/*ORCA checkbox_pos*/, visible,
+                        [this, segment_id]() {
+                            m_viewer.toggle_cut_segment_visibility(segment_id);
+                            update_moves_slider();
+                        });
+        }
+        break;
+    }
     case libvgcode::EViewType::Tool:
     {
         // shows only extruders actually used
@@ -4401,6 +4524,7 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
         case libvgcode::EViewType::Acceleration:
         case libvgcode::EViewType::Jerk:
         case libvgcode::EViewType::Tool:
+        case libvgcode::EViewType::CutSegment:
         case libvgcode::EViewType::ColorPrint: {
             break;
         }
@@ -4748,9 +4872,9 @@ void GCodeViewer::push_combo_style()
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.3f));
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.0f, 0.0f, 0.0f, 0.3f));
     ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.0f, 0.0f, 0.0f, 0.8f));
-    ImGui::PushStyleColor(ImGuiCol_BorderActive, ImVec4(0.00f, 0.59f, 0.53f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.00f, 0.59f, 0.53f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.00f, 0.59f, 0.53f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_BorderActive, ImVec4(0.463f, 0.463f, 0.463f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.463f, 0.463f, 0.463f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.463f, 0.463f, 0.463f, 1.0f));
 }
 void GCodeViewer::pop_combo_style()
 {

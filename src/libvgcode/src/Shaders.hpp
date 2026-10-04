@@ -22,7 +22,6 @@ static const char* Segments_Vertex_Shader =
 "const float light_front_diffuse = 0.6 * 0.2;\n"
 "const float ambient = 0.2;\n"
 "const float emission = 0.15;\n"
-"const vec3 UP = vec3(0, 0, 1);\n"
 "uniform mat4 view_matrix;\n"
 "uniform mat4 projection_matrix;\n"
 "uniform vec3 camera_position;\n"
@@ -30,6 +29,8 @@ static const char* Segments_Vertex_Shader =
 "uniform samplerBuffer height_width_angle_tex;\n"
 "uniform samplerBuffer color_tex;\n"
 "uniform usamplerBuffer segment_index_tex;\n"
+// UNLAYERED_MOD: palette of tool axes; position_tex.w holds this segment's index into it.
+"uniform samplerBuffer tool_axis_tex;\n"
 "in int vertex_id;\n"
 "out vec3 color;\n"
 "vec3 decode_color(float color) {\n"
@@ -50,7 +51,14 @@ static const char* Segments_Vertex_Shader =
 "  int id_a = int(texelFetch(segment_index_tex, gl_InstanceID).r);\n"
 "  int id_b = id_a + 1;\n"
 "  vec3 pos_a = texelFetch(position_tex, id_a).xyz;\n"
-"  vec3 pos_b = texelFetch(position_tex, id_b).xyz;\n"
+"  vec4 pos_b4 = texelFetch(position_tex, id_b);\n"
+"  vec3 pos_b = pos_b4.xyz;\n"
+// UNLAYERED_MOD: the direction this segment's extrusion HEIGHT runs along. World +Z for an ordinary
+// planar layer; the chunk's tool axis for a tilted (multiplanar / 5-axis) one, so the ribbon lies in
+// its own layer plane. Read from the END vertex, because in libvgcode a segment a->b represents the
+// move that ended at b - the same vertex whose height, width, corner angle and half-height position
+// bias describe this extrusion, so all of them agree.
+"  vec3 UP = texelFetch(tool_axis_tex, int(pos_b4.w)).xyz;\n"
 "  vec3 line = pos_b - pos_a;\n"
 "  // directions of the line box in world space\n"
 "  float line_len = length(line);\n"
@@ -61,9 +69,11 @@ static const char* Segments_Vertex_Shader =
 "    line_dir = line / line_len;\n"
 "  vec3 line_right_dir;\n"
 "  if (abs(dot(line_dir, UP)) > 0.9) {\n"
-"    // For vertical lines, the width and height should be same, there is no concept of up and down.\n"
-"    // For simplicity, the code will expand width in the x axis, and height in the y axis\n"
-"    line_right_dir = normalize(cross(vec3(1, 0, 0), line_dir));\n"
+"    // For lines along the tool axis, the width and height should be same, there is no concept of up and down.\n"
+"    // UNLAYERED_MOD: pick whichever world axis is least aligned with the line, so this stays well\n"
+"    // conditioned for a tilted UP too (the old code always used the x axis).\n"
+"    vec3 fallback = (abs(line_dir.x) < 0.9) ? vec3(1, 0, 0) : vec3(0, 1, 0);\n"
+"    line_right_dir = normalize(cross(fallback, line_dir));\n"
 "  }\n"
 "  else\n"
 "    line_right_dir = normalize(cross(line_dir, UP));\n"
@@ -173,6 +183,8 @@ static const char* Options_Vertex_Shader =
 "uniform samplerBuffer height_width_angle_tex;\n"
 "uniform samplerBuffer color_tex;\n"
 "uniform usamplerBuffer segment_index_tex;\n"
+// UNLAYERED_MOD: palette of tool axes; position_tex.w holds this marker's index into it.
+"uniform samplerBuffer tool_axis_tex;\n"
 "in vec3 in_position;\n"
 "in vec3 in_normal;\n"
 "out vec3 color;\n"
@@ -196,16 +208,26 @@ static const char* Options_Vertex_Shader =
 "  vec2 height_width = hwa.xy;\n"
 "  // ORCA: Extract bias from w component\n"
 "  float bias = hwa.w;\n"
-"  vec3 offset = texelFetch(position_tex, id).xyz - vec3(0.0, 0.0, 0.5 * height_width.x);\n"
+// UNLAYERED_MOD: seat and orient the marker on the layer plane rather than on the XY plane, so a
+// seam or retraction on a tilted layer sits flush with the surface instead of leaning through it.
+// Build an orthonormal frame around the tool axis; for UP == +Z this reduces to the identity, so
+// planar prints render exactly as before.
+"  vec4 pos4 = texelFetch(position_tex, id);\n"
+"  vec3 up = texelFetch(tool_axis_tex, int(pos4.w)).xyz;\n"
+"  vec3 fallback = (abs(up.x) < 0.9) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);\n"
+"  vec3 fwd = normalize(cross(up, fallback));\n"
+"  vec3 right = cross(fwd, up);\n"
+"  mat3 frame = mat3(right, fwd, up);\n"
+"  vec3 offset = pos4.xyz - 0.5 * height_width.x * up;\n"
 "  height_width *= scaling_factor;\n"
 "  mat3 scale_matrix = mat3(\n"
 "    height_width.y, 0.0, 0.0,\n"
 "    0.0, height_width.y, 0.0,\n"
 "    0.0, 0.0, height_width.x);\n"
-"  vec3 eye_position = (view_matrix * vec4(scale_matrix * in_position + offset, 1.0)).xyz;\n"
+"  vec3 eye_position = (view_matrix * vec4(frame * (scale_matrix * in_position) + offset, 1.0)).xyz;\n"
 "  // ORCA: Apply bias to z-position to avoid z-fighting\n"
 "  eye_position.z += bias;\n"
-"  vec3 eye_normal = (view_matrix * vec4(in_normal, 0.0)).xyz;\n"
+"  vec3 eye_normal = (view_matrix * vec4(frame * in_normal, 0.0)).xyz;\n"
 "  vec3 color_base = decode_color(texelFetch(color_tex, id).r);\n"
 "  color = color_base * lighting(eye_position, eye_normal);\n"
 "  gl_Position = projection_matrix * vec4(eye_position, 1.0);\n"

@@ -29,6 +29,7 @@
 #include "libslic3r/calib.hpp"
 #include "libslic3r/CutUtils.hpp"
 #include "libslic3r/FlushVolCalc.hpp"
+#include "libslic3r/SkeletonPipeline.hpp"
 
 #define FILAMENT_SYSTEM_COLORS_NUM      16
 
@@ -327,6 +328,8 @@ public:
     Sidebar& sidebar();
     const Model& model() const;
     Model& model();
+    SkeletonRegistry&       skeleton_registry();
+    const SkeletonRegistry& skeleton_registry() const;
     const Print& fff_print() const;
     Print& fff_print();
     const SLAPrint& sla_print() const;
@@ -516,6 +519,20 @@ public:
     void export_gcode(bool prefer_removable);
     void export_gcode_3mf(bool export_all = false);
     void send_gcode_finish(wxString name);
+
+    // Hand the current plate to the external nonplanar slicing service and open the G-code it
+    // returns (NONPLANAR_SLICE_SERVICE.md). Bypasses local slicing entirely.
+    bool can_slice_nonplanar() const;
+    void slice_nonplanar();
+
+    // Preview-only mode (a .gcode file was LOADED, not sliced): the file itself is the artifact,
+    // so it can be saved elsewhere or sent to the print host with no slice result behind it.
+    // The sliced paths (export_gcode / send_gcode_legacy) cannot serve this -- they start from
+    // the background process and bail on an empty model. See the block comment on the impls.
+    bool can_export_loaded_gcode() const;
+    bool can_send_loaded_gcode() const;
+    bool export_loaded_gcode();
+    bool send_loaded_gcode();
     void export_core_3mf();
     // Export a "published" 3MF embedding the author-selected settings in the file metadata; a
     // pure export that leaves the in-memory project untouched.
@@ -596,6 +613,10 @@ public:
     bool leave_gizmos_stack();
 
     void on_filament_change(size_t filament_idx);
+    // Put the installed filament preset `preset_name` (name or alias) into slot `idx`, running the
+    // same sequence as picking it from the sidebar combo, without a combo box. The entry point of
+    // slicer.selectPreset {type:"filament"}. Returns true when the slot holds it afterwards.
+    bool select_filament_preset(size_t idx, const std::string& preset_name);
     void on_filament_count_change(size_t extruders_count);
     void on_filaments_delete(size_t extruders_count, size_t filament_id, int replace_filament_id = -1, const std::vector<unsigned char>& is_mixed_before_delete = {});
     std::vector<Slic3r::ColorRGBA> get_extruders_colors();

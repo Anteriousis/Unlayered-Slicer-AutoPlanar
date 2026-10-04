@@ -459,6 +459,10 @@ private:
      * \param contact_nodes The nodes to draw as support.
      */
     void draw_circles();
+    // Declarative cut planes: carry the tree's feet from this segment's own zero down onto its real
+    // floor -- the cut face it rests on, which dips below zero under part of the footprint (and lies
+    // entirely below it for a segment floating above its base plane).
+    void extend_below_segment_floor();
 
     /*!
      * \brief Drops down the nodes of the tree support towards the build plate.

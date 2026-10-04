@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multiplanar Printing — Unlayered Slicer</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #262626; --muted: #6b6b6b; --line: #d9d9d9;
+    --card: #f5f5f5; --accent: #262626; --warn-bg: #f3f3f3; --code-bg: #ececec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e1e; --fg: #e5e5e5; --muted: #9a9a9a; --line: #3c3c3c;
+      --card: #2a2a2a; --accent: #e5e5e5; --warn-bg: #2f2f2f; --code-bg: #333333;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.6 "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 24px 64px; }
+  h1 { font-size: 26px; letter-spacing: .3px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  h2 { font-size: 19px; margin: 36px 0 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+  h3 { font-size: 15px; margin: 18px 0 6px; }
+  p, li { color: var(--fg); }
+  ol.steps > li { margin-bottom: 10px; }
+  kbd, .ui {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px;
+    padding: 1px 6px; font-size: 13px; white-space: nowrap;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; margin: 14px 0;
+  }
+  .card b { display: block; margin-bottom: 4px; }
+  .note { background: var(--warn-bg); border-left: 3px solid var(--accent);
+          padding: 10px 14px; margin: 14px 0; border-radius: 0 6px 6px 0; }
+  .diagram {
+    font-family: Consolas, monospace; font-size: 13px; line-height: 1.35;
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 18px; overflow-x: auto; white-space: pre; color: var(--fg);
+  }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; font-size: 14px; }
+  th { background: var(--card); }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Multiplanar Printing</h1>
+  <p class="sub">Unlayered Slicer — printing one object in several build directions, without splitting it.</p>
+
+  <p>On a 5-axis printer the bed can tilt under the nozzle, so different parts of one object can be
+  printed in different directions — an overhanging arm can be built <i>along its own axis</i>, with
+  no support at all. In Unlayered Slicer you describe this with <b>cut planes</b>: non-destructive
+  planes stored on the object. The object is never split in your project; the printable segments,
+  their orientations, and their print order are all derived at slice time and stay editable.</p>
+
+  <h2>1 &nbsp;Quick start</h2>
+  <ol class="steps">
+    <li>In <span class="ui">Prepare</span>, select the object and open the
+        <span class="ui">Cut Planes</span> tool in the left toolbar.</li>
+    <li>Position the plane with the grabbers — drag to move it along its normal, rotate it with the
+        rings. The coloured chunk preview shows the segments you would get.</li>
+    <li>Click <span class="ui">Add cut plane</span>. The plane is recorded in the list; the gizmo
+        plane stays where it is so you can place the next one.</li>
+    <li>When asked, switch the print sequence to <span class="ui">By group</span> — multiplanar
+        printing requires it (you can also set it later in Process &rarr; Others).</li>
+    <li>Slice. Each segment is printed in its own orientation; the G-code preview shows the
+        tool-axis changes between segments.</li>
+  </ol>
+
+  <div class="note"><b>Requirements.</b> The printer profile must have non-planar printing enabled
+  (Printer settings &rarr; <span class="ui">Non-planar</span>). The Unlayered 5-axis profiles ship
+  with it on. Print sequence must be <span class="ui">By group</span>.</div>
+
+  <h2>2 &nbsp;How segments are derived</h2>
+  <p>The planes partition the object. The piece resting on the bed is the <b>root</b> and prints
+  flat, like any normal print. Every other segment sits on exactly one plane — its <b>base
+  plane</b> — and is printed <i>along that plane's normal</i>, on top of the segment across the
+  plane. Arrows on each plane in the 3D view show that direction.</p>
+
+  <div class="diagram">      ___________
+     |  arm  ⟋   |   plane 2 → the arm builds along plane 2's normal
+     |___⟋⟍______|
+     |  tower    |   plane 1 → the tower builds along plane 1's normal
+  ___|___________|___
+  |      root       |   printed flat on the bed, first
+  |_________________|</div>
+
+  <ul>
+    <li><b>Chain order is geometric.</b> A segment always prints after the segment it sits on —
+        root first, then outward. You cannot break a physical dependency by reordering planes.</li>
+    <li><b>Sibling order follows your plane list, in reverse.</b> When two segments sit on the same
+        parent, the one from the <i>first</i> plane in the list prints <i>last</i>. Use the arrows
+        in the plane list to reorder.</li>
+    <li><b>Build direction override.</b> Normally a segment builds along its base plane's normal.
+        To print it in a different direction without moving the plane, select the plane and use the
+        B/C angle fields in the panel (reset restores tracking the plane).</li>
+  </ul>
+
+  <h2>3 &nbsp;The plane list</h2>
+  <table>
+    <tr><th>Control</th><th>What it does</th></tr>
+    <tr><td>▲ ▼ arrows</td><td>Reorder planes — affects sibling print order (first in the list prints last) and tie-breaking.</td></tr>
+    <tr><td>◉ radio</td><td>Bind the gizmo grabbers to this stored plane to move/rotate it. Click again to release.</td></tr>
+    <tr><td>☑ checkbox</td><td>Enable/disable one plane without deleting it.</td></tr>
+    <tr><td>✕</td><td>Delete the plane.</td></tr>
+    <tr><td>Top checkbox</td><td>Turns the whole feature on/off for the object — the planes are kept either way.</td></tr>
+  </table>
+  <p class="muted">A plane that does not actually split the object is listed but produces no cut.</p>
+
+  <h2>4 &nbsp;Cut by Skeleton</h2>
+  <p>For branching organic shapes, the <span class="ui">Skeleton Cut</span> tool can place the
+  planes for you:</p>
+  <ol class="steps">
+    <li>Open the <span class="ui">Skeleton Cut</span> tool and generate a skeleton. Edit it if
+        needed — move, delete, or connect nodes.</li>
+    <li>Click <span class="ui">Cut by Skeleton</span>: one cut plane is added per skeleton edge
+        (at the edge midpoint, facing along the branch), and you land in the Cut Planes tool with
+        the full list ready to review and edit.</li>
+    <li>Prefer manual control? Use <span class="ui">Step</span> to walk the proposed cuts one by
+        one and <span class="ui">Cut here</span> to add only the planes you want.</li>
+  </ol>
+  <div class="note">The object is <b>not</b> split — skeleton cutting authors the same editable
+  plane list as the Cut Planes tool. At most 64 planes per object are supported.</div>
+
+  <h2>5 &nbsp;Safety checks</h2>
+  <ul>
+    <li><b>Hotend collision check.</b> After slicing, the hotend is modelled as a cone (default
+        90°, 40&nbsp;mm — Printer settings &rarr; Non-planar) and the whole toolpath is checked
+        against everything printed earlier. A collision blocks the print with a message naming the
+        chunks and G-code lines — re-orient the segment, add clearance, or shorten the cone to
+        match your actual hotend.</li>
+    <li><b>Thin segments.</b> If any derived segment would be thinner than the first layer, the
+        feature turns itself off for that object and the panel tells you why. This includes two
+        nearly-coplanar planes leaving a sliver between them.</li>
+    <li><b>Duplicate planes</b> (the same plane added twice, either facing) are ignored — the first
+        one wins.</li>
+  </ul>
+
+  <h2>6 &nbsp;Troubleshooting</h2>
+  <table>
+    <tr><th>Symptom</th><th>Cause / fix</th></tr>
+    <tr><td>Object slices as one flat piece</td><td>Feature disabled, no plane splits the mesh, or a segment is thinner than the first layer — the Cut Planes panel shows the reason.</td></tr>
+    <tr><td>"Requires By group" message</td><td>Set Process &rarr; Others &rarr; Print sequence to <span class="ui">By group</span>.</td></tr>
+    <tr><td>Slice refused with a hotend collision</td><td>Read the message: it names the two chunks and where they meet. Re-orient, add clearance, or adjust the cone in Printer settings &rarr; Non-planar.</td></tr>
+    <tr><td>A segment builds in an odd direction</td><td>Check which plane it sits on (it uses that plane's normal) and any B/C override on that plane.</td></tr>
+    <tr><td>Sibling segments print in the wrong order</td><td>Reorder the planes — the first plane in the list prints last among siblings.</td></tr>
+  </table>
+
+  <p class="muted" style="margin-top:36px">Unlayered Slicer · Multiplanar tutorial · also available from
+  Help &rarr; Multiplanar Tutorial.</p>
+</main>
+</body>
+</html>

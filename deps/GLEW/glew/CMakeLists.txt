@@ -4,7 +4,7 @@ project(GLEW)
 find_package(OpenGL REQUIRED)
 
 # Allow parent project to control EGL usage.
-# Default to OFF since OrcaSlicer forces GDK_BACKEND=x11 (using GLX contexts).
+# Default to OFF since Unlayered Slicer forces GDK_BACKEND=x11 (using GLX contexts).
 # GLEW must use glXGetProcAddressARB (GLX) to match wxWidgets GL canvas.
 # Using EGL function loading with GLX contexts causes rendering failures.
 option(GLEW_USE_EGL "Use EGL instead of GLX for OpenGL function loading" OFF)

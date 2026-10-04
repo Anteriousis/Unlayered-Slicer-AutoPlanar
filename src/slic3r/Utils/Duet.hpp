@@ -43,6 +43,25 @@ private:
 	int get_err_code_from_body(const std::string &body) const;
 };
 
+// A Duet board running Unlayered firmware. The wire protocol is identical -- RepRapFirmware's
+// rr_/machine endpoints -- so everything is inherited; this exists so that the host type can be
+// told apart from a stock Duet. Two things hang off that distinction:
+//   * PhysicalPrinterDialog offers the firmware updater only for this type, because the images it
+//     installs are Unlayered builds for a specific board and have no business being pushed at
+//     somebody's stock Duet.
+//   * The user-facing strings say "Unlayered", so a connection test does not report on a brand the
+//     user did not pick.
+class Unlayered : public Duet
+{
+public:
+	explicit Unlayered(DynamicPrintConfig *config) : Duet(config) {}
+	~Unlayered() override = default;
+
+	const char* get_name() const override;
+	wxString get_test_ok_msg() const override;
+	wxString get_test_failed_msg(wxString &msg) const override;
+};
+
 }
 
 #endif

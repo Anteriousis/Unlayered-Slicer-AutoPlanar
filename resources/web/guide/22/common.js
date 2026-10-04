@@ -8,6 +8,10 @@ function RequestProfile()
 	var tSend={};
 	tSend['sequence_id']=Math.round(new Date() / 1000);
 	tSend['command']="request_userguide_profile";
+	/* ORCA the filament list needs the stage-2 profile data (machine/filament/process). Asking for
+	   it explicitly lets Studio hold the reply until it is loaded, instead of handing back an empty
+	   list. The printer picker pages do not set this, so they are answered immediately. */
+	tSend['need_detail']=true;
 	
 	SendWXMessage( JSON.stringify(tSend) );
 }

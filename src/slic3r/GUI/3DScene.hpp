@@ -36,6 +36,10 @@
 extern float                          FullyTransparentMaterialThreshold;
 extern float                          FullTransparentModdifiedToFixAlpha;
 extern Slic3r::ColorRGBA              adjust_color_for_rendering(const Slic3r::ColorRGBA &colors);
+// Deterministic distinct color for cut-plane segment previews (idx % 16 into the ORCA filament
+// palette). Unlike Plater::get_next_color_for_filament() this is stateless, so segment N keeps
+// its color across rebuilds.
+extern Slic3r::ColorRGBA              cut_segment_color(size_t idx);
 
 
 namespace Slic3r {
@@ -232,6 +236,18 @@ public:
     mutable std::vector<GUI::GLModel> mmuseg_models;
     mutable ObjectBase::Timestamp       mmuseg_ts;
 
+    // One instance's cut chunks, in the object-local frame (drawn under the instance matrix, not
+    // this volume's). Shared by every model-part volume of the instance and drawn by exactly one
+    // of them (`cut_chunk_owner`) in place of the parts; the others draw nothing. Assigned by
+    // GLCanvas3D::_update_cut_chunk_previews(); the raycaster and picking keep using `model`, so
+    // hover and selection are unaffected.
+    struct CutChunkPreview {
+        std::string               key;    // what the models were derived from; rebuilt when it changes
+        std::vector<GUI::GLModel> models; // one per segment, indexed like cut_segment_color()
+    };
+    std::shared_ptr<CutChunkPreview> cut_chunk_preview;
+    bool                             cut_chunk_owner{ false };
+
     // Ranges of triangle and quad indices to be rendered.
     std::pair<size_t, size_t>   tverts_range;
 
@@ -248,6 +264,9 @@ public:
 
     void set_color(const ColorRGBA& rgba)        { color = rgba; }
     void set_render_color(const ColorRGBA& rgba) { render_color = rgba; }
+    // Draw cut_chunk_preview under the current shader, one colour per chunk (selection
+    // brightening applied like set_render_color()). The caller has set the instance matrix.
+    void render_cut_chunks() const;
     // Sets render color in dependence of current state
     void set_render_color();
     // set color according to model volume
@@ -441,6 +460,8 @@ private:
 
     Slope m_slope;
     bool m_show_sinking_contours = false;
+    // Draw the cut chunks of objects with cut planes instead of their parts (Prepare view only).
+    bool m_render_cut_chunks = false;
 
 public:
     GLVolumePtrs volumes;
@@ -534,6 +555,10 @@ public:
     void set_slope_normal_z(float normal_z) { m_slope.normal_z = normal_z; }
     void set_default_slope_normal_z() { m_slope.normal_z = -::cos(Geometry::deg2rad(90.0f - 45.0f)); }
     void set_show_sinking_contours(bool show) { m_show_sinking_contours = show; }
+    void set_render_cut_chunks(bool render) { m_render_cut_chunks = render; }
+    // How `volume` takes part in this pass: 0 = as usual, 1 = draws its instance's cut chunks in
+    // place of its mesh, 2 = draws nothing because a sibling part draws the chunks.
+    int cut_chunk_mode(const GLVolume& volume, ERenderType type) const;
 
     // returns true if all the volumes are completely contained in the print volume
     // returns the containment state in the given out_state, if non-null

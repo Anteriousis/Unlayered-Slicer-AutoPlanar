@@ -17,10 +17,10 @@ namespace Slic3r { namespace GUI {
 // Python-agnostic; the plugin layer owns any pybind/GIL concerns and marshals
 // all calls to the UI thread.
 //
-// It derives from OrcaSlicer's own Slic3r::GUI::ProgressDialog (a real wxDialog
+// It derives from Unlayered Slicer's own Slic3r::GUI::ProgressDialog (a real wxDialog
 // with themable wx children) rather than the native wxProgressDialog: on Windows
 // wxProgressDialog is a comctl32 TaskDialog running on a worker thread with no
-// recolorable wx surface, so it cannot follow OrcaSlicer's (OS-independent) dark
+// recolorable wx surface, so it cannot follow Unlayered Slicer's (OS-independent) dark
 // theme. The base themes itself via UpdateDlgDarkUI(this) in its Create().
 class PluginProgressDialog : public ProgressDialog
 {

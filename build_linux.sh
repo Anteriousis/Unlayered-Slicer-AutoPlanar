@@ -5,7 +5,7 @@ SECONDS=0
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_PATH=$(dirname "$(readlink -f "${0}")")
 
-pushd "${SCRIPT_PATH}" > /dev/null
+pushd "${SCRIPT_PATH}" >/dev/null
 
 function usage() {
     echo "Usage: ./${SCRIPT_NAME} [-1][-b][-c][-d][-D][-e][-F][-g][-h][-i][-j N][-p][-r][-s][-t][-u][-l][-L]"
@@ -20,10 +20,10 @@ function usage() {
     echo "   -F: rebuild the cached Docker/Podman runner image from scratch when used with -g"
     echo "   -g: run the requested build steps inside a Docker/Podman Ubuntu 24.04 container similar to the GitHub Actions Linux runner"
     echo "   -h: prints this help text"
-    echo "   -i: build the Orca Slicer AppImage (optional)"
+    echo "   -i: build the Unlayered Slicer AppImage (optional)"
     echo "   -p: boost ccache hit rate by disabling precompiled headers (default: ON)"
     echo "   -r: skip RAM and disk checks (low RAM compiling)"
-    echo "   -s: build the Orca Slicer (optional)"
+    echo "   -s: build the Unlayered Slicer (optional)"
     echo "   -t: build tests (optional), requires -s flag"
     echo "   -u: install system dependencies (asks for sudo password; build prerequisite)"
     echo "   -l: use Clang instead of GCC (default: GCC)"
@@ -41,96 +41,97 @@ unset name
 BUILD_DIR=build
 BUILD_CONFIG=Release
 FORWARDED_ARGS=()
-while getopts ":1j:bcCdDeFghiprstulL" opt ; do
-  case ${opt} in
-    1 )
+while getopts ":1j:bcCdDeFghiprstulL" opt; do
+    case ${opt} in
+    1)
         export CMAKE_BUILD_PARALLEL_LEVEL=1
         FORWARDED_ARGS+=("-1")
         ;;
-    j )
+    j)
         export CMAKE_BUILD_PARALLEL_LEVEL=$OPTARG
         FORWARDED_ARGS+=("-j" "$OPTARG")
         ;;
-    b )
+    b)
         BUILD_DIR=build-dbg
         BUILD_CONFIG=Debug
         FORWARDED_ARGS+=("-b")
         ;;
-    c )
+    c)
         CLEAN_BUILD=1
         FORWARDED_ARGS+=("-c")
         ;;
-    C )
+    C)
         COLORED_OUTPUT="-DCOLORED_OUTPUT=ON"
         FORWARDED_ARGS+=("-C")
         ;;
-    d )
+    d)
         BUILD_DEPS="1"
         FORWARDED_ARGS+=("-d")
         ;;
-    D )
+    D)
         DRY_RUN="1"
         FORWARDED_ARGS+=("-D")
         ;;
-    e )
+    e)
         BUILD_DIR=build-dbginfo
         BUILD_CONFIG=RelWithDebInfo
         FORWARDED_ARGS+=("-e")
         ;;
-    F )
+    F)
         CLEAN_DOCKER_IMAGE="1"
         ;;
-    g )
+    g)
         USE_DOCKER="1"
         ;;
-    h ) usage
+    h)
+        usage
         exit 1
         ;;
-    i )
+    i)
         BUILD_IMAGE="1"
         FORWARDED_ARGS+=("-i")
         ;;
-    p )
+    p)
         SLIC3R_PRECOMPILED_HEADERS="OFF"
         FORWARDED_ARGS+=("-p")
         ;;
-    r )
+    r)
         SKIP_RAM_CHECK="1"
         FORWARDED_ARGS+=("-r")
         ;;
-    s )
+    s)
         BUILD_ORCA="1"
         FORWARDED_ARGS+=("-s")
         ;;
-    t )
+    t)
         BUILD_TESTS="1"
         FORWARDED_ARGS+=("-t")
         ;;
-    u )
+    u)
         export UPDATE_LIB="1"
         FORWARDED_ARGS+=("-u")
         ;;
-    l )
+    l)
         USE_CLANG="1"
         FORWARDED_ARGS+=("-l")
         ;;
-    L )
+    L)
         USE_LLD="1"
         FORWARDED_ARGS+=("-L")
         ;;
-    * )
-	echo "Unknown argument '${opt}', aborting."
-	exit 1
-	;;
-  esac
+    *)
+        echo "Unknown argument '${opt}', aborting."
+        exit 1
+        ;;
+    esac
 done
 
-if [ ${OPTIND} -eq 1 ] ; then
+if [ ${OPTIND} -eq 1 ]; then
     usage
     exit 1
 fi
 
-if [[ -n "${CLEAN_DOCKER_IMAGE}" ]] && [[ -z "${USE_DOCKER}" ]] ; then
+if [[ -n "${CLEAN_DOCKER_IMAGE}" ]] && [[ -z "${USE_DOCKER}" ]]; then
     echo "Error: -F requires -g."
     exit 1
 fi
@@ -142,15 +143,15 @@ function check_available_memory_and_disk() {
     FREE_DISK_KB=$(df --block-size=1K . | tail -1 | awk '{print $4}')
     MIN_DISK_KB=$((10 * 1024 * 1024))
 
-    if [[ ${FREE_MEM_GB} -le ${MIN_MEM_GB} ]] ; then
-        echo -e "\nERROR: Orca Slicer Builder requires at least ${MIN_MEM_GB}G of 'available' mem (system has only ${FREE_MEM_GB}G available)"
+    if [[ ${FREE_MEM_GB} -le ${MIN_MEM_GB} ]]; then
+        echo -e "\nERROR: Unlayered Slicer Builder requires at least ${MIN_MEM_GB}G of 'available' mem (system has only ${FREE_MEM_GB}G available)"
         echo && free --human && echo
         echo "Invoke with -r to skip RAM and disk checks."
         exit 2
     fi
 
-    if [[ ${FREE_DISK_KB} -le ${MIN_DISK_KB} ]] ; then
-        echo -e "\nERROR: Orca Slicer Builder requires at least $(echo "${MIN_DISK_KB}" |awk '{ printf "%.1fG\n", $1/1024/1024; }') (system has only $(echo "${FREE_DISK_KB}" | awk '{ printf "%.1fG\n", $1/1024/1024; }') disk free)"
+    if [[ ${FREE_DISK_KB} -le ${MIN_DISK_KB} ]]; then
+        echo -e "\nERROR: Unlayered Slicer Builder requires at least $(echo "${MIN_DISK_KB}" | awk '{ printf "%.1fG\n", $1/1024/1024; }') (system has only $(echo "${FREE_DISK_KB}" | awk '{ printf "%.1fG\n", $1/1024/1024; }') disk free)"
         echo && df --human-readable . && echo
         echo "Invoke with -r to skip ram and disk checks."
         exit 1
@@ -160,21 +161,21 @@ function check_available_memory_and_disk() {
 function print_and_run() {
     cmd=()
     # Remove empty arguments, leading and trailing spaces
-    for item in "$@" ; do
+    for item in "$@"; do
         if [[ -n $item ]]; then
-            cmd+=( "$(echo "${item}" | xargs)" )
+            cmd+=("$(echo "${item}" | xargs)")
         fi
     done
 
     echo "${cmd[@]}"
-    if [[ -z "${DRY_RUN}" ]] ; then
+    if [[ -z "${DRY_RUN}" ]]; then
         "${cmd[@]}"
     fi
 }
 
 function resolve_container_cli() {
-    if [[ -n "${ORCA_CONTAINER_CLI}" ]] ; then
-        if ! command -v "${ORCA_CONTAINER_CLI}" >/dev/null 2>&1 ; then
+    if [[ -n "${ORCA_CONTAINER_CLI}" ]]; then
+        if ! command -v "${ORCA_CONTAINER_CLI}" >/dev/null 2>&1; then
             echo "Error: container runtime '${ORCA_CONTAINER_CLI}' was not found." >&2
             exit 1
         fi
@@ -183,12 +184,12 @@ function resolve_container_cli() {
         return
     fi
 
-    if command -v docker >/dev/null 2>&1 ; then
+    if command -v docker >/dev/null 2>&1; then
         echo "docker"
         return
     fi
 
-    if command -v podman >/dev/null 2>&1 ; then
+    if command -v podman >/dev/null 2>&1; then
         echo "podman"
         return
     fi
@@ -204,7 +205,7 @@ function get_docker_runner_image() {
     local sanitized_base_image
     local sanitized_cmake_version
 
-    if [[ -n "${ORCA_DOCKER_IMAGE}" ]] ; then
+    if [[ -n "${ORCA_DOCKER_IMAGE}" ]]; then
         echo "${ORCA_DOCKER_IMAGE}"
         return
     fi
@@ -214,7 +215,7 @@ function get_docker_runner_image() {
     recipe_hash=$(find "${SCRIPT_PATH}/build_linux.sh" "${SCRIPT_PATH}/scripts/linux.d" -type f -print0 | sort -z | xargs -0 cat | sha256sum | cut -c1-12)
     sanitized_base_image=$(echo "${base_image}" | tr '/:@' '---' | tr -cs 'A-Za-z0-9_.-' '-')
     sanitized_cmake_version=$(echo "${docker_cmake_version:-system}" | tr -cs 'A-Za-z0-9_.-' '-')
-    echo "orcaslicer-linux-builder:${sanitized_base_image}-cmake-${sanitized_cmake_version}-${recipe_hash}"
+    echo "unlayered-slicer-linux-builder:${sanitized_base_image}-cmake-${sanitized_cmake_version}-${recipe_hash}"
 }
 
 function docker_runner_dockerfile() {
@@ -229,10 +230,10 @@ SHELL ["/bin/bash", "-c"]
 
 RUN apt-get update && apt-get install -y sudo ca-certificates curl tar
 
-COPY build_linux.sh /tmp/orcaslicer/build_linux.sh
-COPY scripts/linux.d /tmp/orcaslicer/scripts/linux.d
+COPY build_linux.sh /tmp/unlayered-slicer/build_linux.sh
+COPY scripts/linux.d /tmp/unlayered-slicer/scripts/linux.d
 
-WORKDIR /tmp/orcaslicer
+WORKDIR /tmp/unlayered-slicer
 
 RUN chmod +x ./build_linux.sh
 RUN ./build_linux.sh -ur
@@ -253,7 +254,7 @@ RUN if [[ -n "${CMAKE_VERSION}" ]] ; then \
             echo "Skipping GitHub Actions CMake install for unsupported architecture $(uname -m)." ; \
         fi ; \
     fi
-RUN rm -rf /var/lib/apt/lists/* /tmp/orcaslicer
+RUN rm -rf /var/lib/apt/lists/* /tmp/unlayered-slicer
 EOF
 }
 
@@ -271,15 +272,15 @@ function ensure_docker_runner_image() {
     base_image="${ORCA_DOCKER_BASE_IMAGE:-ubuntu:24.04}"
     docker_cmake_version="${ORCA_DOCKER_CMAKE_VERSION-4.3.0}"
 
-    if "${container_cli}" image inspect "${runner_image}" >/dev/null 2>&1 ; then
+    if "${container_cli}" image inspect "${runner_image}" >/dev/null 2>&1; then
         image_exists="1"
     fi
 
-    if [[ -n "${CLEAN_DOCKER_IMAGE}" ]] ; then
+    if [[ -n "${CLEAN_DOCKER_IMAGE}" ]]; then
         force_rebuild="1"
-        if [[ "${image_exists}" == "1" ]] ; then
+        if [[ "${image_exists}" == "1" ]]; then
             echo "Removing cached container image ${runner_image} ..."
-            if [[ -z "${DRY_RUN}" ]] ; then
+            if [[ -z "${DRY_RUN}" ]]; then
                 "${container_cli}" image rm -f "${runner_image}" >/dev/null
             else
                 printf '%q ' "${container_cli}" image rm -f "${runner_image}"
@@ -289,7 +290,7 @@ function ensure_docker_runner_image() {
         fi
     fi
 
-    if [[ "${image_exists}" == "1" ]] ; then
+    if [[ "${image_exists}" == "1" ]]; then
         echo "Using cached container image ${runner_image}"
         return
     fi
@@ -300,14 +301,14 @@ function ensure_docker_runner_image() {
         --build-arg "BASE_IMAGE=${base_image}"
         --build-arg "CMAKE_VERSION=${docker_cmake_version}"
     )
-    if [[ "${force_rebuild}" == "1" ]] ; then
+    if [[ "${force_rebuild}" == "1" ]]; then
         build_cmd+=(--no-cache)
     fi
     build_cmd+=(-f - "${SCRIPT_PATH}")
 
     printf '%q ' "${build_cmd[@]}"
     echo
-    if [[ -n "${DRY_RUN}" ]] ; then
+    if [[ -n "${DRY_RUN}" ]]; then
         return
     fi
 
@@ -329,10 +330,10 @@ function run_in_docker() {
     host_uid=$(id -u)
     host_gid=$(id -g)
     host_user="${USER:-orca}"
-    container_workspace="/__w/OrcaSlicer/OrcaSlicer"
+    container_workspace="/__w/Unlayered-Slicer/Unlayered-Slicer"
     build_args=()
-    for item in "${FORWARDED_ARGS[@]}" ; do
-        if [[ "${item}" == "-u" ]] || [[ "${item}" == "-D" ]] ; then
+    for item in "${FORWARDED_ARGS[@]}"; do
+        if [[ "${item}" == "-u" ]] || [[ "${item}" == "-D" ]]; then
             continue
         fi
 
@@ -349,11 +350,8 @@ function run_in_docker() {
         -e "HOST_GID=${host_gid}"
         -e "HOST_USER=${host_user}"
     )
-    if [[ -n "${CMAKE_BUILD_PARALLEL_LEVEL}" ]] ; then
-        container_env+=( -e "CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL}" )
-    fi
-    if [[ -n "${ORCA_UPDATER_SIG_KEY}" ]] ; then
-        container_env+=( -e "ORCA_UPDATER_SIG_KEY=${ORCA_UPDATER_SIG_KEY}" )
+    if [[ -n "${CMAKE_BUILD_PARALLEL_LEVEL}" ]]; then
+        container_env+=(-e "CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL}")
     fi
 
     ensure_docker_runner_image "${container_cli}" "${runner_image}"
@@ -365,7 +363,7 @@ function run_in_docker() {
         "${runner_image}" \
         bash -s -- "${build_args[@]}"
     echo
-    if [[ -n "${DRY_RUN}" ]] ; then
+    if [[ -n "${DRY_RUN}" ]]; then
         return
     fi
 
@@ -402,8 +400,8 @@ function create_builder_user() {
         useradd -m -u "${HOST_UID}" -g "${HOST_GROUP}" -s /bin/bash "${HOST_USER}"
     fi
 
-    echo "${HOST_USER} ALL=(ALL) NOPASSWD:ALL" >/etc/sudoers.d/orcaslicer-builder
-    chmod 0440 /etc/sudoers.d/orcaslicer-builder
+    echo "${HOST_USER} ALL=(ALL) NOPASSWD:ALL" >/etc/sudoers.d/unlayered-slicer-builder
+    chmod 0440 /etc/sudoers.d/unlayered-slicer-builder
 }
 
 create_builder_user
@@ -422,7 +420,6 @@ fi
 sudo -H -u "${HOST_USER}" env \
     CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL-}" \
     GITHUB_WORKSPACE="${GITHUB_WORKSPACE}" \
-    ORCA_UPDATER_SIG_KEY="${ORCA_UPDATER_SIG_KEY-}" \
     bash -c '
         set -e
         cd "${GITHUB_WORKSPACE}"
@@ -435,9 +432,9 @@ sudo -H -u "${HOST_USER}" env \
 EOF
 }
 
-if [[ -n "${USE_DOCKER}" ]] ; then
+if [[ -n "${USE_DOCKER}" ]]; then
     run_in_docker
-    popd > /dev/null # ${SCRIPT_PATH}
+    popd >/dev/null # ${SCRIPT_PATH}
     exit 0
 fi
 
@@ -447,18 +444,18 @@ export CMAKE_POLICY_VERSION_MINIMUM=3.5
 DISTRIBUTION=$(awk -F= '/^ID=/ {print $2}' /etc/os-release | tr -d '"')
 DISTRIBUTION_LIKE=$(awk -F= '/^ID_LIKE=/ {print $2}' /etc/os-release | tr -d '"')
 # Check for direct distribution match to Ubuntu/Debian
-if [ "${DISTRIBUTION}" == "ubuntu" ] || [ "${DISTRIBUTION}" == "linuxmint" ] ; then
+if [ "${DISTRIBUTION}" == "ubuntu" ] || [ "${DISTRIBUTION}" == "linuxmint" ]; then
     DISTRIBUTION="debian"
 # Check if distribution is Debian/Ubuntu-like based on ID_LIKE
-elif [[ "${DISTRIBUTION_LIKE}" == *"debian"* ]] || [[ "${DISTRIBUTION_LIKE}" == *"ubuntu"* ]] ; then
+elif [[ "${DISTRIBUTION_LIKE}" == *"debian"* ]] || [[ "${DISTRIBUTION_LIKE}" == *"ubuntu"* ]]; then
     DISTRIBUTION="debian"
-elif [[ "${DISTRIBUTION_LIKE}" == *"arch"* ]] ; then
+elif [[ "${DISTRIBUTION_LIKE}" == *"arch"* ]]; then
     DISTRIBUTION="arch"
-elif [[ "${DISTRIBUTION_LIKE}" == *"suse"* ]] ; then
+elif [[ "${DISTRIBUTION_LIKE}" == *"suse"* ]]; then
     DISTRIBUTION="suse"
 fi
 
-if [ ! -f "./scripts/linux.d/${DISTRIBUTION}" ] ; then
+if [ ! -f "./scripts/linux.d/${DISTRIBUTION}" ]; then
     echo "Your distribution \"${DISTRIBUTION}\" is not supported by system-dependency scripts in ./scripts/linux.d/"
     echo "Please resolve dependencies manually and contribute a script for your distribution to upstream."
     exit 1
@@ -469,7 +466,7 @@ else
 fi
 
 echo "FOUND_GTK3_DEV=${FOUND_GTK3_DEV}"
-if [[ -z "${FOUND_GTK3_DEV}" ]] ; then
+if [[ -z "${FOUND_GTK3_DEV}" ]]; then
     echo "Error, you must install the dependencies before."
     echo "Use option -u with sudo"
     exit 1
@@ -482,20 +479,19 @@ echo "Changing date in version..."
 }
 echo "done"
 
-
-if [[ -z "${SKIP_RAM_CHECK}" ]] ; then
+if [[ -z "${SKIP_RAM_CHECK}" ]]; then
     check_available_memory_and_disk
 fi
 
 export CMAKE_C_CXX_COMPILER_CLANG=()
-if [[ -n "${USE_CLANG}" ]] ; then
+if [[ -n "${USE_CLANG}" ]]; then
     export CMAKE_C_CXX_COMPILER_CLANG=(-DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++)
 fi
 
 # Configure use of ld.lld as the linker when requested
 export CMAKE_LLD_LINKER_ARGS=()
-if [[ -n "${USE_LLD}" ]] ; then
-    if command -v ld.lld >/dev/null 2>&1 ; then
+if [[ -n "${USE_LLD}" ]]; then
+    if command -v ld.lld >/dev/null 2>&1; then
         LLD_BIN=$(command -v ld.lld)
         export CMAKE_LLD_LINKER_ARGS=(-DCMAKE_LINKER="${LLD_BIN}" -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld)
     else
@@ -524,15 +520,14 @@ else
     echo "Note: ccache or sccache are not found. Install either of them for faster rebuilds."
 fi
 
-if [[ -n "${BUILD_DEPS}" ]] ; then
+if [[ -n "${BUILD_DEPS}" ]]; then
     echo "Configuring dependencies..."
-    read -r -a BUILD_ARGS <<< "${DEPS_EXTRA_BUILD_ARGS}"
-    if [[ -n "${CLEAN_BUILD}" ]]
-    then
+    read -r -a BUILD_ARGS <<<"${DEPS_EXTRA_BUILD_ARGS}"
+    if [[ -n "${CLEAN_BUILD}" ]]; then
         print_and_run rm -fr deps/$BUILD_DIR
     fi
     mkdir -p deps/$BUILD_DIR
-    if [[ $BUILD_CONFIG != Release ]] ; then
+    if [[ $BUILD_CONFIG != Release ]]; then
         BUILD_ARGS+=(-DCMAKE_BUILD_TYPE="${BUILD_CONFIG}")
     fi
 
@@ -540,60 +535,57 @@ if [[ -n "${BUILD_DEPS}" ]] ; then
     print_and_run cmake --build deps/$BUILD_DIR -j1
 fi
 
-if [[ -n "${BUILD_ORCA}" ]] || [[ -n "${BUILD_TESTS}" ]] ; then
-    echo "Configuring OrcaSlicer..."
-    if [[ -n "${CLEAN_BUILD}" ]] ; then
+if [[ -n "${BUILD_ORCA}" ]] || [[ -n "${BUILD_TESTS}" ]]; then
+    echo "Configuring Unlayered Slicer..."
+    if [[ -n "${CLEAN_BUILD}" ]]; then
         print_and_run rm -fr $BUILD_DIR
     fi
-    read -r -a BUILD_ARGS <<< "${ORCA_EXTRA_BUILD_ARGS}"
-    if [[ $BUILD_CONFIG != Release ]] ; then
+    read -r -a BUILD_ARGS <<<"${ORCA_EXTRA_BUILD_ARGS}"
+    if [[ $BUILD_CONFIG != Release ]]; then
         BUILD_ARGS+=(-DCMAKE_BUILD_TYPE="${BUILD_CONFIG}")
     fi
-    if [[ -n "${BUILD_TESTS}" ]] ; then
+    if [[ -n "${BUILD_TESTS}" ]]; then
         BUILD_ARGS+=(-DBUILD_TESTS=ON)
-    fi
-    if [[ -n "${ORCA_UPDATER_SIG_KEY}" ]] ; then
-        BUILD_ARGS+=(-DORCA_UPDATER_SIG_KEY="${ORCA_UPDATER_SIG_KEY}")
     fi
 
     print_and_run cmake -S . -B $BUILD_DIR "${CMAKE_C_CXX_COMPILER_CLANG[@]}" "${CMAKE_LLD_LINKER_ARGS[@]}" "${CMAKE_CCACHE_ARGS[@]}" -G "Ninja Multi-Config" \
--DSLIC3R_PCH=${SLIC3R_PRECOMPILED_HEADERS} \
--DORCA_TOOLS=ON \
-"${COLORED_OUTPUT}" \
-"${BUILD_ARGS[@]}"
+        -DSLIC3R_PCH=${SLIC3R_PRECOMPILED_HEADERS} \
+        -DORCA_TOOLS=ON \
+        "${COLORED_OUTPUT}" \
+        "${BUILD_ARGS[@]}"
     echo "done"
     if [[ -n "${BUILD_ORCA}" ]]; then
-	echo "Building OrcaSlicer ..."
-	print_and_run cmake --build $BUILD_DIR --config "${BUILD_CONFIG}" --target OrcaSlicer
-	echo "Building OrcaSlicer_profile_validator .."
-	print_and_run cmake --build $BUILD_DIR --config "${BUILD_CONFIG}" --target OrcaSlicer_profile_validator
+	echo "Building Unlayered Slicer ..."
+	print_and_run cmake --build $BUILD_DIR --config "${BUILD_CONFIG}" --target UnlayeredSlicer
+	echo "Building UnlayeredSlicer_profile_validator .."
+	print_and_run cmake --build $BUILD_DIR --config "${BUILD_CONFIG}" --target UnlayeredSlicer_profile_validator
 	echo "Building generate_system_cache ..."
 	print_and_run cmake --build $BUILD_DIR --config "${BUILD_CONFIG}" --target generate_system_cache
 	./scripts/run_gettext.sh
     fi
-    if [[ -n "${BUILD_TESTS}" ]] ; then
-	echo "Building tests ..."
-	print_and_run cmake --build ${BUILD_DIR} --config "${BUILD_CONFIG}" --target tests/all
+    if [[ -n "${BUILD_TESTS}" ]]; then
+        echo "Building tests ..."
+        print_and_run cmake --build ${BUILD_DIR} --config "${BUILD_CONFIG}" --target tests/all
     fi
     echo "done"
 fi
 
-if [[ -n "${BUILD_IMAGE}" || -n "${BUILD_ORCA}" ]] ; then
-    pushd $BUILD_DIR > /dev/null
+if [[ -n "${BUILD_IMAGE}" || -n "${BUILD_ORCA}" ]]; then
+    pushd $BUILD_DIR >/dev/null
     build_linux_image="./src/build_linux_image.sh"
-    if [[ -e ${build_linux_image} ]] ; then
+    if [[ -e ${build_linux_image} ]]; then
         extra_script_args=""
-        if [[ -n "${BUILD_IMAGE}" ]] ; then
+        if [[ -n "${BUILD_IMAGE}" ]]; then
             extra_script_args="-i"
         fi
         print_and_run ${build_linux_image} ${extra_script_args} -R "${BUILD_CONFIG}"
 
         echo "done"
     fi
-    popd > /dev/null # build
+    popd >/dev/null # build
 fi
 
 elapsed=$SECONDS
-printf "\nBuild completed in %dh %dm %ds\n" $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60))
+printf "\nBuild completed in %dh %dm %ds\n" $((elapsed / 3600)) $((elapsed % 3600 / 60)) $((elapsed % 60))
 
-popd > /dev/null # ${SCRIPT_PATH}
+popd >/dev/null # ${SCRIPT_PATH}

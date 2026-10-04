@@ -91,6 +91,8 @@
 #include "wxExtensions.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "MainFrame.hpp"
+#include "WebAppPanel.hpp"
+#include "WebAppSettings.hpp"
 #include "format.hpp"
 #include "3DScene.hpp"
 #include "GLCanvas3D.hpp"
@@ -112,6 +114,8 @@
 #include "Jobs/NotificationProgressIndicator.hpp"
 #include "Jobs/PlaterWorker.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
+#include "Jobs/NonplanarSliceJob.hpp"
+#include "slic3r/Utils/NonplanarSliceClient.hpp"
 #include "BackgroundSlicingProcess.hpp"
 #include "SelectMachine.hpp"
 #include "SendMultiMachinePage.hpp"
@@ -930,7 +934,7 @@ void Sidebar::priv::flush_printer_sync(bool restart)
         *counter_sync_printer = 6;
         timer_sync_printer->Start(500);
     }
-    //btn_sync_printer->SetBackgroundColorNormal((*counter_sync_printer & 1) ? "#F8F8F8" :"#009688");
+    //btn_sync_printer->SetBackgroundColorNormal((*counter_sync_printer & 1) ? "#F8F8F8" :"#767676");
     m_printer_bbl_sync->SetBitmap_((*counter_sync_printer & 1) ? "printer_sync_not" : "printer_sync_ok");
     if (--*counter_sync_printer <= 0)
         timer_sync_printer->Stop();
@@ -2161,7 +2165,7 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
 
 void Sidebar::priv::update_sync_status(const MachineObject *obj)
 {
-    StateColor not_synced_colour(std::pair<wxColour, int>(wxColour("#009688"), StateColor::Normal));
+    StateColor not_synced_colour(std::pair<wxColour, int>(wxColour("#767676"), StateColor::Normal));
     auto clear_all_sync_status = [this]() {
         panel_printer_preset->ShowBadge(false);
         panel_printer_bed->ShowBadge(false);
@@ -2535,10 +2539,10 @@ Sidebar::Sidebar(Plater *parent)
 
         struct PanelColors {
             wxColour bg_normal = "#FFFFFF";
-            wxColour bg_focus  = "#E5F0EE";
+            wxColour bg_focus  = "#ECECEC";
             wxColour bd_normal = "#DBDBDB";
-            wxColour bd_hover  = "#009688";
-            wxColour bd_focus  = "#009688";
+            wxColour bd_hover  = "#767676";
+            wxColour bd_focus  = "#767676";
         };
         PanelColors panel_color;
 
@@ -2818,8 +2822,8 @@ Sidebar::Sidebar(Plater *parent)
                 std::pair<wxColour, int>(wxColour("#F8F8F8"), StateColor::Hovered),
                 std::pair<wxColour, int>(wxColour("#F8F8F8"), StateColor::Normal));
         StateColor btn_sync_bd_col(
-                std::pair<wxColour, int>(wxColour("#009688"), StateColor::Pressed),
-                std::pair<wxColour, int>(wxColour("#009688"), StateColor::Hovered),
+                std::pair<wxColour, int>(wxColour("#767676"), StateColor::Pressed),
+                std::pair<wxColour, int>(wxColour("#767676"), StateColor::Hovered),
                 std::pair<wxColour, int>(wxColour("#EEEEEE"), StateColor::Normal));
         btn_sync->SetBackgroundColor(btn_sync_bg_col);
         btn_sync->SetBorderColor(btn_sync_bd_col);
@@ -3212,7 +3216,7 @@ Sidebar::Sidebar(Plater *parent)
             e.Skip();
             return;
         }
-        p->m_search_bar->SetBorderColor(wxColour("#009688"));
+        p->m_search_bar->SetBorderColor(wxColour("#767676"));
         wxPoint pos = this->p->m_search_bar->ClientToScreen(wxPoint(0, 0));
 #ifndef __WXGTK__
         pos.y += this->p->m_search_bar->GetRect().height;
@@ -3460,7 +3464,7 @@ void Sidebar::update_all_preset_comboboxes()
         wxString url = from_u8(PrintHost::get_print_host_webui(&cfg));
         wxString apikey;
         if(url.empty())
-            url = wxString::Format("file://%s/web/orca/missing_connection.html", from_u8(resources_dir()));
+            url = wxString::Format("file://%s/web/unlayered/missing_connection.html", from_u8(resources_dir()));
         else {
             const auto host_type = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type")->value;
             if (cfg.has("printhost_apikey") && (host_type != htSimplyPrint))
@@ -5942,7 +5946,7 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
     wxGetApp().app_config ->set("ams_filament_ids", p->ams_list_device, ams_filament_ids);
     if (!unknowns.empty()) {
         MessageDialog dlg(this,
-            _L("There are some unknown or incompatible filaments mapped to generic preset.\nPlease update Orca Slicer or restart Orca Slicer to check if there is an update to system presets.") + detail,
+            _L("There are some unknown or incompatible filaments mapped to generic preset.\nPlease update Unlayered Slicer or restart Unlayered Slicer to check if there is an update to system presets.") + detail,
             _L("Sync filaments with AMS"), wxOK);
         dlg.ShowModal();
     }
@@ -6715,6 +6719,7 @@ struct Plater::priv
     Slic3r::Print               fff_print;
     Slic3r::SLAPrint            sla_print;
     Slic3r::Model               model;
+    Slic3r::SkeletonRegistry    skeleton_registry;
     PrinterTechnology           printer_technology = ptFFF;
     Slic3r::GCodeProcessorResult gcode_result;
 
@@ -6738,6 +6743,8 @@ struct Plater::priv
     bool m_ignore_event{false};
     bool m_slice_all{false};
     bool m_is_slicing {false};
+    // Unlayered: a slicer.plateChanged event is queued and not yet delivered (object_list_changed).
+    bool m_plate_changed_notify_pending{false};
     // Missing-plugin set signatures (sorted full refs joined by '\n'), one per notification. They
     // gate plugin-load re-validation and avoid needlessly recreating the notification when the set
     // is unchanged. Whether missing plugins block slicing is derived directly from PluginResolver
@@ -7088,6 +7095,9 @@ struct Plater::priv
     void on_combobox_select(wxCommandEvent&);
     void on_select_bed_type(wxCommandEvent&);
     void on_select_preset(wxCommandEvent&);
+    // The filament half of on_select_preset(), shared with Plater::select_filament_preset().
+    // `combo` is the sidebar combo the user picked from and may be null (a bridge call).
+    void apply_filament_selection(size_t idx, const std::string& preset_name, PlaterPresetComboBox* combo, int selection);
     void on_slicing_update(SlicingStatusEvent&);
     void on_slicing_completed(wxCommandEvent&);
     void on_process_completed(SlicingProcessCompletedEvent&);
@@ -7343,6 +7353,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         "layer_height", "initial_layer_print_height", "min_layer_height", "max_layer_height",
         "wall_loops", "outer_wall_filament_id", "inner_wall_filament_id", "sparse_infill_density", "sparse_infill_filament_id", "top_shell_layers",
         "enable_support", "support_filament", "support_interface_filament",
+        // UNLAYERED_MOD: enable_nonplanar gates layer_rotation_b/c, and the variable layer height
+        // editor derives object_max_z from the rotated box (PrintObject::slicing_parameters).
+        "test_input", "layer_rotation_b", "layer_rotation_c", "enable_nonplanar",
         "support_top_z_distance", "support_bottom_z_distance", "raft_layers",
         "wipe_tower_rotation_angle", "wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_extra_flow", "wipe_tower_max_purge_speed",
         "wipe_tower_wall_type", "wipe_tower_extra_rib_length","wipe_tower_rib_width","wipe_tower_fillet_wall",
@@ -8563,12 +8576,12 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         load_type  = static_cast<LoadType>(std::stoi(import_project_action));
 
                     // BBS: version check
-                    Semver app_version = *(Semver::parse(SoftFever_VERSION));
+                    Semver app_version = *(Semver::parse(UNLAYERED_VERSION));
                     const wxString load_3mf_title              = _L("Load 3MF");
                     const wxString newer_3mf_title             = _L("Newer 3MF version");
                     const wxString bambu_project_title         = _L("BambuStudio Project");
-                    const wxString msg_unsupported_geometry    = _L("The 3MF is not supported by OrcaSlicer, loading geometry data only.");
-                    const wxString msg_old_orca_geometry       = _L("The 3MF file was generated by an old OrcaSlicer version, loading geometry data only.");
+                    const wxString msg_unsupported_geometry    = _L("The 3MF is not supported by Unlayered Slicer, loading geometry data only.");
+                    const wxString msg_old_orca_geometry       = _L("The 3MF file was generated by an old OrcaSlicer or Unlayered Slicer version, loading geometry data only.");
                     const wxString msg_older_geometry          = _L("The 3MF file was generated by an older version, loading geometry data only.");
                     const wxString msg_bambu_geometry          = _L("The 3MF file was generated by BambuStudio, loading geometry data only.");
                     auto log_and_show_3mf_info = [&](const wxString& text, const wxString& title) {
@@ -8577,6 +8590,15 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                                 << boost::format("3MF import message [%1%]: %2% | file: %3%") % into_u8(title) % into_u8(text) % path.string();
                         show_info(q, text, title);
                     };
+                    // UNLAYERED_MOD: Config::load_from_json aborts at the FIRST bad key and the 3mf importer only
+                    // logs it, so config_loaded can be a non-empty half-config that lacks even filament_colour.
+                    // Downstream indexes it by key and would apply it over the defaults. Treat it as unusable:
+                    // import the geometry only and say so, rather than restore half a project's settings.
+                    if (load_config && !config_loaded.empty() && !config_loaded.has("filament_colour")) {
+                        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": project config unusable (partial parse), importing geometry only: " << path.string();
+                        config_loaded.clear();
+                        log_and_show_3mf_info(_L("The project settings embedded in this 3MF could not be read (see the log). Importing geometry only."), load_3mf_title);
+                    }
                     if (en_3mf_file_type == En3mfType::From_Prusa) {
                         // do not reset the model config
                         load_config = false;
@@ -8584,7 +8606,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             log_and_show_3mf_info(msg_unsupported_geometry, load_3mf_title);
                     }
                     else if (en_3mf_file_type == En3mfType::From_Orca) {
-                        // OrcaSlicer file (has OrcaSlicer tag) - compare file_version with SoftFever_VERSION
+                        // OrcaSlicer file (has OrcaSlicer tag) - compare file_version with UNLAYERED_VERSION
                         // Migration fix for OrcaSlicer 2.3.1-alpha sparse infill rotation template
                         if (load_config && (file_version < app_version) && file_version == Semver("2.3.1-alpha")) {
                             if (!config_loaded.opt_string("sparse_infill_rotate_template").empty()) {
@@ -8599,7 +8621,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                           "infill rotation template settings that may not work properly with your current infill pattern. "
                                           "This could result in weak support or print quality issues."));
                                     msg_text += "\n\n" +
-                                                _(L("Would you like OrcaSlicer to automatically fix this by clearing the rotation template settings?"));
+                                                _(L("Would you like Unlayered Slicer to automatically fix this by clearing the rotation template settings?"));
                                     MessageDialog dialog(wxGetApp().plater(), msg_text, "", wxICON_WARNING | wxYES | wxNO);
                                     dialog.SetButtonLabel(wxID_YES, _L("Yes"));
                                     dialog.SetButtonLabel(wxID_NO, _L("No"));
@@ -8654,7 +8676,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                               "infill rotation template settings that may not work properly with your current infill pattern. "
                                               "This could result in weak support or print quality issues."));
                                         msg_text += "\n\n" +
-                                                    _(L("Would you like OrcaSlicer to automatically fix this by clearing the rotation template settings?"));
+                                                    _(L("Would you like Unlayered Slicer to automatically fix this by clearing the rotation template settings?"));
                                         MessageDialog dialog(wxGetApp().plater(), msg_text, "", wxICON_WARNING | wxYES | wxNO);
                                         dialog.SetButtonLabel(wxID_YES, _L("Yes"));
                                         dialog.SetButtonLabel(wxID_NO, _L("No"));
@@ -8695,7 +8717,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 }
                             } else if (load_config && !published_config.published) {
                                 // BambuStudio version is older or same as our SLIC3R_VERSION
-                                wxString text = _L("The 3MF was created by BambuStudio. Some settings may differ from OrcaSlicer.");
+                                wxString text = _L("The 3MF was created by BambuStudio. Some settings may differ from Unlayered Slicer.");
                                 log_and_show_3mf_info(text, bambu_project_title);
                             }
                         }
@@ -8752,10 +8774,25 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             return empty_result;
                         }
 
+                        // UNLAYERED_MOD -- the two version gates below (this one and the prime-tower one further
+                        // down) migrate projects written by BambuStudio/OrcaSlicer BEFORE 1.5.9 and 2.0.0. This fork
+                        // writes its OWN version into the OrcaSlicer metadata tag (bbs_3mf.cpp, where that tag beats
+                        // the BambuStudio compatibility version), and that version line starts at 0.0.x -- so EVERY
+                        // project this slicer saves reads as older than both thresholds and gets migrations meant for
+                        // years-old Bambu files.
+                        //
+                        // Measured symptom: the translate_old block captures the plate size from whatever printer was
+                        // loaded BEFORE the import and restores it afterwards, so a project saved for a 250x210 bed
+                        // came back with plates spaced for a 190x190 one while the shapes stayed 250x210 -- 22 mm of
+                        // overlap, cleared only by switching printer and back, which forces a genuine reset_size.
+                        //
+                        // OrcaSlicer has never published a 0.x release (it starts at 1.x), so a major of 0 in that tag
+                        // can only mean this fork wrote the file, and it must not be migrated.
+                        const bool written_by_this_fork = (file_version.maj() == 0);
                         Semver old_version(1, 5, 9);
                         // A published 3MF has no project config to migrate: skip the old-version
                         // translations even if a slicer tag slipped through classification.
-                        if ((en_3mf_file_type == En3mfType::From_BBS || en_3mf_file_type == En3mfType::From_Orca) && (file_version < old_version) && !published_config.published && load_model && load_config && !config_loaded.empty()) {
+                        if (! written_by_this_fork && (en_3mf_file_type == En3mfType::From_BBS || en_3mf_file_type == En3mfType::From_Orca) && (file_version < old_version) && !published_config.published && load_model && load_config && !config_loaded.empty()) {
                             translate_old = true;
                             partplate_list.get_plate_size(current_width, current_depth, current_height);
                         }
@@ -8765,7 +8802,12 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 //set the size back
                                 partplate_list.reset_size(current_width + Bed3D::Axes::DefaultTipRadius, current_depth + Bed3D::Axes::DefaultTipRadius, current_height, false);
                             }
-                            project_filament_count = config_loaded.option<ConfigOptionStrings>("filament_colour")->size();
+                            // UNLAYERED_MOD: a project whose embedded config only half-parsed (bbs_3mf stops at the
+                            // first bad key and merely logs) has no filament_colour; keep the default of 1 instead
+                            // of dereferencing null. Seen on web-app 3mfs, crash logs 2026-08-16/17.
+                            if (const ConfigOptionStrings *colours = config_loaded.option<ConfigOptionStrings>("filament_colour");
+                                colours != nullptr && !colours->values.empty())
+                                project_filament_count = int(colours->values.size());
                             partplate_list.load_from_3mf_structure(plate_data, project_filament_count);
                             partplate_list.update_slice_context_to_current_plate(background_process);
                             this->preview->update_gcode_result(partplate_list.get_current_slice_result());
@@ -8857,7 +8899,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         {
                             // BBS: modify the prime tower params for old version file
                             Semver old_version3(2, 0, 0);
-                            if ((en_3mf_file_type == En3mfType::From_BBS || en_3mf_file_type == En3mfType::From_Orca) && !published_config.published && file_version < old_version3) {
+                            // Same misdetection as written_by_this_fork above, same exemption.
+                            if (file_version.maj() != 0 && (en_3mf_file_type == En3mfType::From_BBS || en_3mf_file_type == En3mfType::From_Orca) && !published_config.published && file_version < old_version3) {
                                 double old_filament_prime_volume = 0.;
                                 int    filament_count            = 0;
                                 {
@@ -9706,6 +9749,11 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
 #ifdef AUTOPLACEMENT_ON_LOAD
             object->center_around_origin();
             new_instances.emplace_back(object->add_instance());
+            // Freshly imported object (no instances in the source) — honour the
+            // requested auto-drop policy (true for imports). This is the only place
+            // a brand-new instance is created; instances that arrive with the object
+            // (3mf projects, cut pieces) keep their own saved/assigned auto_drop.
+            new_instances.back()->auto_drop = auto_drop;
 #else /* AUTOPLACEMENT_ON_LOAD */
             // if object has no defined position(s) we need to rearrange everything after loading
             // need_arrange = true;
@@ -9716,6 +9764,11 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
             //BBS calc transformation
             Geometry::Transformation t = instance->get_transformation();
             instance->set_offset(Slic3r::to_3d(this->bed.build_volume().bed_center(), -object->origin_translation(2)));
+            // Freshly imported object (no instances in the source) — honour the
+            // requested auto-drop policy (true for imports). This is the only place
+            // a brand-new instance is created; instances that arrive with the object
+            // (3mf projects, cut pieces) keep their own saved/assigned auto_drop.
+            instance->auto_drop = auto_drop;
 #endif /* AUTOPLACEMENT_ON_LOAD */
         }
         
@@ -9760,6 +9813,15 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
         }
         else {
             object->ensure_on_bed(allow_negative_z);
+
+            // UNLAYERED_MOD — the caller's auto_drop argument is the policy, including for fresh
+            // imports. This used to clear the flag unconditionally on a fresh import ("seat once,
+            // then never re-snap", ebc368e416), which silently overrode both the argument set a
+            // few lines above and the user's answer to the "Auto-Drop" checkbox on the
+            // multiple-file load dialog. Objects that should not re-snap get that from the caller
+            // (load_files passes the checkbox through) or from the per-object override on the
+            // context menu / the 'd' key; Selection::render_bounding_box draws corner arrows
+            // while it is off, so the state stays visible.
         }
 
         if (!split_object) {
@@ -10065,6 +10127,20 @@ void Plater::priv::object_list_changed()
     wxGetApp().params_panel()->notify_object_config_changed();
 
     q->mark_plate_toolbar_image_dirty();
+
+    // Unlayered: one slicer.plateChanged per burst of changes, for embedded web applications
+    // (WEB_APP_BRIDGE.md section 4.5). This runs several times per user action, so the event is
+    // coalesced onto the next event-loop turn. Queued on q, so it dies with the Plater.
+    if (!m_plate_changed_notify_pending) {
+        m_plate_changed_notify_pending = true;
+        q->CallAfter([this]() {
+            m_plate_changed_notify_pending = false;
+            WebAppPanel::notify_all("slicer.plateChanged",
+                                    json{{"currentPlate", partplate_list.get_curr_plate_index()},
+                                         {"plateCount", partplate_list.get_plate_count()},
+                                         {"objectCount", model.objects.size()}});
+        });
+    }
 }
 
 void Plater::priv::select_curr_plate_all()
@@ -10135,6 +10211,7 @@ bool Plater::priv::delete_object_from_model(size_t obj_idx, bool refresh_immedia
     if (obj->is_cut())
         sidebar->obj_list()->invalidate_cut_info_for_object(obj_idx);
 
+    skeleton_registry.erase(model.objects[obj_idx]->id());
     model.delete_object(obj_idx);
     //BBS: notify partplate the instance removed
     partplate_list.notify_instance_removed(obj_idx, -1);
@@ -10168,6 +10245,7 @@ void Plater::priv::delete_all_objects_from_model()
     //BBS: update partplate
     partplate_list.clear();
 
+    skeleton_registry.clear();
     model.clear_objects();
     update();
     // Delete object from Sidebar list. Do it after update, so that the GLScene selection is updated with the modified model.
@@ -12189,7 +12267,6 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
         plate_object.emplace_back(obj_idxs);
     }
 
-    bool flag = is_support_filament(idx);
     //! Because of The MSW and GTK version of wxBitmapComboBox derived from wxComboBox,
     //! but the OSX version derived from wxOwnerDrawnCombo.
     //! So, to get selected string we do
@@ -12210,25 +12287,13 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
     }
 
     if (preset_type == Preset::TYPE_FILAMENT) {
-        wxGetApp().preset_bundle->set_filament_preset(idx, preset_name);
-        wxGetApp().plater()->update_project_dirty_from_presets();
-        wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
-        sidebar->update_dynamic_filament_list();
-        bool flag_is_change = is_support_filament(idx);
-        if (flag != flag_is_change && wxGetApp().app_config->get("auto_calculate_flush") == "all") {
-            sidebar->auto_calc_flushing_volumes(idx);
-        }
-        auto select_flag = combo->GetFlag(selection);
-        combo->ShowBadge(select_flag == (int)PresetComboBox::FilamentAMSType::FROM_AMS);
-        q->on_filament_change(idx);
+        // Unlayered: the whole filament sequence lives in apply_filament_selection(), shared with
+        // Plater::select_filament_preset(), which has no combo box to read from.
+        apply_filament_selection(idx, preset_name, combo, selection);
     }
-    bool select_preset = !combo->selection_is_changed_according_to_physical_printers();
+    bool select_preset = preset_type != Preset::TYPE_FILAMENT && !combo->selection_is_changed_according_to_physical_printers();
     // TODO: ?
-    if (preset_type == Preset::TYPE_FILAMENT && sidebar->is_multifilament()) {
-        // Only update the plater UI for the 2nd and other filaments.
-        combo->update();
-    }
-    else if (select_preset) {
+    if (select_preset) {
         if (preset_type == Preset::TYPE_PRINTER) {
             PhysicalPrinterCollection& physical_printers = wxGetApp().preset_bundle->physical_printers;
             if(combo->is_selected_physical_printer())
@@ -12292,14 +12357,9 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
         }
     }
 
-    // ORCA: Always refresh the selected filament combo so its color swatch (clr_picker)
-    // matches the chosen preset. update_ams_color() (in OnSelect) updates the project
-    // filament color when the preset defines one; this repaints the swatch to match.
-    if (preset_type == Preset::TYPE_FILAMENT)
-        combo->update();
-
     // update plater with new config
-    q->on_config_change(wxGetApp().preset_bundle->full_config());
+    if (preset_type != Preset::TYPE_FILAMENT) // the filament path did it in apply_filament_selection()
+        q->on_config_change(wxGetApp().preset_bundle->full_config());
     if (preset_type == Preset::TYPE_PRINTER) {
     /* Settings list can be changed after printer preset changing, so
      * update all settings items for all item had it.
@@ -12341,8 +12401,10 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
                     cloud_url = orca_agent->get_cloud_base_url();
                 }
             }
+            // Unlayered: no fallback host. The cloud agent has no base URL any more, so without a
+            // configured one there is nowhere to send the user and the notification is skipped.
             if (cloud_url.empty())
-                cloud_url = "https://cloud.orcaslicer.com";
+                return;
 
             std::string explore_url = cloud_url + "/app/bundles/explore?printers=" + encoded_name;
 
@@ -12356,9 +12418,6 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
     // So, set the focus to the combobox explicitly
     combo->SetFocus();
 #endif
-    if (preset_type == Preset::TYPE_FILAMENT && wxGetApp().app_config->get("auto_calculate_flush") == "all") {
-        wxGetApp().plater()->sidebar().auto_calc_flushing_volumes(idx);
-    }
 
     // BBS: log modify of filament selection
     Slic3r::put_other_changes();
@@ -12367,6 +12426,71 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
     auto plate_list = partplate_list.get_plate_list();
     for (auto plate : plate_list) {
          plate->update_slice_result_valid_state(false);
+    }
+}
+
+void Plater::priv::apply_filament_selection(size_t idx, const std::string& preset_name, PlaterPresetComboBox* combo, int selection)
+{
+    const bool was_support = is_support_filament(int(idx));
+
+    wxGetApp().preset_bundle->set_filament_preset(idx, preset_name);
+    wxGetApp().plater()->update_project_dirty_from_presets();
+    wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
+    sidebar->update_dynamic_filament_list();
+    const bool is_support = is_support_filament(int(idx));
+    if (was_support != is_support && wxGetApp().app_config->get("auto_calculate_flush") == "all") {
+        sidebar->auto_calc_flushing_volumes(int(idx));
+    }
+    if (combo != nullptr) {
+        auto select_flag = combo->GetFlag(selection);
+        combo->ShowBadge(select_flag == (int)PresetComboBox::FilamentAMSType::FROM_AMS);
+    }
+    q->on_filament_change(idx);
+
+    // A filament combo never reports a physical-printer change, so this is true for the user's
+    // pick as well as for a bridge call.
+    const bool select_preset = combo == nullptr || !combo->selection_is_changed_according_to_physical_printers();
+    const bool via_tab       = !sidebar->is_multifilament() && select_preset;
+    if (sidebar->is_multifilament()) {
+        // Only update the plater UI for the 2nd and other filaments.
+        if (combo != nullptr)
+            combo->update();
+    } else if (select_preset) {
+        // BBS
+        // wxWindowUpdateLocker noUpdates1(sidebar->print_panel());
+        wxWindowUpdateLocker noUpdates2(sidebar->filament_panel());
+        wxGetApp().get_tab(Preset::TYPE_FILAMENT)->select_preset(preset_name);
+        // update plater with new config
+        q->on_config_change(wxGetApp().preset_bundle->full_config());
+    }
+
+    // ORCA: Always refresh the selected filament combo so its color swatch (clr_picker)
+    // matches the chosen preset. update_ams_color() (in OnSelect) updates the project
+    // filament color when the preset defines one; this repaints the swatch to match.
+    if (combo != nullptr) {
+        combo->update();
+    } else {
+        std::vector<PlaterPresetComboBox*>& combos = sidebar->combos_filament();
+        if (idx < combos.size() && combos[idx] != nullptr)
+            combos[idx]->update();
+    }
+
+    // update plater with new config
+    q->on_config_change(wxGetApp().preset_bundle->full_config());
+
+    if (wxGetApp().app_config->get("auto_calculate_flush") == "all") {
+        wxGetApp().plater()->sidebar().auto_calc_flushing_volumes(int(idx));
+    }
+
+    // Unlayered: for embedded web applications (WEB_APP_BRIDGE.md section 4.5). When the filament
+    // tab did the switch, Tab::on_presets_changed has already reported it.
+    if (!via_tab) {
+        const PresetBundle& bundle = *wxGetApp().preset_bundle;
+        WebAppPanel::notify_all("slicer.presetChanged",
+                                json{{"type", "filament"},
+                                     {"slot", idx},
+                                     {"selected", bundle.filament_presets[idx]},
+                                     {"dirty", bundle.filaments.current_is_dirty()}});
     }
 }
 
@@ -12505,6 +12629,9 @@ void Plater::priv::on_slicing_began()
     bool need_change_dailytips = !(slice_all && !is_first_plate);
     notification_manager->set_slicing_progress_began();
     notification_manager->update_slicing_notif_dailytips(need_change_dailytips);
+
+    // Unlayered: for embedded web applications (WEB_APP_BRIDGE.md section 4.5).
+    WebAppPanel::notify_all("slicer.sliceStarted", json{{"plate", partplate_list.get_curr_plate_index()}});
 }
 void Plater::priv::add_warning(const Slic3r::PrintStateBase::Warning& warning, size_t oid)
 {
@@ -12742,6 +12869,21 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":finished, reload print soon");
         m_is_slicing = false;
+
+        // Unlayered: the outcome of a slice, for embedded web applications (WEB_APP_BRIDGE.md
+        // section 4.5). `stats` is present only when the plate ended with a valid result.
+        {
+            PartPlate* finished_plate = partplate_list.get_curr_plate();
+            json       finished{{"plate", partplate_list.get_curr_plate_index()},
+                                {"ok", evt.success() && !has_error},
+                                {"cancelled", evt.cancelled()}};
+            if (has_error)
+                finished["error"] = evt.format_error_message().first;
+            if (finished_plate != nullptr && finished_plate->is_slice_result_valid())
+                finished["stats"] = WebAppSettings::slice_summary_json(finished_plate);
+            WebAppPanel::notify_all("slicer.sliceFinished", finished);
+        }
+
         this->preview->reload_print(false);
         q->mark_plate_toolbar_image_dirty();
         /* BBS if in publishing progress */
@@ -12909,6 +13051,13 @@ void Plater::priv::on_action_print_plate(SimpleEvent&)
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received print plate event\n" ;
     }
 
+    // Preview-only mode has no plate to print -- it has a loaded file to upload. Ahead of the
+    // BBL branch below on purpose: that dialog drives a slice, and there is nothing to slice.
+    if (q != nullptr && q->only_gcode_mode()) {
+        q->send_loaded_gcode();
+        return;
+    }
+
     PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
     if (preset_bundle.use_bbl_network() || wxGetApp().app_config->get_bool("use_printer_agents")) {
         open_machine_select_dialog(partplate_list.get_curr_plate_index());
@@ -12963,6 +13112,17 @@ void Plater::priv::on_tab_selection_changing(wxBookCtrlEvent& e)
     sidebar_layout.show = new_name == TAB_ID_PREPARE || new_name == TAB_ID_PREVIEW;
     update_sidebar();
     int old_sel = e.GetOldSelection();
+
+    // Unlayered: re-entering the web application tab retries a load that previously failed, the
+    // same way re-entering the Device tab reloads the missing_connection page below.
+    for (WebAppPanel* panel : {main_frame->m_web_app_view, main_frame->m_agent_view,
+                               main_frame->m_universe_view}) {
+        if (panel == nullptr || panel != main_frame->m_tabpanel->GetPage(new_sel))
+            continue;
+        if (panel->is_showing_fallback())
+            panel->load_home();
+    }
+
     const bool use_printer_agents = wxGetApp().app_config->get_bool("use_printer_agents");
     const bool use_native_device_tab = wxGetApp().preset_bundle &&
         (wxGetApp().preset_bundle->use_bbl_device_tab() || use_printer_agents);
@@ -13032,6 +13192,12 @@ void Plater::priv::on_action_print_all(SimpleEvent&)
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received print all event\n" ;
     }
 
+    // Preview-only mode: "all plates" is one loaded file. Same short path as print_plate.
+    if (q != nullptr && q->only_gcode_mode()) {
+        q->send_loaded_gcode();
+        return;
+    }
+
     PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
     if (preset_bundle.use_bbl_network() || wxGetApp().app_config->get_bool("use_printer_agents")) {
         open_machine_select_dialog(PLATE_ALL_IDX);
@@ -13044,7 +13210,10 @@ void Plater::priv::on_action_export_gcode(SimpleEvent&)
 {
     if (q != nullptr) {
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received export gcode event\n" ;
-        q->export_gcode(false);
+        if (q->only_gcode_mode())
+            q->export_loaded_gcode();   // save the file being previewed, no slice behind it
+        else
+            q->export_gcode(false);
     }
 }
 
@@ -13052,7 +13221,10 @@ void Plater::priv::on_action_send_gcode(SimpleEvent&)
 {
     if (q != nullptr) {
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received export gcode event\n" ;
-        q->send_gcode_legacy();
+        if (q->only_gcode_mode())
+            q->send_loaded_gcode();     // upload the file being previewed
+        else
+            q->send_gcode_legacy();
     }
 }
 
@@ -13164,8 +13336,9 @@ void Plater::priv::on_filament_color_changed(wxCommandEvent &event)
 
 void Plater::priv::install_network_plugin(wxCommandEvent &event)
 {
-    wxGetApp().ShowDownNetPluginDlg();
-    return;
+    // Unlayered: nothing fires EVT_INSTALL_PLUGIN_NETWORKING any more - the notification that used
+    // to offer it no longer has an action. Left as a no-op rather than unbinding, so a stray event
+    // cannot open a dialog for a plug-in that cannot be installed.
 }
 
 void Plater::priv::update_plugin_when_launch(wxCommandEvent &event)
@@ -13531,7 +13704,7 @@ void Plater::priv::set_project_name(const wxString& project_name)
     if (!m_project_name.IsEmpty())
         wxGetApp().mainframe->update_title_colour_after_set_title();
 #else
-    wxGetApp().mainframe->SetTitle(m_project_name + " - OrcaSlicer");
+    wxGetApp().mainframe->SetTitle(m_project_name + " - " + SLIC3R_APP_FULL_NAME);
     wxGetApp().mainframe->topbar()->SetTitle(m_project_name);
 #endif
 }
@@ -13551,7 +13724,7 @@ void Plater::priv::update_title_dirty_status()
     wxGetApp().mainframe->SetTitle(title);
     wxGetApp().mainframe->update_title_colour_after_set_title();
 #else
-    wxGetApp().mainframe->SetTitle(title + " - OrcaSlicer");
+    wxGetApp().mainframe->SetTitle(title + " - " + SLIC3R_APP_FULL_NAME);
     wxGetApp().mainframe->topbar()->SetTitle(title);
 #endif    
 }
@@ -14708,7 +14881,7 @@ void Plater::priv::bring_instance_forward() const
         BOOST_LOG_TRIVIAL(debug) << "Couldnt bring instance forward - mainframe is null";
         return;
     }
-    BOOST_LOG_TRIVIAL(debug) << "Orca Slicer window going forward";
+    BOOST_LOG_TRIVIAL(debug) << "Unlayered Slicer window going forward";
     //this code maximize app window on Fedora
     {
         main_frame->Iconize(false);
@@ -15131,6 +15304,8 @@ void Plater::priv::handle_textured_mesh_import(Slic3r::Model& loaded_model, cons
 Sidebar&        Plater::sidebar()           { return *p->sidebar; }
 const Model&    Plater::model() const       { return p->model; }
 Model&          Plater::model()             { return p->model; }
+SkeletonRegistry&       Plater::skeleton_registry()       { return p->skeleton_registry; }
+const SkeletonRegistry& Plater::skeleton_registry() const { return p->skeleton_registry; }
 const Print&    Plater::fff_print() const   { return p->fff_print; }
 Print&          Plater::fff_print()         { return p->fff_print; }
 const SLAPrint& Plater::sla_print() const   { return p->sla_print; }
@@ -15581,7 +15756,7 @@ void Plater::import_model_id(wxString download_info)
                         error);
 
                     if (retry_count == max_retries) {
-                        msg = _L("Importing to Orca Slicer failed. Please download the file and manually import it.");
+                        msg = _L("Importing to Unlayered Slicer failed. Please download the file and manually import it.");
                         cont = false;
                     }
                 })
@@ -16902,7 +17077,12 @@ void Plater::load_gcode(const wxString& filename)
         p->view3D->get_canvas3d()->remove_raycasters_for_picking(SceneRaycaster::EType::Bed);
     }
 
-    p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, false, false); //20250416 ban gcode to send print
+    // Slice stays off -- there is nothing to slice -- but Print and Export G-code now work on the
+    // loaded file itself (Plater::send_loaded_gcode / export_loaded_gcode). This used to pass
+    // can_print=false ("20250416 ban gcode to send print"), which was right while the only send
+    // path ran through the background process and would have uploaded whatever the last slice
+    // left behind; it no longer is.
+    p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, false, true);
 }
 
 void Plater::reload_gcode_from_disk()
@@ -18677,7 +18857,8 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls, Fil
                     inst_mesh.merge(inst_object_mesh);
 
                            // ensure that the instance lays on the bed
-                    inst_mesh.translate(0.0f, 0.0f, -inst_mesh.bounding_box().min.z());
+                    //UNLAYERED_MOD
+                    //inst_mesh.translate(0.0f, 0.0f, -inst_mesh.bounding_box().min.z());
 
                            // merge instance with global mesh
                     mesh.merge(inst_mesh);
@@ -19470,6 +19651,238 @@ void Plater::reslice_SLA_until_step(SLAPrintObjectStep step, const ModelObject &
     // and let the background processing start.
     this->p->restart_background_process(state | priv::UPDATE_BACKGROUND_PROCESS_FORCE_RESTART);
 }
+// ---------------------------------------------------------------------------------------------
+// Nonplanar slicing by an external service
+//
+// The plate goes out as a .3mf, G-code comes back and opens in the preview. The protocol, the
+// address setting and the reasoning are in NONPLANAR_SLICE_SERVICE.md; nothing here knows which
+// service is configured. Local slicing takes no part: this does not touch the background
+// process, so a plate can be sliced nonplanar without disturbing whatever it last produced.
+//
+// The export has to happen HERE rather than inside the job: it walks the model and the plate
+// list and renders nothing thread-safe, so it belongs on the GUI thread. Everything after it is
+// network work and runs on the UI job worker.
+// ---------------------------------------------------------------------------------------------
+
+bool Plater::can_slice_nonplanar() const
+{
+    if (! NonplanarSliceClient::is_configured())
+        return false;
+    // Nothing to send, or we are already looking at a G-code file rather than a model.
+    return ! p->model.objects.empty() && ! m_only_gcode && ! m_exported_file;
+}
+
+void Plater::slice_nonplanar()
+{
+    const std::string url = NonplanarSliceClient::configured_url();
+    const std::string problem = NonplanarSliceClient::url_problem(url);
+    if (! problem.empty()) {
+        show_error(this, _L("The nonplanar slicing service cannot be used") + ": " + from_u8(problem));
+        return;
+    }
+    if (p->model.objects.empty()) {
+        show_error(this, _L("There is nothing on the plate to slice."));
+        return;
+    }
+    if (! get_ui_job_worker().is_idle()) {
+        show_error(this, _L("Another background task is still running; try again in a moment."));
+        return;
+    }
+
+    const fs::path work_dir = into_path(from_u8(data_dir())) / "cache" / "nonplanar";
+    boost::system::error_code ec;
+    fs::create_directories(work_dir, ec);
+    if (ec) {
+        show_error(this, _L("A working folder for nonplanar slicing could not be created") + ":\n" +
+                   from_u8(ec.message()));
+        return;
+    }
+
+    // A fresh name per run: the export is transient and two runs must never collide.
+    const fs::path stem       = work_dir / fs::unique_path("plate-%%%%-%%%%-%%%%-%%%%");
+    const fs::path plate_3mf  = fs::path(stem).replace_extension(".3mf");
+    const fs::path settings_json = fs::path(stem).replace_extension(".settings.json");
+
+    // Silence: no "project saved" side effects -- this is a courier file, not the user's project.
+    if (export_3mf(plate_3mf, SaveStrategy::Silence | SaveStrategy::SplitModel) < 0) {
+        show_error(this, _L("The plate could not be exported for nonplanar slicing."));
+        fs::remove(plate_3mf, ec);
+        return;
+    }
+
+    // The RESOLVED settings, not preset names. A service usually cannot see the user's preset
+    // library -- a hosted one certainly cannot -- so names would be unresolvable there and the
+    // two programs would have to agree on a profile catalogue. Sending the values removes that
+    // whole class of failure. This is the same serialization, from the same config, that goes
+    // into a project's Metadata/project_settings.config, so a service already reading those
+    // needs nothing new. Names still go along as labels.
+    PresetBundle &bundle = *wxGetApp().preset_bundle;
+    const std::string printer  = bundle.printers.get_selected_preset_name();
+    const std::string process  = bundle.prints.get_selected_preset_name();
+    const std::string filament = bundle.filament_presets.empty() ? std::string()
+                                                                 : bundle.filament_presets.front();
+    try {
+        const DynamicPrintConfig cfg = bundle.full_config_secure();
+        cfg.save_to_json(settings_json.string(), std::string("nonplanar_slice"),
+                         std::string("project"), std::string(SLIC3R_VERSION));
+    } catch (const std::exception &ex) {
+        show_error(this, _L("The print settings could not be prepared for nonplanar slicing") +
+                   ":\n" + from_u8(ex.what()));
+        fs::remove(plate_3mf, ec);
+        fs::remove(settings_json, ec);
+        return;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << boost::format("Plater::slice_nonplanar: %1% -> %2% (printer %3%)")
+                                   % plate_3mf.filename().string() % url % printer;
+
+    replace_job(get_ui_job_worker(),
+                std::make_unique<NonplanarSliceJob>(url, plate_3mf, settings_json,
+                                                    printer, process, filament, work_dir));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Preview-only mode: saving and printing the G-code file that was LOADED
+//
+// A file opened with load_gcode() has no model, no plate slice result and no background process
+// behind it, so export_gcode()/send_gcode_legacy() both bail out immediately (they start from
+// "slice, then take the output"). The file itself is the whole artifact, though, and there is no
+// reason a G-code the application is showing cannot be saved elsewhere or sent to the printer --
+// which is the entire workflow when the G-code came from somewhere else, e.g. an external slicer
+// handing one over through the web-app bridge.
+//
+// So these two are the short path: no slicing, no placeholder parser, no background process --
+// a file copy, and the same PrintHostJob the sliced path ends up building. Deliberately narrow:
+// they refuse unless preview-only mode really is showing a file that still exists on disk.
+// ---------------------------------------------------------------------------------------------
+
+// The loaded file, or an empty path when there is no longer one on disk. A stale path is a real
+// case: the web-app bridge downloads into <data dir>/cache/webapp, which anything may clean up.
+static fs::path loaded_gcode_path(const wxString& last_loaded)
+{
+    if (last_loaded.empty())
+        return {};
+    const fs::path path = into_path(last_loaded);
+    boost::system::error_code ec;
+    return fs::is_regular_file(path, ec) ? path : fs::path{};
+}
+
+bool Plater::can_export_loaded_gcode() const
+{
+    return m_only_gcode && ! loaded_gcode_path(m_last_loaded_gcode).empty();
+}
+
+bool Plater::can_send_loaded_gcode() const
+{
+    if (! can_export_loaded_gcode())
+        return false;
+    // Same test the sliced path's menu uses: a print host has to be configured to send anywhere.
+    const DynamicPrintConfig& cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const auto* print_host_opt = cfg.option<ConfigOptionString>("print_host");
+    return print_host_opt != nullptr && ! print_host_opt->value.empty();
+}
+
+bool Plater::export_loaded_gcode()
+{
+    const fs::path source = loaded_gcode_path(m_last_loaded_gcode);
+    if (source.empty()) {
+        show_error(this, _L("The G-code file being previewed is no longer on disk."));
+        return false;
+    }
+
+    AppConfig& appconfig = *wxGetApp().app_config;
+    const std::string start_dir = appconfig.get_last_output_dir(source.parent_path().string(), false);
+
+    wxFileDialog dlg(this, _L("Save G-code file as:"), start_dir, from_path(source.filename()),
+                     GUI::file_wildcards(FT_GCODE, source.extension().string()),
+                     wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dlg.ShowModal() != wxID_OK)
+        return false;
+
+    fs::path output_path = into_path(dlg.GetPath());
+    while (has_illegal_filename_characters(output_path.filename().string())) {
+        show_error(this, _L("The provided file name is not valid.") + "\n" +
+                   _L("The following characters are not allowed by a FAT file system:") + " <>:/\\|?*\"");
+        dlg.SetFilename(from_path(output_path.filename()));
+        if (dlg.ShowModal() != wxID_OK)
+            return false;
+        output_path = into_path(dlg.GetPath());
+    }
+    if (output_path.empty())
+        return false;
+
+    if (fs::equivalent(source, output_path, boost::system::error_code{}))
+        return true;   // saving it over itself: nothing to do, and copy_file would truncate it
+
+    boost::system::error_code ec;
+    fs::copy_file(source, output_path, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        show_error(this, _L("Saving the G-code file failed") + ":\n" + from_u8(ec.message()));
+        return false;
+    }
+
+    appconfig.update_last_output_dir(output_path.parent_path().string(), false);
+    p->notification_manager->push_exporting_finished_notification(
+        output_path.string(), output_path.parent_path().string(), false);
+    return true;
+}
+
+bool Plater::send_loaded_gcode()
+{
+    const fs::path source = loaded_gcode_path(m_last_loaded_gcode);
+    if (source.empty()) {
+        show_error(this, _L("The G-code file being previewed is no longer on disk."));
+        return false;
+    }
+
+    DynamicPrintConfig* printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    PrintHostJob upload_job(printer_config);
+    if (upload_job.empty()) {
+        show_error(this, _L("Set a print host for this printer in Printer Settings first."));
+        return false;
+    }
+
+    // Repetier / PrusaLink ask the server what it will accept; harmless elsewhere.
+    wxArrayString groups;
+    wxArrayString storage_paths, storage_names;
+    {
+        wxBusyCursor wait;
+        upload_job.printhost->get_groups(groups);
+        try {
+            upload_job.printhost->get_storage(storage_paths, storage_names);
+        } catch (const Slic3r::IOError& ex) {
+            show_error(this, ex.what(), false);
+            return false;
+        }
+    }
+
+    // The dialog only asks for the name to store it under and whether to start the print -- WHERE
+    // it goes is print_host from the printer preset, which PrintHostJob already resolved above.
+    // init() is mandatory and separate from the constructor (it is virtual, so subclasses can
+    // extend it): the constructor only creates the controls, and init() is what puts them in the
+    // sizer, builds the OK/Cancel buttons and fits the window. Without it the dialog comes up as
+    // an empty stub with no buttons.
+    PrintHostSendDialog dlg(source.filename(), upload_job.printhost->get_post_upload_actions(),
+                            groups, storage_paths, storage_names,
+                            get_app_config()->get_bool("open_device_tab_post_upload"));
+    dlg.init();
+    if (dlg.ShowModal() != wxID_OK)
+        return false;
+
+    // The file already exists, so unlike the sliced path there is nothing to schedule and wait
+    // for: hand it straight to the upload queue. use_3mf stays false -- what we have is G-code.
+    upload_job.upload_data.use_3mf        = false;
+    upload_job.upload_data.source_path    = source;
+    upload_job.upload_data.upload_path    = dlg.filename();
+    upload_job.upload_data.group          = dlg.group();
+    upload_job.upload_data.storage        = dlg.storage();
+    upload_job.upload_data.post_action    = dlg.post_action();
+    upload_job.upload_data.extended_info  = dlg.extendedInfo();
+    upload_job.switch_to_device_tab       = dlg.switch_to_device_tab();
+    wxGetApp().printhost_job_queue().enqueue(std::move(upload_job));
+    return true;
+}
+
 void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
 {
     // if physical_printer is selected, send gcode for this printer
@@ -19888,6 +20301,30 @@ void Plater::on_filament_change(size_t filament_idx)
     if (filament == nullptr)
         return;
     std::string filament_type = filament->config.option<ConfigOptionStrings>("filament_type")->values[0];
+}
+
+bool Plater::select_filament_preset(size_t idx, const std::string& preset_name)
+{
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || idx >= bundle->filament_presets.size() || preset_name.empty())
+        return false;
+
+    // Name first, then alias (what the dropdown shows), with any "(modified)" suffix removed.
+    std::string resolved = Preset::remove_suffix_modified(preset_name);
+    if (bundle->filaments.find_preset(resolved) == nullptr)
+        resolved = bundle->get_preset_name_by_alias(Preset::TYPE_FILAMENT, resolved);
+    if (bundle->filaments.find_preset(resolved) == nullptr)
+        return false;
+
+    // No combo box and no selection index: the sequence takes the name as given, so the private
+    // editing_filament latch Sidebar::update_presets relies on never comes into play.
+    p->apply_filament_selection(idx, resolved, nullptr, -1);
+
+    // What on_select_preset() does for every preset change: the sliced result is stale.
+    for (PartPlate* plate : p->partplate_list.get_plate_list())
+        plate->update_slice_result_valid_state(false);
+
+    return bundle->filament_presets[idx] == resolved;
 }
 
 // BBS.
@@ -20782,7 +21219,7 @@ void Plater::pop_warning_and_go_to_device_page(wxString printer_name, PrinterWar
                                        printer_name);
         } else {
             content = wxString::Format(
-                _L("OrcaSlicer can't connect to %s. Please check if the printer is powered on and connected to the network."), printer_name);
+                _L("Unlayered Slicer can't connect to %s. Please check if the printer is powered on and connected to the network."), printer_name);
         }
     } else if (type == PrinterWarningType::INCONSISTENT) {
         content = wxString::Format(_L("The currently connected printer on the device page is not %s. Please switch to %s before syncing."), printer_name, printer_name);
@@ -21367,27 +21804,25 @@ bool Plater::refresh_missing_plugin_block(bool* block_toggled)
 
     const std::vector<MissingPlugin> missing_cloud = get_missing_cloud_plugins();
     const std::vector<MissingPlugin> missing_local = get_missing_local_plugins();
-    const std::vector<std::string> missing_cloud_refs = missing_refs(missing_cloud);
-    const std::vector<std::string> missing_local_refs = missing_refs(missing_local);
 
+    // Unlayered: there is no plugin cloud in this build, so a plugin the preset needs can only come
+    // from a local package. Both notifications open the Plugins dialog instead of installing from
+    // or searching the Orca hub; neither closes the notification (the user resolves it by installing
+    // the plugin or changing the setting that needs it).
     update(NotificationType::OrcaCloudPluginMissingError, missing_cloud,
            &p->m_cloud_missing_shown_sig,
-           _u8L("OrcaCloud plugins required by the current preset are not installed:"),
-           _u8L("Install Plugins"),
-           [this, missing_cloud_refs](wxEvtHandler*) { install_missing_cloud_plugins(missing_cloud_refs); return false; });
-    // "Find on OrcaCloud" is only a suggestion: it opens the browser but cannot resolve the missing
-    // plugin in-session, so it never closes the notification or unblocks slicing. The user resolves a
-    // local plugin by installing it or by changing the setting that needs it.
+           _u8L("Plugins required by the current preset are not installed:"),
+           _u8L("Open Plugins"),
+           [](wxEvtHandler*) { wxGetApp().open_plugins_dialog(); return false; });
     update(NotificationType::OrcaLocalPluginMissingError, missing_local,
            &p->m_local_missing_shown_sig,
            _u8L("Local plugins required by the current preset are missing:"),
-           _u8L("Find on OrcaCloud"),
-           [missing_local_refs](wxEvtHandler*) { open_missing_plugins_on_cloud(missing_local_refs); return false; });
+           _u8L("Open Plugins"),
+           [](wxEvtHandler*) { wxGetApp().open_plugins_dialog(); return false; });
 
     const std::vector<MissingPlugin> inactive      = get_inactive_plugins();
     const std::vector<MissingPlugin> broken        = get_broken_plugins();
     const std::vector<std::string>   inactive_refs = missing_refs(inactive);
-    const std::vector<std::string>   broken_refs   = missing_refs(broken);
 
     update(NotificationType::OrcaPluginInactiveError, inactive,
            &p->m_inactive_shown_sig,
@@ -21397,8 +21832,8 @@ bool Plater::refresh_missing_plugin_block(bool* block_toggled)
     update(NotificationType::OrcaPluginCapabilityUnavailableError, broken,
            &p->m_broken_shown_sig,
            _u8L("The installed plugin does not provide the required capability — it may be outdated:"),
-           _u8L("Find on OrcaCloud"),
-           [broken_refs](wxEvtHandler*) { open_missing_plugins_on_cloud(broken_refs); return false; });
+           _u8L("Open Plugins"),
+           [](wxEvtHandler*) { wxGetApp().open_plugins_dialog(); return false; });
 
     const bool blocked = has_missing_plugins() || has_inactive_plugins() || has_broken_plugins();
     if (block_toggled)

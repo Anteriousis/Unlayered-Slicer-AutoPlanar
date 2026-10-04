@@ -88,6 +88,68 @@ Slic3r::ColorRGBA adjust_color_for_rendering(const Slic3r::ColorRGBA &colors)
         return colors;
 }
 
+Slic3r::ColorRGBA cut_segment_color(size_t idx)
+{
+    // The 16 ORCA filament palette colors (see Plater::get_next_color_for_filament — that function
+    // is stateful and must not be called here), pre-decoded to linear floats.
+    static constexpr size_t N = 16;
+    static const std::array<Slic3r::ColorRGBA, N> palette = { {
+        { 0x00 / 255.f, 0xC1 / 255.f, 0xAE / 255.f, 1.f }, // #00C1AE
+        { 0xF4 / 255.f, 0xE2 / 255.f, 0xC1 / 255.f, 1.f }, // #F4E2C1
+        { 0xED / 255.f, 0x1C / 255.f, 0x24 / 255.f, 1.f }, // #ED1C24
+        { 0x00 / 255.f, 0xFF / 255.f, 0x7F / 255.f, 1.f }, // #00FF7F
+        { 0xF2 / 255.f, 0x67 / 255.f, 0x22 / 255.f, 1.f }, // #F26722
+        { 0xFF / 255.f, 0xEB / 255.f, 0x31 / 255.f, 1.f }, // #FFEB31
+        { 0x78 / 255.f, 0x41 / 255.f, 0xCE / 255.f, 1.f }, // #7841CE
+        { 0x11 / 255.f, 0x58 / 255.f, 0x77 / 255.f, 1.f }, // #115877
+        { 0xED / 255.f, 0x1E / 255.f, 0x79 / 255.f, 1.f }, // #ED1E79
+        { 0x2E / 255.f, 0xBD / 255.f, 0xEF / 255.f, 1.f }, // #2EBDEF
+        { 0x34 / 255.f, 0x5B / 255.f, 0x2F / 255.f, 1.f }, // #345B2F
+        { 0x80 / 255.f, 0x00 / 255.f, 0x80 / 255.f, 1.f }, // #800080
+        { 0xFA / 255.f, 0x81 / 255.f, 0x73 / 255.f, 1.f }, // #FA8173
+        { 0x80 / 255.f, 0x00 / 255.f, 0x00 / 255.f, 1.f }, // #800000
+        { 0xF7 / 255.f, 0xB7 / 255.f, 0x63 / 255.f, 1.f }, // #F7B763
+        { 0xA4 / 255.f, 0xC4 / 255.f, 0x1E / 255.f, 1.f }, // #A4C41E
+    } };
+    if (idx < N)
+        return adjust_color_for_rendering(palette[idx]);
+
+    // Past the curated palette the old code wrapped (idx % N), so section 16 was drawn in section
+    // 0's colour -- and two sections meeting at a cut plane could end up identical. Generate
+    // further colours instead: hues come from a bit-reversed (van der Corput) sequence so that
+    // consecutively numbered sections land far apart on the wheel, and three saturation/value
+    // bands separate hues that eventually come close. All integer arithmetic, so a section's
+    // colour is bit-identical on every platform -- which is what keeps the Prepare tab and the
+    // G-code preview (which calls this same function) in lockstep.
+    const unsigned k = unsigned(idx - N);
+    const unsigned seq = k / 3u;
+    unsigned rev = 0;
+    for (int bit = 0; bit < 10; ++ bit)
+        rev = (rev << 1) | ((seq >> bit) & 1u);
+    const unsigned h = (rev * 360u) >> 10;          // 0..359
+    static constexpr unsigned char band_s[3] = { 255, 190, 255 };
+    static constexpr unsigned char band_v[3] = { 235, 255, 165 };
+    const unsigned s = band_s[k % 3u];
+    const unsigned v = band_v[k % 3u];
+
+    // Integer HSV -> RGB.
+    const unsigned region = h / 60u;
+    const unsigned rem    = (h - region * 60u) * 255u / 60u;   // 0..254 within the sector
+    const unsigned p = (v * (255u - s)) / 255u;
+    const unsigned q = (v * (255u - (s * rem) / 255u)) / 255u;
+    const unsigned t = (v * (255u - (s * (255u - rem)) / 255u)) / 255u;
+    unsigned r = 0, g = 0, b = 0;
+    switch (region) {
+    case 0:  r = v; g = t; b = p; break;
+    case 1:  r = q; g = v; b = p; break;
+    case 2:  r = p; g = v; b = t; break;
+    case 3:  r = p; g = q; b = v; break;
+    case 4:  r = t; g = p; b = v; break;
+    default: r = v; g = p; b = q; break;
+    }
+    return adjust_color_for_rendering({ r / 255.f, g / 255.f, b / 255.f, 1.f });
+}
+
 namespace Slic3r {
 
 
@@ -734,6 +796,33 @@ void GLVolume::simple_render(GLShaderProgram* shader, ModelObjectPtrs& model_obj
         glFrontFace(GL_CCW);
 }
 
+void GLVolume::render_cut_chunks() const
+{
+    GLShaderProgram* shader = GUI::wxGetApp().get_current_shader();
+    if (shader == nullptr || !cut_chunk_preview)
+        return;
+    // The chunks sit in the instance frame only, so a mirrored instance reverses their winding
+    // (the volume's own is_left_handed() also folds in the part's mirror, which does not apply).
+    const bool mirrored = m_instance_transformation.is_left_handed();
+    if (mirrored)
+        glsafe(::glFrontFace(GL_CW));
+    glsafe(::glCullFace(GL_BACK));
+    for (size_t i = 0; i < cut_chunk_preview->models.size(); ++i) {
+        GUI::GLModel& m = cut_chunk_preview->models[i];
+        if (!m.is_initialized())
+            continue;
+        ColorRGBA c = adjust_color_for_rendering(cut_segment_color(i));
+        if (selected)
+            c = brighten_color(c, 1.25f);
+        if (force_transparent)
+            c.a(render_color.a());
+        m.set_color(c);
+        m.render(shader);
+    }
+    if (mirrored)
+        glsafe(::glFrontFace(GL_CCW));
+}
+
 bool GLVolume::is_sla_support() const { return this->composite_id.volume_id == -int(slaposSupportTree); }
 bool GLVolume::is_sla_pad() const { return this->composite_id.volume_id == -int(slaposPad); }
 
@@ -1029,6 +1118,18 @@ GLVolume* GLVolumeCollection::new_nontoolpath_volume(const ColorRGBA& rgba)
     return out;
 }
 
+int GLVolumeCollection::cut_chunk_mode(const GLVolume& volume, ERenderType type) const
+{
+    if (!m_render_cut_chunks || type != ERenderType::Opaque || !volume.cut_chunk_preview || volume.cut_chunk_preview->models.empty())
+        return 0;
+    // Picking must hit the real mesh; a gizmo that greys out other objects, or a disabled or
+    // hidden part, keeps its usual look. These flags are set per instance, so the owner and its
+    // siblings agree and no part silently disappears.
+    if (volume.picking || volume.disabled || volume.force_neutral_color || !volume.is_active || volume.render_color.is_transparent())
+        return 0;
+    return volume.cut_chunk_owner ? 1 : 2;
+}
+
 GLVolumeWithIdAndZList volumes_to_render(const GLVolumePtrs& volumes, GLVolumeCollection::ERenderType type, const Transform3d& view_matrix, std::function<bool(const GLVolume&)> filter_func)
 {
     GLVolumeWithIdAndZList list;
@@ -1168,6 +1269,10 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType       type,
             volume.first->force_transparent = false;
 #endif // ENABLE_MODIFIERS_ALWAYS_TRANSPARENT
 
+        const int chunk_mode = cut_chunk_mode(*volume.first, type);
+        if (chunk_mode == 2)
+            continue; // a sibling part draws this instance's chunks
+
         // render sinking contours of non-hovered volumes
         shader->stop_using();
         if (sink_shader != nullptr) {
@@ -1243,13 +1348,16 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType       type,
 
 		auto red_color = ColorRGBA{1.0f, 0.0f, 0.0f, 1.0f};//slice_error
         volume.first->model.set_color(volume.first->slice_error ? red_color : volume.first->render_color);
-        const Transform3d model_matrix = volume.first->world_matrix();
+        // Chunks are stored in the object-local frame, so they go under the instance matrix.
+        const Transform3d model_matrix = chunk_mode == 1 ? volume.first->get_instance_transformation().get_matrix() : volume.first->world_matrix();
         shader->set_uniform("view_model_matrix", view_matrix * model_matrix);
         shader->set_uniform("projection_matrix", projection_matrix);
         const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) * model_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
         shader->set_uniform("view_normal_matrix", view_normal_matrix);
 		//BBS: add outline related logic
-        if (volume.first->selected && GUI::wxGetApp().show_outline())
+        if (chunk_mode == 1)
+            volume.first->render_cut_chunks();
+        else if (volume.first->selected && GUI::wxGetApp().show_outline())
             volume.first->render_with_outline(cnv_size);
         else
             volume.first->render();

@@ -80,6 +80,10 @@ public:
         Flatten,
         Cut,
         MeshBoolean,
+        CutChunks, // new
+        RotateLayers, // new
+        Skeleton, // new
+        CutPlanes, // new: declarative (non-destructive) cut planes
         FdmSupports,
         Seam,
         FuzzySkin,

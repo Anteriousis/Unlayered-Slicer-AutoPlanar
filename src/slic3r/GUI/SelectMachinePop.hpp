@@ -71,9 +71,8 @@ wxDECLARE_EVENT(EVT_BIND_MACHINE, wxCommandEvent);
 #define SELECT_MACHINE_GREY900 wxColour(38, 46, 48)
 #define SELECT_MACHINE_GREY600 wxColour(144, 144, 144)
 #define SELECT_MACHINE_GREY400 wxColour(206, 206, 206)
-#define SELECT_MACHINE_BRAND wxColour(0, 150, 136)
+#define SELECT_MACHINE_BRAND wxColour(118, 118, 118)
 #define SELECT_MACHINE_REMIND wxColour(255, 111, 0)
-#define SELECT_MACHINE_LIGHT_GREEN wxColour(219, 253, 231)
 
 class MachineObjectPanel : public wxPanel
 {

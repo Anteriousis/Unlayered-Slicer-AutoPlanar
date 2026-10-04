@@ -622,7 +622,7 @@ void PluginsDialog::prompt_for_missing_plugins()
     }
 
     const int result = wxMessageBox(
-        wxString::Format(_L("The following installed plugins were not found on disk:\n%s\n\nRemove them from OrcaSlicer?"), names),
+        wxString::Format(_L("The following installed plugins were not found on disk:\n%s\n\nRemove them from Unlayered Slicer?"), names),
         _L("Missing Plugins"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING, this);
     restore_z_order();
 
@@ -1070,37 +1070,16 @@ void PluginsDialog::open_plugin_folder(const PluginDescriptor& plugin)
     desktop_open_any_folder(plugin_folder.string());
 }
 
-void PluginsDialog::open_plugin_on_cloud(const std::string& sharing_token)
+// Unlayered: the Orca cloud plugin hub is not part of this build. Plugins are installed from a
+// local package only, so the two browser hand-offs below are inert.
+void PluginsDialog::open_plugin_on_cloud(const std::string& /*sharing_token*/)
 {
-    if (sharing_token.empty())
-        return;
-
-    if (!wxGetApp().getAgent())
-        return;
-
-    auto orca_agent = std::dynamic_pointer_cast<OrcaCloudServiceAgent>(wxGetApp().getAgent()->get_cloud_agent());
-    if (!orca_agent)
-        return;
-
-    wxLaunchDefaultBrowser(wxString::FromUTF8(orca_agent->get_cloud_base_url() + "/p/" + sharing_token));
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": no plugin cloud in this build";
 }
 
 void PluginsDialog::open_plugin_hub()
 {
-    std::string cloud_base_url = "https://cloud.orcaslicer.com";
-
-    if (wxGetApp().getAgent()) {
-        auto orca_agent = std::dynamic_pointer_cast<OrcaCloudServiceAgent>(wxGetApp().getAgent()->get_cloud_agent());
-        if (orca_agent && !orca_agent->get_cloud_base_url().empty())
-            cloud_base_url = orca_agent->get_cloud_base_url();
-    }
-
-    while (!cloud_base_url.empty() && cloud_base_url.back() == '/')
-        cloud_base_url.pop_back();
-    if (cloud_base_url.empty())
-        cloud_base_url = "https://cloud.orcaslicer.com";
-
-    wxLaunchDefaultBrowser(wxString::FromUTF8(cloud_base_url + "/app/plugins/plugin-hub"));
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": no plugin cloud in this build";
 }
 
 void PluginsDialog::delete_local_plugin(const PluginDescriptor& plugin)

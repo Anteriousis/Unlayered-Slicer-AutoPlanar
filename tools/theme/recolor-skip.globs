@@ -1,0 +1,28 @@
+# Assets the accent recolor must NOT touch. One glob per line; '#' starts a comment.
+# Audit with:  python tools/theme/recolor-accent.py --audit
+
+# rule=brand -- Unlayered / Orca / Bambu identity. Branding is deliberately out of
+# scope for the grayscale pass; these carry the #009789 whale teal, not the accent.
+UnlayeredSlicer*.svg
+BambuStudio*.svg
+studio_logo*.svg
+splash_logo*.svg
+bbl-3dp-logo.svg
+
+# rule=sentinel -- #009688 here is NOT a colour we render. BitmapCache::load_svg()
+# substitutes the caller's filament colour for it, and
+# BitmapCache::load_from_svg_file_change_color() matches the raw bytes 0xFF889600.
+# Recolouring these silently breaks every filament chip and swatch.
+outlined_rect*.svg
+
+# rule=semantic -- red/green compatibility pair. Patched explicitly by the script
+# (they are byte-identical upstream, which is a bug), not by the hex sweep.
+flag_green.svg
+flag_red.svg
+
+# rule=thirdparty -- Microsoft Excel brand green.
+placeholder_excel.svg
+
+# rule=render -- photo-real product renders; also excluded in code at
+# BitmapCache::load_svg() so they never see the replace map at all.
+printer_thumbnail*.svg

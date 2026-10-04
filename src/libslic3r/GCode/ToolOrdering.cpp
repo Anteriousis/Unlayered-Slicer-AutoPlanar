@@ -472,6 +472,74 @@ void ToolOrdering::sort_and_build_data(const PrintObject& object , unsigned int 
 }
 
 
+// For ByGroup: a subset of objects printed layer-interleaved within one group.
+ToolOrdering::ToolOrdering(const std::vector<const PrintObject*>& objects, unsigned int first_extruder, bool prime_multi_material)
+{
+    assert(!objects.empty());
+    const Print* print = objects.front()->print();
+    m_print_full_config = &print->full_print_config();
+    m_print = const_cast<Print*>(print);
+    m_print_config_ptr = &print->config();
+
+    coordf_t max_layer_height = 0.;
+    {
+        std::vector<coordf_t> zs;
+        for (const PrintObject* object : objects) {
+            zs.reserve(zs.size() + object->layers().size() + object->support_layers().size());
+            for (auto layer : object->layers())
+                zs.emplace_back(layer->print_z);
+            for (auto layer : object->support_layers())
+                zs.emplace_back(layer->print_z);
+            max_layer_height = std::max(max_layer_height, object->config().layer_height.value);
+        }
+        this->initialize_layers(zs);
+    }
+    max_layer_height = calc_max_layer_height(print->config(), max_layer_height);
+
+    for (const PrintObject* object : objects)
+        this->collect_extruders(*object, std::vector<std::pair<double, unsigned int>>());
+
+    std::vector<unsigned int> first_layer_tool_order;
+    if (first_extruder == (unsigned int)-1)
+        first_layer_tool_order = generate_first_layer_tool_order(*objects.front());
+
+    if (!first_layer_tool_order.empty())
+        this->handle_dontcare_extruder(first_layer_tool_order);
+    else
+        this->handle_dontcare_extruder(first_extruder);
+
+    this->collect_extruder_statistics(prime_multi_material);
+    this->mark_skirt_layers(print->config(), max_layer_height);
+}
+
+void ToolOrdering::sort_and_build_data(const std::vector<const PrintObject*>& objects, unsigned int first_extruder, bool prime_multi_material)
+{
+    bool reorder_first_layer = (first_extruder != (unsigned int)(-1));
+    reorder_extruders_for_minimum_flush_volume(reorder_first_layer);
+    m_sorted = true;
+
+    const Print* print = objects.front()->print();
+    double max_layer_height = 0.;
+    double object_bottom_z = 0.;
+    for (const PrintObject* object : objects) {
+        for (const Layer* layer : object->layers()) {
+            if (layer->has_extrusions()) {
+                object_bottom_z = layer->print_z - layer->height;
+                break;
+            }
+        }
+        max_layer_height = std::max(max_layer_height, object->config().layer_height.value);
+    }
+    max_layer_height = calc_max_layer_height(print->config(), max_layer_height);
+
+    this->fill_wipe_tower_partitions(print->config(), object_bottom_z, max_layer_height);
+    if (this->insert_wipe_tower_extruder()) {
+        reorder_extruders_for_minimum_flush_volume(reorder_first_layer);
+        this->fill_wipe_tower_partitions(print->config(), object_bottom_z, max_layer_height);
+    }
+    this->collect_extruder_statistics(prime_multi_material);
+}
+
 // For the use case when each object is printed separately
 // (print->config().print_sequence == PrintSequence::ByObject is true).
 ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extruder, bool prime_multi_material)

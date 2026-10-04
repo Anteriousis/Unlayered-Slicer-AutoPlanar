@@ -13,12 +13,15 @@ add_executable(${_TEST_NAME}_tests
     test_clipper_offset.cpp
     test_clipper_utils.cpp
     test_config.cpp
+    test_cut_plane_segmentation.cpp
+    test_segment_support_bounds.cpp
     test_config_variant_expansion.cpp
     test_toolordering_nozzle_group.cpp
     test_preset_bundle_loading.cpp
     test_preset_setting_id.cpp
     test_preset_diff.cpp
     test_vendor_cache.cpp
+    test_import_parents.cpp
     test_elephant_foot_compensation.cpp
     test_fill_corner_smoothing.cpp
     test_filament_mixer.cpp
@@ -29,6 +32,7 @@ add_executable(${_TEST_NAME}_tests
     test_polygon.cpp
     test_mutable_polygon.cpp
     test_mutable_priority_queue.cpp
+    test_nonplanar.cpp
     test_minimum_spanning_tree.cpp
     test_nozzle_volume_type.cpp
     test_step.cpp
@@ -57,6 +61,6 @@ target_link_libraries(${_TEST_NAME}_tests test_common libslic3r Catch2::Catch2Wi
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
-orcaslicer_copy_test_dlls()
+unlayered_copy_test_dlls()
 
-orcaslicer_discover_tests(${_TEST_NAME}_tests)
+unlayered_discover_tests(${_TEST_NAME}_tests)

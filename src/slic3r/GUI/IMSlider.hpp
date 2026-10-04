@@ -85,6 +85,10 @@ public:
     void SetTicksValues(const Info &custom_gcode_per_print_z);
     void SetLayersTimes(const std::vector<float> &layers_times, float total_time);
     void SetLayersTimes(const std::vector<double> &layers_times);
+    // UNLAYERED_MOD: which layers were printed with the tool straight up. Pass an empty vector (the
+    // default) for an ordinary print. A tilted layer has no single Z, so its label shows its
+    // representative height prefixed with '~' instead of pretending to be exact.
+    void SetLayersPlanar(const std::vector<bool> &planar) { m_layers_planar = planar; }
 
     void SetDrawMode(bool is_sequential_print);
     void SetDrawMode(DrawMode mode) { m_draw_mode = mode; }
@@ -220,6 +224,8 @@ private:
     TickCodeInfo             m_ticks;
     std::vector<double>      m_layers_times;
     std::vector<double>      m_layers_values;
+    // UNLAYERED_MOD: see SetLayersPlanar(). Empty means "every layer is horizontal".
+    std::vector<bool>        m_layers_planar;
     std::vector<std::string> m_extruder_colors;
     bool                     m_can_change_color;
     std::string              m_print_obj_idxs;

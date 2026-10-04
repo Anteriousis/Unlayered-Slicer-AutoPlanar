@@ -2,7 +2,7 @@
 
 ## Why it exists
 
-OrcaSlicer ships tens of thousands of system preset JSON files. Every launch used to
+Unlayered Slicer ships tens of thousands of system preset JSON files. Every launch used to
 parse all of them: read each vendor profile, walk its machine, process and filament
 sub-files, resolve inheritance, and build the preset collections from scratch. That
 parse dominated startup, and it produced the same result every time, because system

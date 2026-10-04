@@ -1,6 +1,12 @@
 #include "PhysicalPrinterDialog.hpp"
+#include "slic3r/Utils/Serial.hpp"
+
+#include <chrono>
+#include <algorithm>
 #include "PresetComboBoxes.hpp"
 #include "PrinterCloudAuthDialog.hpp"
+#include "FirmwareUpdateDialog.hpp"
+#include "SysFilesUpdateDialog.hpp"
 
 #include <cstddef>
 #include <vector>
@@ -44,6 +50,26 @@
 
 namespace Slic3r {
 namespace GUI {
+
+// Is there a Duet on USB right now?
+//
+// Cached for a moment because update_printhost_buttons() is called from the option group's change
+// handler, i.e. on every keystroke in the address field, and enumerating USB devices per keystroke
+// is a waste. A second is far shorter than it takes anyone to plug a printer in.
+static bool duet_usb_port_present()
+{
+    static std::chrono::steady_clock::time_point last;
+    static bool                                  cached = false;
+    const auto now = std::chrono::steady_clock::now();
+    if (last == std::chrono::steady_clock::time_point() || now - last > std::chrono::seconds(1)) {
+        const auto ports = Utils::scan_duet_ports();
+        cached = std::any_of(ports.begin(), ports.end(),
+                             [](const Utils::SerialPortInfo &p) { return p.problem_code == 0; });
+        last   = now;
+    }
+    return cached;
+}
+
 
 #define BORDER_W FromDIP(10)
 
@@ -264,6 +290,42 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
         return sizer;
     };
 
+    // Duet boards are updated over the same connection the Test button uses, so the updater
+    // belongs right next to it rather than behind a global menu.
+    auto print_host_firmware = [=](wxWindow* parent) {
+        auto sizer = create_sizer_with_btn(parent, &m_printhost_firmware_btn, "printer_host_test", _L("Firmware"));
+
+        m_printhost_firmware_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
+            // A printer with no address is still updatable when it is on the end of a USB cable.
+            if (m_config->opt_string("print_host").empty() && !duet_usb_port_present()) {
+                show_error(this, _L("Enter the printer's address, or connect it to this computer with a USB cable."));
+                return;
+            }
+            FirmwareUpdateDialog dlg(this, m_config);
+            dlg.ShowModal();
+        });
+
+        return sizer;
+    };
+
+    // The printer's configuration lives as files on the same SD card the firmware is flashed from,
+    // and is written over the same connection, so it sits next to the firmware button.
+    auto print_host_sysfiles = [=](wxWindow* parent) {
+        auto sizer = create_sizer_with_btn(parent, &m_printhost_sysfiles_btn, "printer_host_test", _L("Config"));
+
+        m_printhost_sysfiles_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
+            // A printer with no address is still updatable when it is on the end of a USB cable.
+            if (m_config->opt_string("print_host").empty() && !duet_usb_port_present()) {
+                show_error(this, _L("Enter the printer's address, or connect it to this computer with a USB cable."));
+                return;
+            }
+            SysFilesUpdateDialog dlg(this, m_config);
+            dlg.ShowModal();
+        });
+
+        return sizer;
+    };
+
     auto print_host_logout = [&](wxWindow* parent) {
         auto sizer = create_sizer_with_btn(parent, &m_printhost_logout_btn, "", _L("Log Out"));
 
@@ -302,6 +364,8 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
     Line host_line = m_optgroup->create_single_option_line(option);
     host_line.append_widget(printhost_browse);
     host_line.append_widget(print_host_test);
+    host_line.append_widget(print_host_firmware);
+    host_line.append_widget(print_host_sysfiles);
     host_line.append_widget(print_host_logout);
     m_optgroup->append_line(host_line);
 
@@ -507,6 +571,50 @@ void PhysicalPrinterDialog::update_printhost_buttons()
         m_printhost_browse_btn->Show(host->has_auto_discovery());
         m_printhost_logout_btn->Show(host->is_logged_in());
         m_printhost_test_btn->SetLabel(host->is_cloud() ? _L("Login/Test") : _L("Test"));
+    }
+    if (m_printhost_firmware_btn) {
+        // Only the Unlayered host type, not stock Duet. The protocol is the same for both (see
+        // Utils/Duet.hpp), but the images this installs are Unlayered builds for one specific
+        // board, so offering them for any Duet on the network invites somebody to flash our
+        // firmware onto their own machine. FirmwareBundle::validate_package() would refuse a
+        // board mismatch, but only after the user has committed to an update -- the host type is
+        // the honest place to draw the line.
+        //
+        // Duet is nevertheless shown, disabled, with the reason in a tooltip. The Unlayered host
+        // type is newer than the printers are, so every printer added before it existed is saved
+        // as Duet -- and simply hiding the button tells that user nothing, not even that there is
+        // a setting to change. Hiding it for the other host types is right, because for those the
+        // answer is "this is not your printer" rather than "you are one dropdown away".
+        const auto *opt         = m_config->option<ConfigOptionEnum<PrintHostType>>("host_type");
+        const bool  is_unlayered = opt && opt->value == htUnlayered;
+        const bool  is_duet      = opt && opt->value == htDuet;
+        m_printhost_firmware_btn->Show(is_unlayered || is_duet);
+        const bool reachable = !m_config->opt_string("print_host").empty() || duet_usb_port_present();
+        m_printhost_firmware_btn->Enable(is_unlayered && reachable);
+        if (is_duet)
+            m_printhost_firmware_btn->SetToolTip(_L("Set Host Type to Unlayered to update this printer's firmware. "
+                                                    "The images installed are Unlayered builds for one specific board, "
+                                                    "so they are not offered for a generic Duet."));
+        else
+            m_printhost_firmware_btn->UnsetToolTip();
+    }
+    if (m_printhost_sysfiles_btn) {
+        // Same line drawn in the same place as for firmware: the default source is the Unlayered
+        // configuration release, and overwriting config.g on somebody else's Duet with it would be
+        // a good deal worse than useless.
+        // Shown-but-disabled for Duet for the same reason as the firmware button above.
+        const auto *opt          = m_config->option<ConfigOptionEnum<PrintHostType>>("host_type");
+        const bool  is_unlayered = opt && opt->value == htUnlayered;
+        const bool  is_duet      = opt && opt->value == htDuet;
+        m_printhost_sysfiles_btn->Show(is_unlayered || is_duet);
+        const bool reachable = !m_config->opt_string("print_host").empty() || duet_usb_port_present();
+        m_printhost_sysfiles_btn->Enable(is_unlayered && reachable);
+        if (is_duet)
+            m_printhost_sysfiles_btn->SetToolTip(_L("Set Host Type to Unlayered to install this printer's configuration files. "
+                                                    "The files installed are the Unlayered configuration, which has no business "
+                                                    "overwriting config.g on a generic Duet."));
+        else
+            m_printhost_sysfiles_btn->UnsetToolTip();
     }
 }
 
@@ -786,6 +894,10 @@ void PhysicalPrinterDialog::on_dpi_changed(const wxRect& suggested_rect)
 
     m_printhost_browse_btn->Rescale();
     m_printhost_test_btn->Rescale();
+    if (m_printhost_firmware_btn)
+        m_printhost_firmware_btn->Rescale();
+    if (m_printhost_sysfiles_btn)
+        m_printhost_sysfiles_btn->Rescale();
     m_printhost_logout_btn->Rescale();
     if (m_printhost_cafile_browse_btn)
         m_printhost_cafile_browse_btn->Rescale();

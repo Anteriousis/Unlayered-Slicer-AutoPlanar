@@ -26,8 +26,8 @@
 
 set -uo pipefail
 
-VALIDATOR_RELEASE_URL="https://github.com/OrcaSlicer/OrcaSlicer/releases/download/nightly-builds"
-FIXTURE_RELEASE_URL="https://github.com/OrcaSlicer/OrcaSlicer-profile-validator/releases/download/fixture-archive"
+VALIDATOR_RELEASE_URL="https://github.com/Unlayered3D/Unlayered-Slicer/releases/download/nightly-builds"
+FIXTURE_RELEASE_URL="https://github.com/Unlayered3D/Unlayered-Slicer-profile-validator/releases/download/fixture-archive"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -69,7 +69,7 @@ Checks (default: all, in this order):
 Options:
   -p, --profiles DIR   profile tree to validate (default: resources/profiles)
   -v, --vendor NAME    check only this vendor, named after its <Vendor>.json (e.g. "Co Print")
-      --validator BIN  OrcaSlicer_profile_validator to use; also \$ORCA_PROFILE_VALIDATOR.
+      --validator BIN  UnlayeredSlicer_profile_validator to use; also \$ORCA_PROFILE_VALIDATOR.
                        Default: the local build*/ Release build (then RelWithDebInfo, then
                        Debug) for this architecture, else the nightly release build is
                        downloaded for this platform
@@ -273,16 +273,16 @@ is_foreign_arch_dir() {
     return 1
 }
 
-# First locally built OrcaSlicer_profile_validator, in the order above. macOS puts it in an .app
+# First locally built UnlayeredSlicer_profile_validator, in the order above. macOS puts it in an .app
 # bundle, Linux and Windows next to the other binaries.
 find_local_validator() {
     local dir candidate foreign=""
     while IFS= read -r dir; do
         [ -d "${dir}" ] || continue
         for candidate in \
-            "${dir}/OrcaSlicer_profile_validator" \
-            "${dir}/OrcaSlicer_profile_validator.exe" \
-            "${dir}/OrcaSlicer_profile_validator.app/Contents/MacOS/OrcaSlicer_profile_validator"; do
+            "${dir}/UnlayeredSlicer_profile_validator" \
+            "${dir}/UnlayeredSlicer_profile_validator.exe" \
+            "${dir}/UnlayeredSlicer_profile_validator.app/Contents/MacOS/UnlayeredSlicer_profile_validator"; do
             [ -f "${candidate}" ] && [ -x "${candidate}" ] || continue
             if ! is_foreign_arch_dir "${dir#"${REPO_ROOT}"/}"; then
                 printf '%s\n' "${candidate}"
@@ -307,15 +307,15 @@ download_validator() {
             case "${HOST_ARCH}" in
                 arm64|aarch64) msg "the nightly Linux validator is x86_64; build it locally for ${HOST_ARCH}" ;;
             esac
-            binary="${dest}/OrcaSlicer_profile_validator"
-            fetch "${VALIDATOR_RELEASE_URL}/OrcaSlicer_profile_validator_Linux_Ubuntu2404_nightly" "${binary}" || return 1
+            binary="${dest}/UnlayeredSlicer_profile_validator"
+            fetch "${VALIDATOR_RELEASE_URL}/UnlayeredSlicer_profile_validator_Linux_Ubuntu2404_nightly" "${binary}" || return 1
             chmod +x "${binary}" || return 1
             ;;
         Darwin*)
-            dmg="${dest}/OrcaSlicer_profile_validator.dmg"
-            app="${dest}/OrcaSlicer_profile_validator.app"
-            binary="${app}/Contents/MacOS/OrcaSlicer_profile_validator"
-            fetch "${VALIDATOR_RELEASE_URL}/OrcaSlicer_profile_validator_Mac_universal_nightly.dmg" "${dmg}" || return 1
+            dmg="${dest}/UnlayeredSlicer_profile_validator.dmg"
+            app="${dest}/UnlayeredSlicer_profile_validator.app"
+            binary="${app}/Contents/MacOS/UnlayeredSlicer_profile_validator"
+            fetch "${VALIDATOR_RELEASE_URL}/UnlayeredSlicer_profile_validator_Mac_universal_nightly.dmg" "${dmg}" || return 1
             if [ ! -x "${binary}" ] || [ "${REFRESH}" -eq 1 ]; then
                 mounted="${dest}/mnt"
                 rm -rf "${mounted}" "${app}"
@@ -331,8 +331,8 @@ download_validator() {
             fi
             ;;
         MINGW*|MSYS*|CYGWIN*)
-            binary="${dest}/OrcaSlicer_profile_validator.exe"
-            fetch "${VALIDATOR_RELEASE_URL}/OrcaSlicer_profile_validator_Windows_nightly.exe" "${binary}" || return 1
+            binary="${dest}/UnlayeredSlicer_profile_validator.exe"
+            fetch "${VALIDATOR_RELEASE_URL}/UnlayeredSlicer_profile_validator_Windows_nightly.exe" "${binary}" || return 1
             chmod +x "${binary}" || return 1
             ;;
         *)

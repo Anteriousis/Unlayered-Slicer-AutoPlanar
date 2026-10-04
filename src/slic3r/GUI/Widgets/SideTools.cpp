@@ -141,11 +141,6 @@ void SideToolsPanel::doRender(wxDC &dc)
     auto   left = FromDIP(15);
     wxSize size = GetSize();
 
-    //if (m_none_printer) {
-    //    dc.SetPen(SIDE_TOOLS_LIGHT_GREEN);
-    //    dc.SetBrush(SIDE_TOOLS_LIGHT_GREEN);
-    //    dc.DrawRectangle(0, 0, size.x, size.y);
-    //}
 
     if (m_none_printer) {
         dc.SetPen(StateColor::darkModeColorFor(SIDE_TOOLS_BRAND));   // ORCA: Sidebar header background color - Fix for dark mode compability
@@ -506,7 +501,7 @@ void SideTools::show_status(int status)
             m_hyperlink->SetLabel(_L("Failed to connect to the printer"));
             update_connect_err_info(BAMBU_NETWORK_ERR_CONNECTION_TO_PRINTER_FAILED,
                 _L("Connection to printer failed"),
-                _L("Please check the network connection of the printer and Orca."));
+                _L("Please check the network connection of the printer and Unlayered Slicer."));
         }
 
         m_hyperlink->Show();
@@ -525,8 +520,8 @@ void SideTools::show_status(int status)
     else if ((status & (int)MonitorStatus::MONITOR_CONNECTING) != 0) {
         m_hyperlink->Hide();
         m_connection_info->SetLabel(_L("Connecting..."));
-        m_connection_info->SetBackgroundColor(0x009688);
-        m_connection_info->SetBorderColor(0x009688);
+        m_connection_info->SetBackgroundColor(0x767676);
+        m_connection_info->SetBorderColor(0x767676);
         m_connection_info->Show();
         m_more_button->Hide();
         m_side_error_panel->Hide();

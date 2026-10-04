@@ -23,6 +23,8 @@
 #include "GUI_Preview.hpp"
 #include "OpenGLManager.hpp"
 #include "Plater.hpp"
+#include "MsgDialog.hpp"
+#include "libslic3r/CutPlaneSegmentation.hpp"
 #include "MainFrame.hpp"
 #include "WipeTowerDialog.hpp"
 #include "GUI_App.hpp"
@@ -304,7 +306,7 @@ void GLCanvas3D::LayersEditing::render_variable_layer_height_dialog(GLCanvas3D& 
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(238 / 255.0f, 238 / 255.0f, 238 / 255.0f, 0.00f));
     ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(238 / 255.0f, 238 / 255.0f, 238 / 255.0f, 0.00f));
     ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.81f, 0.81f, 0.81f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.00f, 0.59f, 0.53f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.463f, 0.463f, 0.463f, 1.00f));
     if(ImGui::BBLSliderScalar("##radius_slider", ImGuiDataType_S32, &radius, &v_min, &v_max)){
         radius = std::clamp(radius, 1, 10);
         m_smooth_params.radius = (unsigned int)radius;
@@ -315,9 +317,9 @@ void GLCanvas3D::LayersEditing::render_variable_layer_height_dialog(GLCanvas3D& 
     input_align = std::max(input_align, ImGui::GetCursorPosX());
     ImGui::SetCursorPosX(input_align);
     ImGui::PushItemWidth(input_box_width);
-    ImGui::PushStyleColor(ImGuiCol_BorderActive, ImVec4(0.00f, 0.59f, 0.53f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.00f, 0.59f, 0.53f, 0.00f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.00f, 0.59f, 0.53f, 0.00f));
+    ImGui::PushStyleColor(ImGuiCol_BorderActive, ImVec4(0.463f, 0.463f, 0.463f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.463f, 0.463f, 0.463f, 0.00f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.463f, 0.463f, 0.463f, 0.00f));
     ImGui::BBLDragScalar("##radius_input", ImGuiDataType_S32, &radius, 1, &v_min, &v_max);
     ImGui::PopStyleColor(3);
 
@@ -2084,6 +2086,11 @@ void GLCanvas3D::render(bool only_init)
         _render_sla_slices();
         _render_selection();
         _render_objects(GLVolumeCollection::ERenderType::Transparent, !m_gizmos.is_running());
+        // Per-chunk usable build-volume overlay (editor only). Drawn after transparent objects so
+        // it blends over geometry.
+        // UNLAYERED_MOD: disabled - the translucent blue cylinder was too distracting while working
+        // on multiplanar parts. _render_chunk_build_volumes() is intact; uncomment to bring it back.
+        //_render_chunk_build_volumes(camera.get_view_matrix(), camera.get_projection_matrix());
         _render_wireframe_overlay();
     }
     /* preview render */
@@ -2943,6 +2950,9 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
     }
 
     update_volumes_colors_by_extruder();
+    // The volumes were rebuilt (a new object, a filament change, a plate switch...): re-evaluate
+    // whether to offer switching cut chunk colours off on the next frame.
+    m_cut_chunk_prompt_check_pending = true;
 	// Update selection indices based on the old/new GLVolumeCollection.
     if (m_selection.get_mode() == Selection::Instance)
         m_selection.instances_changed(instance_ids_selected);
@@ -5271,6 +5281,10 @@ void GLCanvas3D::do_scale(const std::string& snapshot_type)
 
     //BBS: notify instance updates to part plater list
     m_selection.notify_instance_update(-1, -1);
+    // UNLAYERED_MOD
+    //// Fixes sinking/flying instances
+    //for (const std::pair<int, int>& i : done) {
+    //    ModelObject* m = m_model->objects[i.first];
 
     // Fixes sinking/flying instances (snaps object to buildplate)
     for (const std::pair<int, int>& i : done) {
@@ -6767,6 +6781,9 @@ void GLCanvas3D::_switch_toolbars_icon_filename()
 
         item = m_main_toolbar.get_item("splitvolumes");
         item->set_icon_filename(m_is_dark ? "split_parts_dark.svg" : "split_parts.svg");
+        
+        item = m_main_toolbar.get_item("splitchunks");
+        item->set_icon_filename(m_is_dark ? "toolbar_split_chunks_dark.svg" : "toolbar_split_chunks.svg");
 
         item = m_main_toolbar.get_item("layersediting");
         item->set_icon_filename(m_is_dark ? "toolbar_variable_layer_height_dark.svg" : "toolbar_variable_layer_height.svg");
@@ -6957,6 +6974,21 @@ bool GLCanvas3D::_init_main_toolbar()
     if (!m_main_toolbar.add_item(item))
         return false;
 
+     // new
+    item.name = "splitchunks";
+    item.icon_filename = m_is_dark ? "toolbar_split_chunks_dark.svg" : "toolbar_split_chunks.svg";
+    item.tooltip = _utf8(L("Split chunk to more chunks"));
+    item.sprite_id++;
+    item.left.action_callback = [this]() { //change this to change what this button does
+        if (m_canvas != nullptr)
+            wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_SPLIT_VOLUMES));
+    };
+    item.visibility_callback = GLToolbarItem::Default_Visibility_Callback;
+    item.enabling_callback = []()->bool { return true; }; //change this to change when the icon is enabled and disabled
+    if (!m_main_toolbar.add_item(item))
+        return false;
+
+        
     item.name = "layersediting";
     item.icon_filename = m_is_dark ? "toolbar_variable_layer_height_dark.svg" : "toolbar_variable_layer_height.svg";
     item.tooltip = _utf8(L("Variable layer height"));
@@ -7968,6 +8000,132 @@ void GLCanvas3D::_render_bed(const Transform3d& view_matrix, const Transform3d& 
     m_bed.render(*this, view_matrix, projection_matrix, bottom, scale_factor, show_axes);
 }
 
+// Appends a solid cylinder of `radius` spanning Z from z0 to z1, centered at `center`, to a P3
+// triangle geometry in world coordinates. Face winding is not managed because the caller renders
+// with back-face culling disabled.
+static void append_chunk_cylinder(GLModel::Geometry& geo, const Vec2d& center, double radius, double z0, double z1, int segments)
+{
+    if (radius <= 0.0 || z1 <= z0)
+        return;
+    const unsigned int base = (unsigned int)geo.vertices_count();
+    // Two ring vertices (bottom, top) per segment...
+    for (int i = 0; i < segments; ++i) {
+        const double a = (2.0 * double(PI) * double(i)) / double(segments);
+        const float  x = float(center.x() + radius * std::cos(a));
+        const float  y = float(center.y() + radius * std::sin(a));
+        geo.add_vertex(Vec3f(x, y, float(z0))); // +0 bottom ring
+        geo.add_vertex(Vec3f(x, y, float(z1))); // +1 top ring
+    }
+    // ...then a shared center vertex for each cap.
+    const unsigned int c_bottom = (unsigned int)geo.vertices_count();
+    geo.add_vertex(Vec3f(float(center.x()), float(center.y()), float(z0)));
+    const unsigned int c_top = (unsigned int)geo.vertices_count();
+    geo.add_vertex(Vec3f(float(center.x()), float(center.y()), float(z1)));
+    for (int i = 0; i < segments; ++i) {
+        const unsigned int j = (i + 1) % segments;
+        const unsigned int b_i = base + 2 * i, t_i = b_i + 1;
+        const unsigned int b_j = base + 2 * j, t_j = b_j + 1;
+        geo.add_triangle(b_i, b_j, t_j); geo.add_triangle(b_i, t_j, t_i); // side wall
+        geo.add_triangle(c_bottom, b_j, b_i);                             // bottom cap
+        geo.add_triangle(c_top,    t_i, t_j);                             // top cap
+    }
+}
+
+void GLCanvas3D::_render_chunk_build_volumes(const Transform3d& view_matrix, const Transform3d& projection_matrix)
+{
+    if (m_model == nullptr)
+        return;
+
+    // Only meaningful when the machine actually drives the rotary axes: non-planar printing ON and
+    // virtual 5-axis (which suppresses B/C and targets a plain 3-axis printer) OFF.
+    const auto* preset_bundle = wxGetApp().preset_bundle;
+    if (preset_bundle == nullptr)
+        return;
+    const DynamicPrintConfig& printer_cfg = preset_bundle->printers.get_edited_preset().config;
+    if (! nonplanar_printing_enabled())                             // non-planar must be enabled
+        return;
+    if (virtual_5axis_enabled())                                    // printer type must not be Virtual
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    // User-editable cylinder dimensions (mm).
+    auto opt_float = [&printer_cfg](const char* key, double fallback) -> double {
+        const ConfigOptionFloat* o = printer_cfg.option<ConfigOptionFloat>(key);
+        return o != nullptr ? o->value : fallback;
+    };
+    const double radius     = opt_float("radius", 100.0);
+    const double max_height = opt_float("max_build_height", 200.0);
+    const double min_height = opt_float("min_build_height", 0.0);
+    if (radius <= 0.0 || max_height <= min_height)
+        return;
+
+    // The usable build volume is a single cylinder on the rotary axis (the build-plate center),
+    // identical for every chunk. Show it whenever at least one printable chunk (a ModelObject
+    // carrying a layer_rotation_b override) is present, and draw it ONCE - not once per chunk - so
+    // the translucent shells never stack into a darker blend. Respect the user's printable toggle
+    // but NOT the in-bounds state: the overlay must stay visible precisely when a chunk overflows.
+    const Vec2d plate_center = m_bed.build_volume().bed_center();
+    bool has_chunk = false;
+    for (const ModelObject* obj : m_model->objects)
+        if (obj != nullptr && obj->printable && obj->config.has("layer_rotation_b")) {
+            has_chunk = true;
+            break;
+        }
+
+    if (!has_chunk) {
+        m_chunk_build_volumes.reset();
+        m_chunk_build_volumes_key.clear();
+        return;
+    }
+
+    // Rebuild the mesh only when the cylinder dimensions or the plate center actually change.
+    const std::string key = (boost::format("%1$.3f,%2$.3f,%3$.3f|%4$.2f,%5$.2f")
+        % radius % max_height % min_height % plate_center.x() % plate_center.y()).str();
+    if (key != m_chunk_build_volumes_key) {
+        m_chunk_build_volumes.reset();
+        m_chunk_build_volumes_key = key;
+
+        constexpr int segments = 72;
+        GLModel::Geometry geo;
+        geo.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        geo.reserve_vertices(segments * 2 + 2);
+        geo.reserve_indices(segments * 4 * 3);
+        append_chunk_cylinder(geo, plate_center, radius, min_height, max_height, segments);
+
+        if (geo.vertices_count() > 0 && geo.indices_count() > 0)
+            m_chunk_build_volumes.init_from(std::move(geo));
+    }
+
+    if (!m_chunk_build_volumes.is_initialized())
+        return;
+
+    m_chunk_build_volumes.set_color(ColorRGBA(0.1f, 0.6f, 1.0f, 0.25f));
+
+    // Translucent shell: blend on, read depth but don't write it, and draw both faces.
+    GLboolean prev_depth_mask = GL_TRUE;
+    glsafe(::glGetBooleanv(GL_DEPTH_WRITEMASK, &prev_depth_mask));
+    const bool prev_cull = ::glIsEnabled(GL_CULL_FACE);
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_CULL_FACE));
+
+    shader->start_using();
+    shader->set_uniform("projection_matrix", projection_matrix);
+    shader->set_uniform("view_model_matrix", view_matrix); // geometry is already in world coords
+    m_chunk_build_volumes.render();
+    shader->stop_using();
+
+    if (prev_cull)
+        glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glDepthMask(prev_depth_mask));
+    glsafe(::glDisable(GL_BLEND));
+}
+
 void GLCanvas3D::_render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body, int hover_id, bool render_cali, bool show_grid)
 {
     wxGetApp().plater()->get_partplate_list().render(view_matrix, projection_matrix, bottom, only_current, only_body, hover_id, render_cali, show_grid);
@@ -8267,8 +8425,149 @@ void GLCanvas3D::_render_plane() const
 }
 
 //BBS: add outline drawing logic
+// Everything the chunk models of one instance were derived from: the stack, the instance pose
+// (the derivation orients "down" from it), the thickness bound, and each part's mesh and pose.
+// The mesh is keyed by identity: a replaced mesh is a new shared_ptr, an edited one gets one too.
+static std::string cut_chunk_key(const ModelObject& mo, const Transform3d& instance_matrix, double min_thickness)
+{
+    std::string key;
+    auto add   = [&key](const void* p, size_t n) { key.append(static_cast<const char*>(p), n); };
+    auto add_d = [&add](double d) { add(&d, sizeof(d)); };
+    auto add_m = [&add_d](const Transform3d& m) { for (int i = 0; i < 16; ++i) add_d(m.matrix().data()[i]); };
+    add_d(min_thickness);
+    add_m(instance_matrix);
+    const char stack_flags = char(mo.cut_planes.enabled) | char(mo.cut_planes.user_ordered) << 1;
+    add(&stack_flags, 1);
+    for (const CutPlane& p : mo.cut_planes.planes) {
+        for (int i = 0; i < 3; ++i) add_d(p.point[i]);
+        for (int i = 0; i < 3; ++i) add_d(p.normal[i]);
+        for (int i = 0; i < 3; ++i) add_d(p.build_normal[i]);
+        const char plane_flags = char(p.enabled) | char(p.has_build_normal) << 1;
+        add(&plane_flags, 1);
+    }
+    for (const ModelVolume* mv : mo.volumes) {
+        if (!mv->is_model_part())
+            continue;
+        const TriangleMesh* mesh = mv->get_mesh_shared_ptr().get();
+        add(&mesh, sizeof(mesh));
+        add_m(mv->get_matrix());
+        // A part's own build direction makes it its own segment.
+        add_d(mv->config.has("layer_rotation_b") ? mv->config.opt_float("layer_rotation_b") : 0.);
+        add_d(mv->config.has("layer_rotation_c") ? mv->config.opt_float("layer_rotation_c") : 0.);
+        const char directed = char(model_volume_has_build_direction(*mv));
+        add(&directed, 1);
+    }
+    return key;
+}
+
+void GLCanvas3D::_update_cut_chunk_previews()
+{
+    // While the Cut Planes gizmo is open its own "Preview chunks" toggle decides what is shown;
+    // colouring the parts here as well would make unticking it a no-op.
+    const bool gizmo_owns_preview = m_gizmos.get_current_type() == GLGizmosManager::EType::CutPlanes;
+    const bool enabled = m_canvas_type == ECanvasType::CanvasView3D && m_model != nullptr && !gizmo_owns_preview
+        && wxGetApp().app_config != nullptr && wxGetApp().show_cut_chunk_colors() && nonplanar_printing_enabled();
+    m_volumes.set_render_cut_chunks(enabled);
+    if (!enabled) {
+        if (!m_cut_chunk_previews.empty()) {
+            m_cut_chunk_previews.clear();
+            for (GLVolume* v : m_volumes.volumes) {
+                v->cut_chunk_preview.reset();
+                v->cut_chunk_owner = false;
+            }
+        }
+        return;
+    }
+
+    // Print::apply refuses to segment when any chunk would be thinner than the first layer; use
+    // the same bound so the colouring goes inert exactly where slicing does (as the gizmo does).
+    double min_thickness = 0.;
+    if (const ConfigOptionFloat* opt = wxGetApp().preset_bundle->prints.get_edited_preset().config.option<ConfigOptionFloat>("initial_layer_print_height"))
+        min_thickness = opt->value;
+
+    std::set<std::pair<ObjectID, int>> wanted;
+    for (GLVolume* v : m_volumes.volumes) {
+        v->cut_chunk_preview.reset();
+        v->cut_chunk_owner = false;
+        const int obj_idx = v->object_idx(), vol_idx = v->volume_idx(), inst_idx = v->instance_idx();
+        if (v->is_wipe_tower || vol_idx < 0 || obj_idx < 0 || obj_idx >= int(m_model->objects.size()))
+            continue;
+        const ModelObject* mo = m_model->objects[obj_idx];
+        if ((!mo->cut_planes.active() && !object_has_directed_parts(*mo)) || vol_idx >= int(mo->volumes.size())
+            || !mo->volumes[vol_idx]->is_model_part() || inst_idx < 0 || inst_idx >= int(mo->instances.size()))
+            continue;
+
+        const auto        slot_id         = std::make_pair(mo->id(), inst_idx);
+        const Transform3d instance_matrix = v->get_instance_transformation().get_matrix();
+        const std::string key             = cut_chunk_key(*mo, instance_matrix, min_thickness);
+        std::shared_ptr<GLVolume::CutChunkPreview>& slot = m_cut_chunk_previews[slot_id];
+        if (!slot || slot->key != key) {
+            slot      = std::make_shared<GLVolume::CutChunkPreview>();
+            slot->key = key;
+            // The same derivation slicing uses, with the meshes it materialised on the way, so the
+            // colouring cannot disagree with the sections that end up in the G-code. An inert
+            // stack yields no pieces and the parts draw as usual.
+            std::vector<indexed_triangle_set> pieces;
+            derive_cut_segments(*mo, instance_matrix, min_thickness, nullptr, &pieces);
+            slot->models.resize(pieces.size());
+            for (size_t i = 0; i < pieces.size(); ++i)
+                if (!pieces[i].indices.empty())
+                    slot->models[i].init_from(pieces[i]);
+        }
+        v->cut_chunk_preview = slot;
+        v->cut_chunk_owner   = wanted.insert(slot_id).second; // the first part met draws the chunks
+    }
+    for (auto it = m_cut_chunk_previews.begin(); it != m_cut_chunk_previews.end();)
+        it = wanted.count(it->first) ? std::next(it) : m_cut_chunk_previews.erase(it);
+
+    if (m_cut_chunk_prompt_check_pending) {
+        m_cut_chunk_prompt_check_pending = false;
+        if (!wanted.empty())
+            _maybe_prompt_cut_chunk_colors();
+    }
+}
+
+void GLCanvas3D::_maybe_prompt_cut_chunk_colors()
+{
+    if (m_cut_chunk_prompt_shown)
+        return;
+    AppConfig* app_config = wxGetApp().app_config;
+    Plater*    plater     = wxGetApp().plater();
+    if (app_config == nullptr || plater == nullptr || app_config->get("no_ask_cut_chunk_colors_multi_filament") == "1")
+        return;
+    const PartPlate* plate = plater->get_partplate_list().get_curr_plate();
+    if (plate == nullptr || plate->get_extruders(true).size() < 2)
+        return;
+    m_cut_chunk_prompt_shown = true;
+
+    // This runs from the render pass, where a modal dialog cannot be shown; ask on the next idle.
+    wxGetApp().CallAfter([]() {
+        Plater* plater = wxGetApp().plater();
+        if (plater == nullptr || !wxGetApp().show_cut_chunk_colors())
+            return;
+        MessageDialog dlg(plater,
+            _L("Objects with cut planes are drawn one color per chunk, so this plate's filament colors "
+               "are not visible in the Prepare view.\n\nTurn off cut chunk colors? You can change this "
+               "later in the View menu or in Preferences."),
+            _L("Cut chunk colors"), wxICON_QUESTION | wxYES_NO);
+        dlg.show_dsa_button(_L("Don't ask again"));
+        const int answer = dlg.ShowModal();
+        if (dlg.get_checkbox_state())
+            wxGetApp().app_config->set("no_ask_cut_chunk_colors_multi_filament", "1");
+        if (answer == wxID_YES) {
+            wxGetApp().app_config->set_bool("show_cut_chunk_colors", false);
+            if (GLCanvas3D* canvas = plater->get_view3D_canvas3D()) {
+                canvas->set_as_dirty();
+                canvas->request_extra_frame();
+            }
+        }
+    });
+}
+
 void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with_outline)
 {
+    if (type == GLVolumeCollection::ERenderType::Opaque)
+        _update_cut_chunk_previews();
     if (m_volumes.empty())
         return;
 
@@ -8522,7 +8821,14 @@ void GLCanvas3D::_render_gcode(int canvas_width, int canvas_height)
     }
 
     if (layers_slider->is_dirty()) {
-        set_volumes_z_range({layers_slider->GetLowerValueD(), layers_slider->GetHigherValueD()});
+        // UNLAYERED_MOD: clip the shells to the Z extent the selected layers actually occupy. A
+        // tilted layer spans a slab of Z, so its single representative height would clip the shells
+        // through the middle of the layer being shown.
+        if (m_gcode_viewer.has_data())
+            set_volumes_z_range(m_gcode_viewer.get_layers_z_extent(static_cast<size_t>(layers_slider->GetLowerValue()),
+                                                                   static_cast<size_t>(layers_slider->GetHigherValue())));
+        else
+            set_volumes_z_range({layers_slider->GetLowerValueD(), layers_slider->GetHigherValueD()});
         if (m_gcode_viewer.has_data()) {
             m_gcode_viewer.set_layers_z_range({static_cast<unsigned int>(layers_slider->GetLowerValue()), static_cast<unsigned int>(layers_slider->GetHigherValue())});
         }
@@ -9146,7 +9452,7 @@ void GLCanvas3D::_render_imgui_select_plate_toolbar()
             text_bottom = std::to_string(sliced_plates_cnt) + " / " + std::to_string(total_plates_cnt);
             ImVec2 bar_fg_end = ImVec2(bar_bg_bgn.x + bar_total_perc_pos + bar_current_perc_pos, bar_bg_end.y);
             ImGui::GetWindowDrawList()->AddRectFilled(bar_bg_bgn, bar_bg_end, IM_COL32(128, 128, 128, 255), bar_size.y); // BAR BACKGROUND
-            ImGui::GetWindowDrawList()->AddRectFilled(bar_bg_bgn, bar_fg_end, IM_COL32(0, 150, 136, 255),   bar_size.y); // BAR PROGRESS
+            ImGui::GetWindowDrawList()->AddRectFilled(bar_bg_bgn, bar_fg_end, IM_COL32(118, 118, 118, 255),   bar_size.y); // BAR PROGRESS
         }
         else if (all_plates_stats_item->slice_state == IMToolbarItem::SliceState::SLICE_FAILED) {
             text_top    = _u8L("Failed");
@@ -10453,9 +10759,11 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
         int         layer    = m_gcode_viewer.m_conflict_result.value().layer;
         const PrintInstance *inst2 = reinterpret_cast<const PrintInstance *>(m_gcode_viewer.m_conflict_result.value()._obj2);
 
-        text = (boost::format(_u8L("Conflicts of G-code paths have been found at layer %d, Z = %.2lfmm. Please separate the conflicted objects farther (%s <-> %s).")) % layer %
-                height % objName1 % objName2)
-                   .str();
+        const std::string &custom = m_gcode_viewer.m_conflict_result.value().message;
+        text = custom.empty()
+            ? (boost::format(_u8L("Conflicts of G-code paths have been found at layer %d, Z = %.2lfmm. Please separate the conflicted objects farther (%s <-> %s).")) % layer %
+                   height % objName1 % objName2).str()
+            : (boost::format(_u8L("%s (layer %d, Z = %.2lfmm)")) % custom % layer % height).str(); // UNLAYERED_MOD: hotend collision report
         prevConflictText        = text;
         
         if (inst2) {

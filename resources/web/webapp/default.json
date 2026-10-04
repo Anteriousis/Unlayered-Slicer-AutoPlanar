@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "Development overlay for the generic Web application tab, the first embedded slot.",
+    "",
+    "This file no longer carries the shipped defaults. Whether the tab appears, and with what",
+    "address and name, are fields on WebAppSlot::generic() in src/slic3r/GUI/WebAppPanel.cpp --",
+    "this file is excluded from the installer, so a customer machine has nothing to read. That",
+    "tab ships switched off with no address: it hosts whatever a developer points it at, which is",
+    "not a feature of the product. Set ORCA_WEB_APP_URL to bring it up on a development machine;",
+    "the override wins over everything here and is never written back.",
+    "",
+    "The tab will host any web application that speaks the bridge documented in",
+    "WEB_APP_BRIDGE.md, with a worked example in resources/web/webapp-example."
+  ],
+
+  "_extra_origins_comment": [
+    "Additional https origins the tab may NAVIGATE to, so a vendor page can be browsed in place",
+    "instead of bouncing the user out to their desktop browser. Navigable is NOT trusted: the",
+    "bridge session token is injected only on the slot's own address, so a page reached this way",
+    "cannot call slicer.* at all. A bar appears across the top of the tab whenever the user is on",
+    "one of these, naming the site and offering a way back and a way out to a real browser."
+  ],
+  "extra_origins": [
+    "https://shop.polymaker.com"
+  ]
+}

@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
 APPIMAGETOOLURL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$(uname -m).AppImage"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="@CMAKE_SOURCE_DIR@"
 
+# APP_KEY is the display name and may contain a space ("Unlayered Slicer"), so every
+# use of it has to be quoted; APP_CMD never contains one, which is why it -- not the
+# key -- names the files inside the AppDir. The icon and metainfo assets are named
+# after the one-word app id.
+APP_KEY="@SLIC3R_APP_KEY@"
+APP_CMD="@SLIC3R_APP_CMD@"
+APP_IMAGE="${APP_KEY// /_}_Linux_V@UNLAYERED_VERSION@.AppImage"
 
-APP_IMAGE="@SLIC3R_APP_KEY@_Linux_V@SoftFever_VERSION@.AppImage"
+ICON_SRC="${REPO_ROOT}/resources/images/UnlayeredSlicer_192px.png"
+METAINFO_SRC="${REPO_ROOT}/scripts/flatpak/com.unlayered3d.UnlayeredSlicer.metainfo.xml"
+
+# AppStream refuses to validate unless the metainfo filename and the desktop file it
+# declares as launchable both match the <id> inside the metainfo, so take the id from
+# the file being shipped instead of assuming it follows the app name.
+APP_ID="$(sed -n 's:.*<id>\(.*\)</id>.*:\1:p' "${METAINFO_SRC}" | head -n1)"
+[ -n "${APP_ID}" ] || APP_ID="com.unlayered3d.UnlayeredSlicer"
 
 wget ${APPIMAGETOOLURL} -O ../appimagetool.AppImage
 chmod +x ../appimagetool.AppImage
@@ -13,17 +26,17 @@ if [ -f /.dockerenv ] ; then # Only run if inside of a Docker Container
 sed '0,/AI\x02/{s|AI\x02|\x00\x00\x00|}' -i  ../appimagetool.AppImage
 fi
 
-mv @SLIC3R_APP_CMD@ AppRun
+mv "${APP_CMD}" AppRun
 chmod +x AppRun
 
-cp resources/images/@SLIC3R_APP_KEY@_192px.png @SLIC3R_APP_KEY@.png
+cp "${ICON_SRC}" "${APP_CMD}.png"
 mkdir -p usr/share/icons/hicolor/192x192/apps
-cp resources/images/@SLIC3R_APP_KEY@_192px.png usr/share/icons/hicolor/192x192/apps/@SLIC3R_APP_KEY@.png
-cat <<EOF > com.orcaslicer.@SLIC3R_APP_KEY@.desktop
+cp "${ICON_SRC}" "usr/share/icons/hicolor/192x192/apps/${APP_CMD}.png"
+cat <<EOF > "${APP_ID}.desktop"
 [Desktop Entry]
-Name=@SLIC3R_APP_KEY@
+Name=${APP_KEY}
 Exec=AppRun %F
-Icon=@SLIC3R_APP_KEY@
+Icon=${APP_CMD}
 Type=Application
 PrefersNonDefaultGPU=true
 X-KDE-RunOnDiscreteGpu=true
@@ -32,22 +45,21 @@ MimeType=model/stl;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;
 EOF
 
 mkdir -p usr/share/applications
-cp com.orcaslicer.@SLIC3R_APP_KEY@.desktop usr/share/applications/
+cp "${APP_ID}.desktop" usr/share/applications/
 
 mkdir -p usr/share/metainfo
-cp "${REPO_ROOT}/scripts/flatpak/com.orcaslicer.@SLIC3R_APP_KEY@.metainfo.xml" \
-  "usr/share/metainfo/com.orcaslicer.@SLIC3R_APP_KEY@.metainfo.xml"
-cp "${REPO_ROOT}/scripts/flatpak/com.orcaslicer.@SLIC3R_APP_KEY@.metainfo.xml" \
-  "usr/share/metainfo/com.orcaslicer.@SLIC3R_APP_KEY@.appdata.xml"
-
+cp "${METAINFO_SRC}" "usr/share/metainfo/${APP_ID}.metainfo.xml"
+cp "${METAINFO_SRC}" "usr/share/metainfo/${APP_ID}.appdata.xml"
 
 export ARCH=$(uname -m)
 
+# Name the output explicitly. Left to itself appimagetool derives the filename from
+# the desktop Name field, mangling the space in APP_KEY into an underscore, and the
+# caller (build_linux_image.sh) then cannot find the file it expects to move.
 if [ -f /.dockerenv ] ; then # Only run if inside of a Docker Container
-  ../appimagetool.AppImage --appimage-extract-and-run . $([ -n "${container}" ] && echo '--appimage-extract-and-run')
+  ../appimagetool.AppImage --appimage-extract-and-run $([ -n "${container:-}" ] && echo '--appimage-extract-and-run') . "${APP_IMAGE}"
 else
-  ../appimagetool.AppImage . $([ -n "${container}" ] && echo '--appimage-extract-and-run')
+  ../appimagetool.AppImage $([ -n "${container:-}" ] && echo '--appimage-extract-and-run') . "${APP_IMAGE}"
 fi
 
-mv @SLIC3R_APP_KEY@-$(uname -m).AppImage ${APP_IMAGE}
-chmod +x ${APP_IMAGE}
+chmod +x "${APP_IMAGE}"

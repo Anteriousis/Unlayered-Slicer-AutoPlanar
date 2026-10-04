@@ -1,0 +1,282 @@
+name: Release
+
+# Cuts an Unlayered Slicer release. Deliberately self-contained rather than wired into
+# build_all.yml -> build_check_cache.yml -> build_slicer.yml: that chain is shared with pull-request
+# CI, its artifacts are directory uploads rather than release-ready files, and editing it for the
+# release path risks the CI everything else depends on. It does reuse the same dependency cache, so
+# there is no duplicate multi-hour deps build.
+#
+# Tag convention (enforced below): v0.0.4 for a release, v0.0.4-beta1 / -rc1 / -alpha1 for a
+# prerelease. A single alphanumeric prerelease identifier, no dots. version.inc must already say the
+# same version, minus the leading "v".
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and produce latest.json, but do not create a GitHub Release'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Release Windows
+    runs-on: windows-latest
+    # A cold dependency cache means building the whole vendored dep tree.
+    timeout-minutes: 360
+
+    steps:
+      - name: Guard against running on a fork of this fork
+        if: github.repository != 'Unlayered3D/Unlayered-Slicer'
+        run: |
+          echo "::error::This workflow publishes releases for Unlayered3D/Unlayered-Slicer only."
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          lfs: 'false'
+          fetch-depth: 0
+
+      - name: Read and validate the version
+        id: version
+        shell: pwsh
+        run: |
+          $content = Get-Content version.inc -Raw
+          if ($content -notmatch 'set\(UNLAYERED_VERSION "(.*?)"\)') {
+              Write-Output "::error::Could not read UNLAYERED_VERSION from version.inc"
+              exit 1
+          }
+          $ver_pure = $matches[1]
+          Write-Output "version.inc declares $ver_pure"
+
+          # A dotted prerelease identifier (v0.0.4-beta.1) is silently ignored by the in-app update
+          # check, which would publish a release no user is ever offered. Reject it here instead.
+          $tagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+)?$'
+
+          if ("${{ github.ref_type }}" -eq 'tag') {
+              $tag = "${{ github.ref_name }}"
+              if ($tag -notmatch $tagPattern) {
+                  Write-Output "::error::Tag '$tag' does not match $tagPattern. Use v0.0.4 or v0.0.4-beta1 - a single alphanumeric prerelease identifier, no dots."
+                  exit 1
+              }
+              if ($tag -ne "v$ver_pure") {
+                  Write-Output "::error::Tag '$tag' does not match version.inc ('$ver_pure'). Bump version.inc before tagging, or the shipped build will offer an update to itself."
+                  exit 1
+              }
+              # GitHub marks it a prerelease when the tag carries a prerelease identifier.
+              $prerelease = if ($tag -match '-') { 'true' } else { 'false' }
+          } else {
+              $tag = "v$ver_pure"
+              $prerelease = 'true'
+          }
+
+          echo "ver_pure=$ver_pure"     | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          echo "tag=$tag"               | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          echo "prerelease=$prerelease" | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+
+      # Same key and path as build_check_cache.yml, so a warm cache from a Build all run is reused.
+      # Do not "tidy" the orcaslicer_deps string: changing it invalidates every existing cache entry
+      # and costs a multi-hour rebuild.
+      - name: Restore cached deps
+        id: cache_deps
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
+          key: windows-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}
+
+      - uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~4.3.0"
+          useLocalCache: true
+          useCloudCache: true
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build deps (cache miss only)
+        if: steps.cache_deps.outputs.cache-hit != 'true'
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          choco install strawberryperl
+          .\build_release_vs.bat deps
+
+      - name: Save cached deps
+        if: steps.cache_deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
+          key: windows-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}
+
+      - name: Install nsis
+        run: choco install nsis
+
+      # The bundled firmware is the updater's OFFLINE FALLBACK, and resources/firmware is
+      # gitignored -- tools/make_firmware_bundle.py populates it from an RRF build tree, which a
+      # slicer runner does not have and should not be made to build. Fetch the same release the
+      # application itself would install instead: the manifest that bundler writes and the one
+      # attached to a firmware release are deliberately the same format, so the assets drop in
+      # verbatim.
+      #
+      # Resolution must match GitHubReleaseFirmwareSource (Utils/FirmwareBundle.cpp:399-410): it
+      # lists releases and takes the FIRST non-draft entry rather than calling /releases/latest,
+      # because the Unlayered firmware line is entirely pre-release and /latest skips all of it.
+      # Resolving differently here would bundle a different build from the one the updater offers.
+      - name: Bundle the printer firmware
+        id: firmware
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = gh api 'repos/Unlayered3D/RepRapFirmware/releases?per_page=20' `
+                   --jq 'map(select(.draft | not)) | .[0].tag_name // empty'
+          if (-not $tag) {
+            # No firmware release published yet. Ship without a fallback rather than holding the
+            # slicer release hostage to another repo: that is exactly today's behaviour, and the
+            # GitHub feed still serves the updater at runtime.
+            Write-Warning 'No published firmware release found; resources/firmware will be empty.'
+            "bundled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+          Write-Host "Bundling printer firmware from $tag"
+          New-Item -ItemType Directory -Force -Path resources/firmware | Out-Null
+          # Named patterns, not every asset: a release may also carry .elf/.map debug artefacts,
+          # and those would go into the installer for no reason.
+          gh release download $tag --repo Unlayered3D/RepRapFirmware --dir resources/firmware `
+             --clobber --pattern 'manifest.json' --pattern '*.uf2' --pattern '*.bin'
+          Get-ChildItem resources/firmware | Format-Table Name, Length
+          "bundled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Fails the release when the published firmware omits something the updater needs. This is
+      # not hypothetical: the release cut for unlayered.2 carried the mainboard image alone, with
+      # no IAP and no WiFi module, making it strictly less complete than the bundled copy it would
+      # have overridden.
+      - name: Verify the firmware bundle
+        if: steps.firmware.outputs.bundled == 'true'
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: python tools/verify_firmware_updater.py --release
+
+      - name: Build slicer
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: .\build_release_vs.bat slicer
+
+      - name: Create installer
+        working-directory: ${{ github.workspace }}/build
+        run: cpack -G NSIS
+
+      - name: Pack portable
+        working-directory: ${{ github.workspace }}/build
+        shell: cmd
+        run: '"C:/Program Files/7-Zip/7z.exe" a -tzip Unlayered_Slicer_Windows_V${{ steps.version.outputs.ver_pure }}_portable.zip ${{ github.workspace }}/build/UnlayeredSlicer'
+
+      - name: Pack PDB
+        working-directory: ${{ github.workspace }}/build/src/Release
+        shell: cmd
+        run: '"C:/Program Files/7-Zip/7z.exe" a -m0=lzma2 -mx9 Unlayered_Slicer_PDB_V${{ steps.version.outputs.ver_pure }}_for_developers_only.7z *.pdb'
+
+      - name: Collect assets and build the update manifest
+        id: manifest
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.ver_pure }}"
+          $tag = "${{ steps.version.outputs.tag }}"
+
+          # The exact name CPack produces, from CPACK_PACKAGE_FILE_NAME. Asserted rather than
+          # globbed: a glob that matches nothing turns a broken build into a silently empty release.
+          $installer = "build/Unlayered_Slicer_Windows_Installer_V$ver.exe"
+          if (-not (Test-Path $installer)) {
+              Write-Output "::error::CPack did not produce $installer. If CPACK_PACKAGE_FILE_NAME changed in CMakeLists.txt, update this step and select_platform_asset() in src/slic3r/Utils/AppUpdater.cpp together."
+              exit 1
+          }
+
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $files = @(
+            $installer,
+            "build/Unlayered_Slicer_Windows_V${ver}_portable.zip",
+            "build/src/Release/Unlayered_Slicer_PDB_V${ver}_for_developers_only.7z"
+          )
+          foreach ($f in $files) {
+              if (Test-Path $f) { Copy-Item $f release-assets/ } else { Write-Output "::warning::missing $f" }
+          }
+
+          $installerLeaf = Split-Path $installer -Leaf
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLower()
+          $size = (Get-Item $installer).Length
+          Write-Output "installer: $installerLeaf  $size bytes  sha256=$hash"
+
+          # While the repository is private, release assets need authentication and the download page
+          # is behind a sign-in, so the manifest advertises no assets and the in-app update dialog
+          # offers to open the download page instead. Set the UNLAYERED_PUBLIC_DOWNLOADS repository
+          # variable to 'true' once the files are publicly reachable and in-app installation switches
+          # on with no code change.
+          $public = "${{ vars.UNLAYERED_PUBLIC_DOWNLOADS }}" -eq 'true'
+          $assets = @()
+          if ($public) {
+              $assets += [ordered]@{
+                  name                 = $installerLeaf
+                  browser_download_url = "https://github.com/${{ github.repository }}/releases/download/$tag/$installerLeaf"
+                  size                 = $size
+                  sha256               = $hash
+              }
+          }
+
+          $notesPath = "release-notes.md"
+          $notes = if (Test-Path $notesPath) { Get-Content $notesPath -Raw } else { "Unlayered Slicer $ver" }
+
+          # Shaped like a single GitHub releases entry - see VERSION_CHECK_URL in AppConfig.cpp.
+          $manifest = [ordered]@{
+              tag_name   = $tag
+              prerelease = [System.Convert]::ToBoolean("${{ steps.version.outputs.prerelease }}")
+              html_url   = "https://unlayered3d.com/slicer/download"
+              body       = $notes
+              assets     = $assets
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Out-File -FilePath release-assets/latest.json -Encoding utf8
+          Get-Content release-assets/latest.json
+
+      - name: Upload the update manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: latest-json
+          path: release-assets/latest.json
+          if-no-files-found: error
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: Unlayered_Slicer_Windows_V${{ steps.version.outputs.ver_pure }}
+          path: release-assets/
+          if-no-files-found: error
+
+      - name: Publish the GitHub Release
+        if: github.ref_type == 'tag' && !inputs.dry_run
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: release-assets/*
+
+      # TODO(unlayered): publish release-assets/latest.json to
+      # https://unlayered3d.com/slicer/latest.json automatically. Until then it is downloaded from
+      # the latest-json artifact and uploaded by hand - the app will not see a new version until
+      # that file is live. Serve it with Cache-Control: max-age=300; a stale CDN copy is the most
+      # likely reason for "the updater says there is nothing new".
+      - name: Remind about the manual manifest publish
+        if: github.ref_type == 'tag' && !inputs.dry_run
+        run: |
+          echo "::notice::Download the latest-json artifact and publish it to https://unlayered3d.com/slicer/latest.json - clients will not see ${{ steps.version.outputs.tag }} until then."

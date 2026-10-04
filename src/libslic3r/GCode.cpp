@@ -86,6 +86,78 @@ using namespace std::literals::string_view_literals;
 
 namespace Slic3r {
 
+// UNLAYERED_MOD — the tool axis a chunk prints along, in the bed frame the G-code lives in.
+static inline Vec3d trafo_to_tool_axis(const Transform3d& trafo)
+{
+    return (trafo.rotation() * Vec3d(0, 0, 1)).normalized();
+}
+
+// The machine's B/C for a chunk trafo. tool_axis_to_bc() in PrintConfig.cpp owns the convention.
+static inline void trafo_to_bc(const Transform3d& trafo, double& angle_b, double& angle_c)
+{
+    tool_axis_to_bc(trafo_to_tool_axis(trafo), angle_b, angle_c);
+}
+
+// Convert transformation to G-code translation + rotation command
+// Assumes rotating unit vector <0,0,1> by the transformation
+// Moves to target_position (in G-code coordinates) while rotating the B/C axes,
+// returning G-code in the form "G0 X.. Y.. Z.. F5000 B(y angle) C(z angle)"
+static inline std::string trafo_to_rotation_gcode(const Transform3d& trafo, const Vec3d& target_position, bool suppress_rotary,
+                                                  const Vec2f& plate_xy_offset = Vec2f::Zero())
+{
+    // UNLAYERED_MOD — the whole point of this line is to set B/C. Both call sites pass the CURRENT
+    // position as the target, so with the rotary words suppressed (virtual 5-axis / 3-axis output)
+    // all that is left is a G0 rapid to where the nozzle already is: a no-op move, and a 5-axis-only
+    // construct in a file meant for a 3-axis printer. Emit nothing at all.
+    if (suppress_rotary)
+        return std::string();
+
+    // UNLAYERED_MOD — GCodeWriter stores m_pos with the plate offset INCLUDED and every emitter
+    // subtracts it on the way out (travel_to_xy, travel_to_xyz, travel_to_xyz_direct,
+    // rapid_to_xyzbc, extrude_to_xyz). Both call sites hand us m_writer.get_position(), so writing
+    // it verbatim put the rapid one plate-origin too far: harmless on plate 1, where the offset is
+    // zero, and a full-plate-width excursion at height on any other plate.
+    std::ostringstream gcode;
+    gcode << "G0 X" << target_position.x() - plate_xy_offset.x()
+          << " Y"   << target_position.y() - plate_xy_offset.y()
+          << " Z"   << target_position.z()
+          <<  " F5000";
+
+    double angle_b, angle_c;
+    trafo_to_bc(trafo, angle_b, angle_c);
+
+    // Format as G-code string: translate to target while rotating B/C
+    gcode << " B" << angle_b * 180.0 / M_PI << " C" << angle_c * 180.0 / M_PI;
+
+    return gcode.str();
+}
+
+// UNLAYERED_MOD — record the active tool axis for the G-code viewer. The preview needs the chunk's
+// print direction to orient extrusion cross-sections and the toolhead, and it cannot get it from the
+// B/C words: virtual_5axis suppresses those, and on a 3-axis machine there are none. Emitted as a
+// vector so there is no angle convention to disagree about. One line per orientation change.
+static inline std::string tool_axis_tag(const Transform3d& trafo)
+{
+    const Vec3d n = trafo_to_tool_axis(trafo);
+    std::ostringstream tag;
+    tag << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Tool_Axis)
+        << n.x() << "," << n.y() << "," << n.z() << "\n";
+    return tag.str();
+}
+
+// UNLAYERED_MOD — XY center of a chunk's sliced footprint in its local slicing frame (scaled).
+// Object layers and support islands, i.e. everything the emitter will actually print.
+static Point chunk_local_xy_center(const PrintObject &object)
+{
+    BoundingBox bb;
+    for (const Layer *layer : object.layers())
+        if (!layer->lslices.empty())
+            bb.merge(get_extents(layer->lslices));
+    for (const SupportLayer *layer : object.support_layers())
+        if (!layer->support_islands.empty())
+            bb.merge(get_extents(layer->support_islands));
+    return bb.defined ? bb.center() : Point(0, 0);
+}
     //! macro used to mark string used at localization,
     //! return same string
 #define L(s) (s)
@@ -564,7 +636,7 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         return default_value;
     }
 
-    std::string Wipe::wipe(GCode& gcodegen,double length, bool toolchange, bool is_last)
+    std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_last)
     {
         std::string gcode;
 
@@ -624,11 +696,14 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                     //FIXME one shall not generate the unnecessary G1 Fxxx commands, here wipe_speed is a constant inside this cycle.
                     // Is it here for the cooling markers? Or should it be outside of the cycle?
                     //gcode += gcodegen.writer().set_speed(wipe_speed * 60, "", gcodegen.enable_cooling_markers() ? ";_WIPE" : "");
-                    gcode += gcodegen.writer().extrude_to_xy(
-                        gcodegen.point_to_gcode(line.b),
-                        -dE,
-                        "wipe and retract"
-                    );
+
+                    // UNLAYERED_MOD
+                    const auto& dest2d = gcodegen.point_to_gcode(line.b);
+                    float             z_gcode = gcodegen.m_nominal_z;
+                    const Transform3d trafo = gcodegen.last_trafo();
+                    Vec3d       dest3d(dest2d(0), dest2d(1), z_gcode);
+                   
+                    gcode += gcodegen.writer().extrude_to_xyz(dest3d, -dE, "wipe and retract", true, trafo);
                 }
                 // add tag for processor
                 gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_End) + "\n";
@@ -1443,7 +1518,9 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
             gcodegen.m_pa_processor->resetPreviousPA(gcodegen.config().pressure_advance.get_at(new_filament_id));
         }
 
+ 
         // A phony move to the end position at the wipe tower.
+
         gcodegen.writer().travel_to_xy((end_pos + plate_origin_2d).cast<double>());
         gcodegen.set_last_pos(wipe_tower_point_to_object_point(gcodegen, end_pos + plate_origin_2d));
         if (!is_approx(z, current_z)) {
@@ -1508,9 +1585,7 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         const bool is_ramming       = (gcodegen.config().single_extruder_multi_material) ||
                                 (!gcodegen.config().single_extruder_multi_material &&
                                  gcodegen.config().filament_multitool_ramming.get_at(tcr.initial_tool));
-        // Orca: user-facing override (Printer Settings > Wipe tower > "Tool change on wipe tower").
-        // Forces the toolhead to travel over the wipe tower before issuing Tx even on multi-toolhead
-        // printers without ramming, where Orca would otherwise emit Tx in place (potentially over the part).
+        // Restored from upstream: honour the user's tool_change_on_wipe_tower setting.
         const bool tool_change_on_wipe_tower = gcodegen.config().tool_change_on_wipe_tower.value;
         const bool should_travel_to_tower = !tcr.priming && (tcr.force_travel     // wipe tower says so
                                                              || !needs_toolchange // this is just finishing the tower with no toolchange
@@ -2171,10 +2246,13 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
 
         // Check that there are extrusions on the very first layer. The case with empty
         // first layer may result in skirt/brim in the air and maybe other issues.
-        if (layers_to_print.size() == 1u) {
-            if (!has_extrusions)
-                throw Slic3r::SlicingError(_(L("One object has an empty first layer and can't be printed. Please Cut the bottom or enable supports.")), object.id().id);
-        }
+        // UNLAYERED_MOD: upstream's hard error for an empty FIRST layer stays disabled -- a tilted legacy
+        // chunk or a cut-plane segment can legitimately start with an empty layer (segments strip their
+        // leading empty layers). The gap check below is upstream's, restored: it had been commented out
+        // together with the last_extrusion_layer update, which left that pointer permanently null and
+        // made every layer above ~0.4 mm report an "empty layer between 0 and z" gap -- a CRITICAL
+        // warning on essentially every print.
+        // if (layers_to_print.size() == 1u && !has_extrusions) throw Slic3r::SlicingError(...);
 
         // In case there are extrusions on this layer, check there is a layer to lay it on.
         if ((layer_to_print.object_layer && layer_to_print.object_layer->has_extrusions())
@@ -2283,6 +2361,91 @@ std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> GCode::collec
             assert(merged.second[oi.object_idx].layer() == nullptr);
             merged.second[oi.object_idx] = std::move(per_object[oi.object_idx][oi.layer_idx]);
         }
+        layers_to_print.emplace_back(std::move(merged));
+    }
+
+    return layers_to_print;
+}
+
+// Like collect_layers_to_print(const Print&) but scoped to a subset of objects (ByGroup).
+// The inner vector is still indexed by global PrintObject index so process_layer can use it directly.
+// Inlines the per-object layer pairing rather than calling the private GCode::collect_layers_to_print(PrintObject).
+static std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>>
+collect_layers_to_print_for_group(const Print& print, const std::vector<const PrintInstance*>& group)
+{
+    // Collect deduplicated global object indices for this group.
+    std::vector<size_t> group_obj_indices;
+    for (const PrintInstance* inst : group) {
+        for (size_t idx = 0; idx < print.objects().size(); ++idx) {
+            if (print.objects()[idx] == inst->print_object) {
+                if (std::find(group_obj_indices.begin(), group_obj_indices.end(), idx) == group_obj_indices.end())
+                    group_obj_indices.push_back(idx);
+                break;
+            }
+        }
+    }
+
+    // Declarative cut planes: `rank` is the segment's bed-upward BFS index (0 for ordinary
+    // objects). Ordering by (rank, print_z) makes segment order exact — a lower segment finishes
+    // before the one resting on it starts — instead of relying on cross-frame print_z comparison,
+    // which is only heuristically correct for tilted segments.
+    struct OrderingItem { int rank; coordf_t print_z; size_t object_idx; size_t layer_idx; };
+    std::vector<std::vector<GCode::LayerToPrint>> per_object(print.objects().size());
+    std::vector<OrderingItem> ordering;
+
+    for (size_t obj_idx : group_obj_indices) {
+        const PrintObject& object = *print.objects()[obj_idx];
+        auto& layers = per_object[obj_idx];
+
+        // Pair object layers with support layers by Z (mirrors GCode::collect_layers_to_print(PrintObject)).
+        size_t idx_obj = 0, idx_sup = 0;
+        while (idx_obj < object.layers().size() || idx_sup < object.support_layers().size()) {
+            GCode::LayerToPrint ltp;
+            double zmin = std::numeric_limits<double>::max();
+            if (idx_obj < object.layers().size()) {
+                ltp.object_layer = object.layers()[idx_obj++];
+                zmin = std::min(zmin, ltp.object_layer->print_z);
+            }
+            if (idx_sup < object.support_layers().size()) {
+                ltp.support_layer = object.support_layers()[idx_sup++];
+                zmin = std::min(zmin, ltp.support_layer->print_z);
+            }
+            if (ltp.object_layer && ltp.object_layer->print_z > zmin + EPSILON) {
+                ltp.object_layer = nullptr;
+                --idx_obj;
+            }
+            if (ltp.support_layer && ltp.support_layer->print_z > zmin + EPSILON) {
+                ltp.support_layer = nullptr;
+                --idx_sup;
+            }
+            ltp.original_object = &object;
+            layers.push_back(ltp);
+        }
+
+        if (layers.empty())
+            continue; // A cut plane may leave a segment thinner than the first printable layer.
+        const GCode::LayerToPrint& front = layers.front();
+        const int rank = std::max(object.segment_index(), 0);
+        for (const GCode::LayerToPrint& ltp : layers)
+            ordering.push_back({rank, ltp.print_z(), obj_idx, size_t(&ltp - &front)});
+    }
+
+    std::sort(ordering.begin(), ordering.end(), [](const OrderingItem& a, const OrderingItem& b) {
+        return a.rank != b.rank ? a.rank < b.rank : a.print_z < b.print_z;
+    });
+
+    std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> layers_to_print;
+    for (size_t i = 0; i < ordering.size();) {
+        size_t j = i + 1;
+        coordf_t zmax = ordering[i].print_z + EPSILON;
+        // The epsilon z-merge must never merge items of different rank: layers of a later segment
+        // may share print_z values with an earlier one but must still print strictly after it.
+        for (; j < ordering.size() && ordering[j].rank == ordering[i].rank && ordering[j].print_z <= zmax; ++j);
+        std::pair<coordf_t, std::vector<GCode::LayerToPrint>> merged;
+        merged.first = 0.5 * (ordering[i].print_z + ordering[j - 1].print_z);
+        merged.second.assign(print.objects().size(), GCode::LayerToPrint());
+        for (; i < j; ++i)
+            merged.second[ordering[i].object_idx] = std::move(per_object[ordering[i].object_idx][ordering[i].layer_idx]);
         layers_to_print.emplace_back(std::move(merged));
     }
 
@@ -2530,7 +2693,8 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     if (m_config.printer_structure.value == PrinterStructure::psI3 && m_spiral_vase) {
         m_timelapse_warning_code += 1;
     }
-    if (m_config.printer_structure.value == PrinterStructure::psI3 && print->config().print_sequence == PrintSequence::ByObject) {
+    if (m_config.printer_structure.value == PrinterStructure::psI3 &&
+        (print->config().print_sequence == PrintSequence::ByObject || print->config().print_sequence == PrintSequence::ByGroup)) {
         m_timelapse_warning_code += (1 << 1);
     }
     if (m_config.timelapse_type.value == TimelapseType::tlSmooth && !m_config.enable_prime_tower.value) {
@@ -2850,11 +3014,84 @@ std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Pri
     for (const ModelObject *model_object : print.model().objects)
         for (const ModelInstance *model_instance : model_object->instances) {
             auto it = std::lower_bound(model_instance_to_print_instance.begin(), model_instance_to_print_instance.end(), std::make_pair(model_instance, nullptr), [](auto &l, auto &r) { return l.first->arrange_order < r.first->arrange_order; });
-            if (it != model_instance_to_print_instance.end() && it->first == model_instance)
-                instances.emplace_back(it->second);
+            // Declarative cut planes: one ModelInstance may map to several PrintInstances (one per
+            // segment PrintObject). Collect them ALL — taking just the first would silently drop
+            // every segment but one from ordering, skirt and exclude-object logic.
+            for (; it != model_instance_to_print_instance.end() && it->first->arrange_order == model_instance->arrange_order; ++ it)
+                if (it->first == model_instance)
+                    instances.emplace_back(it->second);
         }
-    std::sort(instances.begin(), instances.end(), [](auto& l, auto& r) { return l->model_instance->arrange_order < r->model_instance->arrange_order; });
+    std::sort(instances.begin(), instances.end(), [](auto& l, auto& r) {
+        // Tie-break equal arrange_orders (the segments of one instance) by the segment's
+        // bed-upward BFS index so lower segments always print first.
+        if (l->model_instance->arrange_order != r->model_instance->arrange_order)
+            return l->model_instance->arrange_order < r->model_instance->arrange_order;
+        return l->print_object->segment_index() < r->print_object->segment_index();
+    });
     return instances;
+}
+
+// Build groups for ByGroup print sequence.
+// Returns one inner vector per group, in ascending group-number order.
+// Instances with print_group == 0 each get their own singleton group (ByObject behavior).
+// Instances with the same non-zero print_group are collected into the same group.
+static std::vector<std::vector<const PrintInstance*>> build_print_groups(const Print& print)
+{
+    // Use the same model order as ByObject for deterministic ordering.
+    std::vector<const PrintInstance*> ordered = sort_object_instances_by_model_order(print);
+
+    // Declarative cut planes: segments of one ModelObject must print as one group. A user-set
+    // non-zero print_group wins unchanged (all segments share the object config, so they land in
+    // that group together); the "0 = print alone" default is upgraded to an implicit per-object
+    // group. Negative ids cannot collide with user-set positive print_group values; +1 keeps the
+    // id nonzero even if the masked ObjectID is 0.
+    auto effective_group = [](const PrintInstance *inst) -> int {
+        int g = inst->print_object->config().print_group.value;
+        if (g == 0 && inst->print_object->is_segment())
+            g = -int((inst->print_object->model_object()->id().id & 0x3FFFFFFF) + 1);
+        return g;
+    };
+
+    // Collect non-zero groups preserving first-seen order.
+    std::map<int, std::vector<const PrintInstance*>> group_map;
+    std::vector<int> group_order; // tracks insertion order
+    std::vector<std::vector<const PrintInstance*>> singletons;
+
+    for (const PrintInstance* inst : ordered) {
+        int g = effective_group(inst);
+        if (g == 0) {
+            singletons.push_back({inst});
+        } else {
+            if (group_map.find(g) == group_map.end())
+                group_order.push_back(g);
+            group_map[g].push_back(inst);
+        }
+    }
+
+    // Interleave singletons and named groups in the order their first instance appeared.
+    // Rebuild a unified ordering: walk `ordered` once, emit a group/singleton the first
+    // time any of its members is encountered.
+    std::set<int> emitted_groups;
+    int singleton_idx = 0;
+    std::vector<std::vector<const PrintInstance*>> result;
+
+    for (const PrintInstance* inst : ordered) {
+        int g = effective_group(inst);
+        if (g == 0) {
+            // Each singleton is its own entry; find it in singletons by pointer.
+            for (auto& s : singletons) {
+                if (s[0] == inst) {
+                    result.push_back(s);
+                    break;
+                }
+            }
+        } else {
+            if (emitted_groups.insert(g).second)
+                result.push_back(group_map[g]);
+        }
+    }
+
+    return result;
 }
 
 enum BambuBedType {
@@ -2937,6 +3174,30 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
             }
             m_layer_count += (unsigned int)(object->instances().size() * temp_layer_count);
         }
+    } else if (print.config().print_sequence == PrintSequence::ByGroup) {
+        // Each group prints all its layers before the next group starts.
+        // Count unique Z values per group and sum them.
+        auto groups = build_print_groups(print);
+        for (const auto& group : groups) {
+            std::vector<coordf_t> zs;
+            for (const PrintInstance* inst : group) {
+                const PrintObject* obj = inst->print_object;
+                for (auto layer : obj->layers())
+                    zs.push_back(layer->print_z);
+                for (auto layer : obj->support_layers())
+                    zs.push_back(layer->print_z);
+            }
+            if (!zs.empty()) {
+                std::sort(zs.begin(), zs.end());
+                auto end_it = std::unique(zs.begin(), zs.end());
+                unsigned int temp_layer_count = (unsigned int)(end_it - zs.begin());
+                for (auto it = zs.begin(); it != end_it - 1; it++) {
+                    if (abs(*it - *(it + 1)) < EPSILON)
+                        temp_layer_count--;
+                }
+                m_layer_count += temp_layer_count;
+            }
+        }
     } else {
         // Print all objects with the same print_z together.
         std::vector<coordf_t> zs;
@@ -2986,9 +3247,6 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         std::string top_gcode_template = print.config().file_start_gcode.value;
         if (!top_gcode_template.empty()) {
             DynamicConfig top_config;
-            // file_start_gcode runs before the parser copy that normally restores these, so set them here.
-            PlaceholderParser::update_timestamp(top_config);
-            PlaceholderParser::update_user_name(top_config);
             top_config.set_key_value("print_time_sec", new ConfigOptionString(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Sec_Placeholder)));
             top_config.set_key_value("used_filament_length", new ConfigOptionString(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Used_Filament_Length_Placeholder)));
             std::string top_gcode = print.placeholder_parser().process(top_gcode_template, 0, &top_config);
@@ -3156,6 +3414,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     std::vector<const PrintInstance*> 					print_object_instances_ordering;
     std::vector<const PrintInstance*>::const_iterator 	print_object_instance_sequential_active;
     std::vector<const PrintInstance *>::const_iterator  first_has_extrude_print_object;
+    // ByGroup: one inner vector per group in print order; singletons (print_group==0) are groups of one.
+    std::vector<std::vector<const PrintInstance*>>      print_groups;
     //resize
     first_non_support_filaments.resize(print.config().nozzle_diameter.size(), -1);
     first_filaments.resize(print.config().nozzle_diameter.size(), -1);
@@ -3203,6 +3463,41 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         this->set_extruders(print.extruders());
 
         has_wipe_tower = print.has_wipe_tower() && tool_ordering.has_wipe_tower();
+    } else if (print.config().print_sequence == PrintSequence::ByGroup) {
+        // Build groups; each group prints its objects by layer, groups are printed sequentially.
+        print_groups = build_print_groups(print);
+
+        // Find initial extruder from the first group that has extrudable content.
+        bool find_first_non_support_filament = false;
+        size_t first_group_idx = 0;
+        for (size_t gi = 0; gi < print_groups.size(); ++gi) {
+            std::vector<const PrintObject*> group_objects;
+            { std::set<const PrintObject*> seen;
+              for (const PrintInstance* inst : print_groups[gi])
+                  if (seen.insert(inst->print_object).second)
+                      group_objects.push_back(inst->print_object); }
+            tool_ordering = ToolOrdering(group_objects, initial_extruder_id);
+            tool_ordering.sort_and_build_data(group_objects, initial_extruder_id);
+            float temp_max_additional_fan = tool_ordering.cal_max_additional_fan(print.config());
+            if (temp_max_additional_fan > max_additional_fan)
+                max_additional_fan = temp_max_additional_fan;
+            if (!find_first_non_support_filament && tool_ordering.first_extruder() != (unsigned int)-1) {
+                if (initial_extruder_id == (unsigned int)-1) {
+                    initial_extruder_id = tool_ordering.first_extruder();
+                    first_group_idx = gi;
+                }
+                find_first_non_support_filament = tool_ordering.cal_non_support_filaments(
+                    print.config(), initial_non_support_extruder_id, first_non_support_filaments, first_filaments);
+            }
+        }
+        if (initial_extruder_id == static_cast<unsigned int>(-1))
+            throw Slic3r::SlicingError(_(L("No object can be printed. Maybe too small")));
+        // No wipe tower in group sequential mode (same restriction as ByObject).
+        this->set_extruders(print.extruders());
+        has_wipe_tower = false;
+
+        // Flat ordering used by per-layer instance sorting inside each group's layer loop.
+        print_object_instances_ordering = sort_object_instances_by_model_order(print);
     } else {
         // Find tool ordering for all the objects at once, and the initial extruder ID.
         // If the tool ordering has been pre-calculated by Print class for wipe tower already, reuse it.
@@ -3380,7 +3675,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     this->placeholder_parser().set("wipe_tower_center_pos_y", new ConfigOptionFloat(wipe_tower_center.y()));
     this->placeholder_parser().set("wipe_tower_center_pos_valid", new ConfigOptionBool(wipe_tower_center_valid));
     this->placeholder_parser().set("has_single_extruder_multi_material_priming", wipe_tower_type == WipeTowerType::Type2 && has_wipe_tower && print.config().single_extruder_multi_material_priming);
-    this->placeholder_parser().set("total_toolchanges", DoExport::resolve_total_toolchanges(print.wipe_tower_data(), print.tool_ordering()));
+    this->placeholder_parser().set("total_toolchanges", DoExport::resolve_total_toolchanges(print.wipe_tower_data(), print.tool_ordering())); // Check for negative toolchanges (single extruder mode) and set to 0 (no tool change).
     this->placeholder_parser().set("num_extruders", int(print.config().nozzle_diameter.values.size()));
     this->placeholder_parser().set("retract_length", new ConfigOptionFloats(print.config().retraction_length));
 
@@ -3589,13 +3884,22 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
             // object hight
             if (!print_object->layers().empty() && print_object->layers().back()->print_z > max_hight_temp) max_hight_temp = print_object->layers().back()->print_z;
             // object area
-            if (!print_object->layers().empty() && print_object->layers().front()->print_z < print.config().initial_layer_print_height + EPSILON &&
+            // UNLAYERED_MOD: this is a PHYSICAL first-layer test -- it feeds the flat-print chamber
+            // temperature heuristic, so it must mean "touches the build plate". Rebasing each
+            // cut-plane segment onto its own zero puts every segment's first layer at
+            // initial_layer_print_height, so without the root gate every upper segment would
+            // contribute its cut-face cross-section to the bed area. is_root_segment() is true for
+            // ordinary objects, so planar prints are unaffected.
+            if (print_object->is_root_segment() &&
+                !print_object->layers().empty() && print_object->layers().front()->print_z < print.config().initial_layer_print_height + EPSILON &&
                 !print_object->layers().front()->lslices.empty()) {
                 ExPolygons temp_Expolys = print_object->layers().front()->lslices;
                 for (ExPolygon &temp_Expoly : temp_Expolys) { area_sum_temp += temp_Expoly.area(); }
             }
             // suport area
-            if (!print_object->support_layers().empty() && print_object->support_layers().front()->print_z < print.config().initial_layer_print_height + EPSILON &&
+            // UNLAYERED_MOD: same physical-bed gate as the object area above.
+            if (print_object->is_root_segment() &&
+                !print_object->support_layers().empty() && print_object->support_layers().front()->print_z < print.config().initial_layer_print_height + EPSILON &&
                 !print_object->support_layers().front()->support_islands.empty()) {
                 ExPolygons temp_Expolys = print_object->support_layers().front()->support_islands;
                 for (ExPolygon &temp_Expoly : temp_Expolys) { area_sum_temp += temp_Expoly.area(); }
@@ -3627,6 +3931,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     std::string machine_start_gcode = this->placeholder_parser_process("machine_start_gcode", print.config().machine_start_gcode.value, initial_extruder_id);
     if (print.config().gcode_flavor != gcfKlipper) {
         // Set bed temperature if the start G-code does not contain any bed temp control G-codes.
+        // Waits for the bed (M190) as upstream does; a fork experiment had turned this into a no-wait M140.
         this->_print_first_layer_bed_temperature(file, print, machine_start_gcode, initial_extruder_id, true);
         // Set extruder(s) temperature before and after start G-code.
         this->_print_first_layer_extruder_temperatures(file, print, machine_start_gcode, initial_extruder_id, false);
@@ -3837,6 +4142,12 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                 print.throw_if_canceled();
                 this->set_origin(unscale((*print_object_instance_sequential_active)->shift));
 
+                //UNLAYERED_MOD
+                Transform3d trafo = object.post_trafo_inverse();
+                //dont set past trafo yet since i still need it
+      
+
+
                 // BBS: prime extruder if extruder change happens before this object instance
                 bool prime_extruder = false;
                 if (finished_objects > 0) {
@@ -3844,22 +4155,34 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                     // This happens before Z goes down to layer 0 again, so that no collision happens hopefully.
                     m_enable_cooling_markers = false; // we're not filtering these moves through CoolingBuffer
                     m_avoid_crossing_perimeters.use_external_mp_once();
-                    // BBS. change tool before moving to origin point.
-                    if (m_writer.need_toolchange(initial_extruder_id)) {
-                        const PrintObjectConfig& object_config = object.config();
-                        coordf_t initial_layer_print_height = print.config().initial_layer_print_height.value;
-
-                        if (m_enable_exclude_object && print.config().support_object_skip_flush.value) {
-                            m_filament_instances_code = _encode_label_ids_to_base64({(*print_object_instance_sequential_active)->model_instance->get_labeled_id()});
+                    if (! m_config.enable_nonplanar.value) {
+                        // UNLAYERED_MOD: plain 3-axis printers get upstream's transition. The multiplanar
+                        // sequence below hops only nonplanar_departure_distance (1 mm) above the finished
+                        // object and skips the pre-object tool change -- both wrong for an ordinary
+                        // sequential print.
+                        // BBS. change tool before moving to origin point.
+                        if (m_writer.need_toolchange(initial_extruder_id)) {
+                            coordf_t initial_layer_print_height = print.config().initial_layer_print_height.value;
+    
+                            if (m_enable_exclude_object && print.config().support_object_skip_flush.value) {
+                                m_filament_instances_code = _encode_label_ids_to_base64({(*print_object_instance_sequential_active)->model_instance->get_labeled_id()});
+                            }
+    
+                            file.write(this->set_extruder(initial_extruder_id, initial_layer_print_height, true));
+                            prime_extruder = true;
+                        } else {
+                            file.write(this->retract());
                         }
-
-                        file.write(this->set_extruder(initial_extruder_id, initial_layer_print_height, true));
-                        prime_extruder = true;
+                        file.write(m_writer.travel_to_z(m_max_layer_z + m_writer.config.z_hop.get_at(get_filament_config_index((int)initial_extruder_id))));
+                        file.write(this->travel_to(Point(0, 0), erNone, "move to origin position for next object"));
                     } else {
-                        file.write(this->retract());
+
+                    // UNLAYERED_MOD — inter-chunk transition: the shared four-move sequence
+                    // (see chunk_transition_gcode). The ordinary travel_to that follows is
+                    // move 4, descending onto the first extrusion point.
+                    file.write(this->chunk_transition_gcode(print, object, trafo,
+                                                            std::max(0., m_config.nonplanar_approach_distance.value)));
                     }
-                    file.write(m_writer.travel_to_z(m_max_layer_z + m_writer.config.z_hop.get_at(get_filament_config_index((int)initial_extruder_id))));
-                    file.write(this->travel_to(Point(0, 0), erNone, "move to origin position for next object"));
                     m_enable_cooling_markers = true;
                     // Disable motion planner when traveling to first object point.
                     m_avoid_crossing_perimeters.disable_once();
@@ -3872,7 +4195,16 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                     this->_print_first_layer_bed_temperature(file, print, printing_by_object_gcode, initial_extruder_id, false);
                     this->_print_first_layer_extruder_temperatures(file, print, printing_by_object_gcode, initial_extruder_id, false);
                     file.writeln(printing_by_object_gcode);
+
+                    // The move onto the next chunk's first extrusion point is emitted by the
+                    // ordinary travel_to (move 4 of the transition).
                 }
+
+                this->set_last_trafo(trafo);
+                // UNLAYERED_MOD — tell the G-code viewer which way the tool points for this chunk.
+                // Emitted for every chunk including the first, so the preview never has to guess.
+                file.write(tool_axis_tag(trafo));
+
                 // Reset the cooling buffer internal state (the current position, feed rate, accelerations).
                 m_cooling_buffer->set_current_extruder(initial_extruder_id, get_extruder_id(initial_extruder_id));
                 m_cooling_buffer->reset(this->writer().get_position());
@@ -3881,8 +4213,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                 // and export G-code into file.
                 tool_ordering.cal_most_used_extruder(print.config());
                 m_printed_objects.emplace_back(&object);
+
                 this->process_layers(print, tool_ordering, collect_layers_to_print(object), *print_object_instance_sequential_active - object.instances().data(), file,
                                      prime_extruder);
+
                 {
                     // save the flush statitics stored in tool ordering by object
                     print.m_statistics_by_extruder_count.stats_by_single_extruder += tool_ordering.get_filament_change_stats(ToolOrdering::FilamentChangeMode::SingleExt);
@@ -3906,6 +4240,101 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                 // Reset it when starting another object from 1st layer.
                 m_second_layer_things_done = false;
                 prev_object = &object;
+            }
+        } else if (print.config().print_sequence == PrintSequence::ByGroup) {
+            // Print groups sequentially; within each group, objects are printed by layer (interleaved).
+            size_t finished_groups = 0;
+            for (const auto& group : print_groups) {
+                // Build group-scoped instance ordering (filtered from the global ordering).
+                std::set<const PrintInstance*> group_set(group.begin(), group.end());
+                std::vector<const PrintInstance*> group_ordering;
+                for (const PrintInstance* inst : print_object_instances_ordering)
+                    if (group_set.count(inst))
+                        group_ordering.push_back(inst);
+
+                // Build group-scoped object list and recompute tool ordering over all group objects.
+                std::vector<const PrintObject*> group_objects;
+                { std::set<const PrintObject*> seen;
+                  for (const PrintInstance* inst : group)
+                      if (seen.insert(inst->print_object).second)
+                          group_objects.push_back(inst->print_object); }
+                // Each group has its own objects and Z range, so the tool ordering must be rebuilt
+                // for every group. (Unlike ByObject, we cannot reuse the previous one when the first
+                // extruder matches: in a single-extruder print first==last always, and reusing a prior
+                // group's ToolOrdering would make tools_for_layer() index past its m_layer_tools and
+                // return a dangling LayerTools& — crashing on layer_tools.extruders.front().)
+                // final_extruder_id seeds the first extruder for tool-change continuity across groups.
+                tool_ordering = ToolOrdering(group_objects, final_extruder_id);
+                tool_ordering.sort_and_build_data(group_objects, final_extruder_id);
+                unsigned int group_first_extruder = tool_ordering.first_extruder();
+                if (group_first_extruder == (unsigned int)-1)
+                    continue; // nothing to print in this group
+                final_extruder_id = tool_ordering.last_extruder();
+
+                print.throw_if_canceled();
+
+                if (finished_groups > 0) {
+                    // Between-group transition: lift and rotate the machine back to the identity
+                    // orientation, so the identity-frame travel-to-origin below is physically correct.
+                    // Per-object orientation within the group is handled inside process_layer (each
+                    // group member is re-oriented to its own post_trafo_inverse() as it prints).
+                    m_enable_cooling_markers = false;
+                    m_avoid_crossing_perimeters.use_external_mp_once();
+                    m_wipe.reset_path();
+
+                    file.write(m_writer.travel_to_z(m_writer.get_position().z() + 25.0, "lift before group transition"));
+                    // Reset the rotary axes (B/C) back to identity in place at the lifted Z before
+                    // moving to the next group. trafo_to_rotation_gcode() takes (trafo, target_position,
+                    // suppress_rotary); the target stays at the current position (the following
+                    // travel_to() performs the XY move and keeps m_writer/last_pos in sync). Mirrors the
+                    // end-of-print reset call site. suppress_rotary matches the other call sites so a
+                    // virtual-5-axis (3-axis test) export omits the B/C words here too.
+                    // Empty under virtual 5-axis -- do not write a stray blank line for it.
+                    if (const std::string rot = trafo_to_rotation_gcode(Transform3d::Identity(), m_writer.get_position(),
+                                                                        ! this->emit_rotary_axes(), m_writer.get_xy_offset()); ! rot.empty())
+                        file.write(rot + "\n");
+
+                    m_enable_cooling_markers = true;
+                    m_avoid_crossing_perimeters.disable_once();
+                    this->placeholder_parser().set("current_object_idx", int(finished_groups));
+                    std::string printing_by_object_gcode = this->placeholder_parser_process(
+                        "printing_by_object_gcode", print.config().printing_by_object_gcode.value, group_first_extruder);
+                    this->_print_first_layer_bed_temperature(file, print, printing_by_object_gcode, group_first_extruder, false);
+                    this->_print_first_layer_extruder_temperatures(file, print, printing_by_object_gcode, group_first_extruder, false);
+                    file.writeln(printing_by_object_gcode);
+
+                    file.write(this->travel_to(Point(0, 0), erNone, "move to group origin at safe height",
+                                               m_writer.get_position().z() + 5.0, Transform3d::Identity()));
+                }
+
+                // The machine is at the identity orientation at the start of each group (either from
+                // construction for the first group, or reset by the transition above). process_layer
+                // re-orients per group member from here.
+                this->set_last_trafo(Transform3d::Identity());
+                // UNLAYERED_MOD — see the ByObject site: keep the viewer's tool axis in step.
+                file.write(tool_axis_tag(Transform3d::Identity()));
+                m_cooling_buffer->reset(this->writer().get_position());
+                m_cooling_buffer->set_current_extruder(group_first_extruder, get_extruder_id(group_first_extruder));
+
+                tool_ordering.cal_most_used_extruder(print.config());
+                for (const PrintInstance* inst : group)
+                    m_printed_objects.emplace_back(inst->print_object);
+
+                // Collect layers scoped to this group's objects and run the ByLayer pipeline.
+                auto group_layers = collect_layers_to_print_for_group(print, group);
+                this->process_layers(print, tool_ordering, group_ordering, group_layers, file);
+
+                {
+                    print.m_statistics_by_extruder_count.stats_by_single_extruder += tool_ordering.get_filament_change_stats(ToolOrdering::FilamentChangeMode::SingleExt);
+                    print.m_statistics_by_extruder_count.stats_by_multi_extruder_best += tool_ordering.get_filament_change_stats(ToolOrdering::FilamentChangeMode::MultiExtBest);
+                    print.m_statistics_by_extruder_count.stats_by_multi_extruder_curr += tool_ordering.get_filament_change_stats(ToolOrdering::FilamentChangeMode::MultiExtCurr);
+                    const auto& layer_tools = tool_ordering.layer_tools();
+                    for (const auto& lt : layer_tools)
+                        m_sorted_layer_filaments.emplace_back(lt.extruders);
+                }
+
+                ++finished_groups;
+                m_second_layer_things_done = false;
             }
         } else {
             // Sort layers by Z.
@@ -3989,6 +4418,20 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     // Write end commands to file.
     file.write(this->retract(false, true));
 
+    // UNLAYERED_MOD — park the rotary axes back at identity at the end of a multiplanar print.
+    // Only for machines that actually have them: on an ordinary 3-axis printer this used to emit a
+    // stray 20 mm lift plus an invalid "B-90 C0" on every single print.
+    if (m_config.enable_nonplanar.value) {
+        //lift z after final thingy
+        file.write(m_writer.travel_to_z(m_writer.get_position().z() + 20.0, "lift before rotation"));
+
+        //also we need to be back in normal coordinates
+        // Keep the current XYZ (just lifted above) and only reset the B/C rotation to identity.
+        // Empty under virtual 5-axis -- do not write a stray blank line for it.
+        if (const std::string rot = trafo_to_rotation_gcode(Transform3d::Identity(), m_writer.get_position(),
+                                                            ! this->emit_rotary_axes(), m_writer.get_xy_offset()); ! rot.empty())
+            file.write(rot + "\n");
+    }
     // if needed, write the gcode_label_objects_end
     {
         std::string gcode;
@@ -5779,7 +6222,6 @@ LayerResult GCode::process_layer(
         // Mark the temperature transition from 1st to 2nd layer to be finished.
         m_second_layer_things_done = true;
     }
-
     if (single_object_instance_idx == size_t(-1)) {
         // Normal (non-sequential) print.
         gcode += ProcessLayer::emit_custom_gcode_per_print_z(*this, layer_tools.custom_gcode, m_writer.filament()->id(), first_extruder_id, print.config());
@@ -5977,7 +6419,7 @@ LayerResult GCode::process_layer(
                        point(1) >= bbox.min(1) && point(1) < bbox.max(1) &&
                        layer.lslices[i].contour.contains(point);
             };
-
+            //im
             for (size_t region_id = 0; region_id < layer.regions().size(); ++ region_id) {
                 const LayerRegion *layerm = layer.regions()[region_id];
                 if (layerm == nullptr)
@@ -6292,7 +6734,7 @@ LayerResult GCode::process_layer(
             }
         }
 
-        if (print.config().print_sequence == PrintSequence::ByLayer && m_enable_exclude_object && print.config().support_object_skip_flush.value) {
+        if ((print.config().print_sequence == PrintSequence::ByLayer || print.config().print_sequence == PrintSequence::ByGroup) && m_enable_exclude_object && print.config().support_object_skip_flush.value) {
             std::set<size_t> all_label_ids;
             for (InstanceToPrint &instance : filament_to_print_instances[extruder_id].first)
                 all_label_ids.insert(instance.label_object_id);
@@ -6418,6 +6860,50 @@ LayerResult GCode::process_layer(
                 if (m_config.reduce_crossing_wall)
                     m_avoid_crossing_perimeters.init_layer(*m_layer);
 
+                // UNLAYERED_MOD — ByGroup: members of a group may have distinct orientations but are
+                // printed interleaved by layer. Each object's extrusions are emitted in its own
+                // post_trafo_inverse() frame (see the island trafo below), so the machine must be
+                // physically re-oriented to that same trafo before this instance prints, otherwise the
+                // toolpath frame and the physical B/C orientation disagree and orientation is lost.
+                // Only emits when the orientation actually changes, so a uniform-orientation group
+                // rotates once and same-object passes (wiping / multiple extruders) are no-ops.
+                if (print.config().print_sequence == PrintSequence::ByGroup) {
+                    const Transform3d obj_trafo = instance_to_print.print_object.post_trafo_inverse();
+                    if (!obj_trafo.isApprox(this->last_trafo())) {
+                        const bool prev_cooling_markers = m_enable_cooling_markers;
+                        m_enable_cooling_markers = false; // the lift/rotation are not printing moves
+                        // Drop any pending wipe path: it was recorded in the previous member's frame
+                        // and replaying it after the rotation below emits moves in the new orientation,
+                        // which dive through the bed. The between-group transition resets it for the
+                        // same reason (see the m_wipe.reset_path() at the group loop).
+                        m_wipe.reset_path();
+                        // Same four-move transition as ByObject chunk printing: hop off the old
+                        // segment along ITS normal, swing C parked clear of the part, tilt B onto
+                        // the new segment's staging point; the member's first travel then descends
+                        // straight down (move 4). Replaces a full-height lift-25-and-swing whose
+                        // round trip cost time on every plane change and read as "a big z lift".
+                        // Staging clears what this segment has already built: current print_z + approach.
+                        this->set_origin(unscale(instance_to_print.print_object.instances()[instance_to_print.instance_id].shift));
+                        gcode += this->chunk_transition_gcode(print, instance_to_print.print_object, obj_trafo,
+                                                              layer_to_print.print_z() + std::max(0., m_config.nonplanar_approach_distance.value));
+                        m_enable_cooling_markers = prev_cooling_markers;
+                        this->set_last_trafo(obj_trafo);
+                        // UNLAYERED_MOD — keep the viewer's tool axis in step. In ByGroup this
+                        // can change several times within a single layer.
+                        gcode += tool_axis_tag(obj_trafo);
+                    }
+                }
+
+                // Declarative cut planes: tag which segment ("section") the following toolpaths
+                // belong to, so the G-code preview can colour them with the same palette the
+                // Prepare tab's chunk preview uses. Emitted only for segmented objects, so ordinary
+                // prints keep byte-identical output, and deliberately NOT gated on
+                // gcode_label_objects -- that switch is about machine-side object labelling, while
+                // this is purely a viewer annotation.
+                if (instance_to_print.print_object.is_segment())
+                    gcode += ";SEGMENT_ID:" + std::to_string(instance_to_print.print_object.segment_index()) + "\n";
+
+                //ok this runs after the thing
                 if (this->config().gcode_label_objects) {
                     gcode += std::string("; printing object ") + instance_to_print.print_object.model_object()->name +
                              " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " +
@@ -6437,6 +6923,7 @@ LayerResult GCode::process_layer(
                                                           get_instance_name(&instance_to_print.print_object, inst.id) + "\n");
                         }
                         else if (gflavor == gcfMarlinLegacy || gflavor == gcfMarlinFirmware || gflavor == gcfRepRapFirmware) {
+                            //THIS IS IT
                             std::string str = std::string("M486 S") + std::to_string(inst.unique_id) + "\n";
                             m_writer.set_object_start_str(str);
                         }
@@ -6477,13 +6964,27 @@ LayerResult GCode::process_layer(
                     ExtrusionRole support_extrusion_role = instance_to_print.object_by_extruder.support_extrusion_role;
                     bool is_overridden = support_extrusion_role == erSupportMaterialInterface ? support_intf_overridden : support_overridden;
                     if (is_overridden == (print_wipe_extrusions != 0)) {
+                        // Same un-rotation the object islands below apply. For an ordinary object
+                        // (and for a root segment) this is the identity, so planar output is
+                        // untouched; for a rotated cut-plane segment it is what keeps the support
+                        // in the same frame as the geometry it supports.
+                        // UNLAYERED_MOD: cut-plane SEGMENTS only. Their support is generated inside
+                        // SegmentSupportBounds (clipped to the segment's floor), so un-rotating it is
+                        // correct. A legacy layer_rotation_b/c chunk has no such bounds: its support
+                        // is grown down to the SLICE-frame floor z=0, a plane tilted with the chunk,
+                        // and un-rotating that puts columns metres below the bed (measured: machine z
+                        // down to -9.4 mm on a 30-degree chunk). Keep the pre-merge identity frame for
+                        // those until legacy support is bed-aware.
+                        const Transform3d support_trafo = instance_to_print.print_object.is_segment()
+                            ? instance_to_print.print_object.post_trafo_inverse()
+                            : Transform3d::Identity();
                         gcode += this->extrude_support(
                             // support_extrusion_role is erSupportMaterial, erSupportTransition, erSupportMaterialInterface or erMixed for all extrusion paths.
-                            *instance_to_print.object_by_extruder.support, support_extrusion_role);
+                            *instance_to_print.object_by_extruder.support, support_extrusion_role, support_trafo);
 
                         // Make sure ironing is the last
                         if (support_extrusion_role == erMixed || support_extrusion_role == erSupportMaterialInterface) {
-                            gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erIroning);
+                            gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erIroning, support_trafo);
                         }
                     }
 
@@ -6526,6 +7027,8 @@ LayerResult GCode::process_layer(
                 }
                 for (size_t island_idx : island_order) {
                     ObjectByExtruder::Island &island = islands[island_idx];
+                    // UNLAYERED_MOD: un-rotation applied to every extrusion of a cut-plane segment.
+                    const Transform3d trafo = instance_to_print.print_object.post_trafo_inverse();
                     const auto& by_region_specific = is_anything_overridden ? island.by_region_per_copy(by_region_per_copy_cache, static_cast<unsigned int>(instance_to_print.instance_id), extruder_id, print_wipe_extrusions != 0) : island.by_region;
                     // When starting a new object, use the external motion planner for the first travel move.
                     const Point& offset = instance_to_print.print_object.instances()[instance_to_print.instance_id].shift;
@@ -6545,7 +7048,7 @@ LayerResult GCode::process_layer(
                     };
                     {
                         // Print perimeters of regions that has is_infill_first == false
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false);
+                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false, trafo);
                         if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional && printer_structure == PrinterStructure::psI3
                             && !has_insert_timelapse_gcode && has_infill(by_region_specific)) {
                             gcode += this->retract(false, false, auto_lift_type, true);
@@ -6554,13 +7057,22 @@ LayerResult GCode::process_layer(
                             has_insert_timelapse_gcode = true;
                         }
                         // Then print infill
-                        gcode += this->extrude_infill(print, by_region_specific, false);
+                        gcode += this->extrude_infill(print, by_region_specific, false, trafo);
                         // Then print perimeters of regions that has is_infill_first == true
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, true);
+                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, true, trafo);
                     }
                     // ironing
-                    gcode += this->extrude_infill(print,by_region_specific, true);
+                    gcode += this->extrude_infill(print,by_region_specific, true, trafo);
                 }
+
+                // Declarative cut planes: close the section scope opened above. Without this the
+                // parsed section id stays latched on whatever printed last, so everything after it
+                // in the file -- an ordinary object later in the layer, the wipe tower, custom
+                // G-code, the next layer's skirt -- is coloured as part of that section. Emitted
+                // only for segmented objects (ordinary prints stay byte-identical) and deliberately
+                // NOT gated on gcode_label_objects, which is a machine-side labelling switch.
+                if (instance_to_print.print_object.is_segment())
+                    gcode += ";SEGMENT_ID:-1\n";
 
                 if (this->config().gcode_label_objects) {
                     gcode += std::string("; stop printing object ") +
@@ -6568,6 +7080,7 @@ LayerResult GCode::process_layer(
                              " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " +
                              std::to_string(inst.id) + "\n";
                 }
+                //ok we here at
                 // exclude objects
                 // Don't set m_gcode_label_objects_end if you don't had to write the m_gcode_label_objects_start.
                 if (!m_writer.is_object_start_str_empty()) {
@@ -7136,7 +7649,7 @@ std::string GCode::preamble()
 }
 
 // called by GCode::process_layer()
-std::string GCode::change_layer(coordf_t print_z)
+std::string GCode::change_layer(coordf_t print_z, const Transform3d &trafo)
 {
     std::string gcode;
     if (m_layer_count > 0)
@@ -7157,12 +7670,14 @@ std::string GCode::change_layer(coordf_t print_z)
         std::ostringstream comment;
         comment << "move to next layer (" << m_layer_index << ")";
         gcode += m_writer.travel_to_z(z, comment.str());
+
     }
 
     m_need_change_layer_lift_z = true;
 
     m_nominal_z = z;
-    m_writer.get_position().z() = z;
+    //UNLAYERED_MOD
+    //m_writer.get_position().z() = z;
 
     // forget last wiping path as wiping after raising Z is pointless
     // BBS. Dont forget wiping path to reduce stringing.
@@ -7195,11 +7710,8 @@ static std::unique_ptr<EdgeGrid::Grid> calculate_layer_edge_grid(const Layer& la
     return out;
 }
 
-std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
-                                const std::string&          description,
-                                double                      speed,
-                                const ExtrusionEntitiesPtr& region_perimeters,
-                                const Point*                start_point)
+
+std::string GCode::extrude_loop(const ExtrusionLoop &loop_ref, const std::string &description, double speed, const ExtrusionEntitiesPtr& region_perimeters, const Point* start_point, const Transform3d &trafo)
 {
     // get a copy; don't modify the orientation of the original loop object otherwise
     // next copies (if any) would not detect the correct orientation
@@ -7248,9 +7760,6 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
     // if polyline was shorter than the clipping distance we'd get a null polyline, so
     // we discard it in that case
     const double seam_gap = scale_(m_config.seam_gap.get_abs_value(nozzle_diameter));
-    const bool seam_gap_applied = enable_seam_slope || m_enable_loop_clipping;
-    const double seam_gap_distance_mm = seam_gap_applied ? unscale_(seam_gap) : 0.0;
-    double seam_scarf_distance_mm = 0.0;
     const double clip_length = m_enable_loop_clipping && !enable_seam_slope ? seam_gap : 0;
 
     // get paths
@@ -7339,7 +7848,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
             fake_path_wipe.set_force_no_extrusion(true);
             fake_path_wipe.mm3_per_mm = 0;
             //fake_path_wipe.set_extrusion_role(erExternalPerimeter);
-            gcode += extrude_path(fake_path_wipe, "move inwards before retraction/seam", speed);
+            gcode += extrude_path(fake_path_wipe, "move inwards before retraction/seam", speed, trafo);
         }
     }
 
@@ -7370,7 +7879,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
     
     if (!enable_seam_slope) {
         for (const ExtrusionPath& path : paths) {
-            gcode += this->_extrude(path, description, speed_for_path(path));
+            gcode += this->_extrude(path, description, speed_for_path(path), trafo);
             // Orca: Adaptive PA - dont adapt PA after the first multipath extrusion is completed
             // as we have already set the PA value to the average flow over the totality of the path
             // in the first extrude move
@@ -7399,7 +7908,6 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
         const double slope_min_length         = slope_entire_loop ? loop_length : std::min(m_config.seam_slope_min_length.value, loop_length);
         const int    slope_steps              = m_config.seam_slope_steps;
         const double slope_max_segment_length = scale_(slope_min_length / slope_steps);
-        seam_scarf_distance_mm = slope_min_length;
 
         // Calculate the sloped loop
         ExtrusionLoopSloped new_loop(paths, seam_gap, slope_min_length, slope_max_segment_length, start_slope_ratio, loop.loop_role());
@@ -7407,7 +7915,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
 
         // Then extrude it
         for (const ExtrusionPath* path : new_loop.get_all_paths()) {
-            gcode += this->_extrude(*path, description, speed_for_path(*path));
+            gcode += this->_extrude(*path, description, speed_for_path(*path), trafo);
             // Orca: Adaptive PA - dont adapt PA after the first pultipath extrusion is completed
             // as we have already set the PA value to the average flow over the totality of the path
             // in the first extrude move
@@ -7422,11 +7930,6 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
             paths.insert(paths.end(), new_loop.paths.begin(), new_loop.paths.end());
             paths.insert(paths.end(), new_loop.ends.begin(), new_loop.ends.end());
         }
-    }
-
-    if (description == "perimeter") {
-        m_processor.result().print_statistics.total_seam_gap_distance += static_cast<float>(seam_gap_distance_mm);
-        m_processor.result().print_statistics.total_seam_scarf_distance += static_cast<float>(seam_scarf_distance_mm);
     }
 
     // BBS
@@ -7483,13 +7986,18 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
         const Point3 &center3 = paths.front().polyline.points.front();
         pt.rotate(angle, Point(center3.x(), center3.y()));
         // generate the travel move
-        gcode += m_writer.extrude_to_xy(this->point_to_gcode(pt), 0, "move inwards before travel", true);
+        // UNLAYERED_MOD
+        const auto& dest2d = this->point_to_gcode(pt);
+        Vec3d       dest3d(dest2d(0), dest2d(1), m_nominal_z);
+        gcode += m_writer.extrude_to_xyz(dest3d, 0, "move inwards before travel", true, trafo);
+        //gcode += m_writer.extrude_to_xy(this->point_to_gcode(pt), 0,"move inwards before travel",true);
     }
 
     return gcode;
 }
 
-std::string GCode::extrude_multi_path(const ExtrusionMultiPath& multipath, const std::string& description, double speed)
+
+std::string GCode::extrude_multi_path(const ExtrusionMultiPath &multipath, const std::string &description, double speed, const Transform3d &trafo)
 {
     // extrude along the path
     std::string gcode;
@@ -7511,8 +8019,9 @@ std::string GCode::extrude_multi_path(const ExtrusionMultiPath& multipath, const
         m_multi_flow_segment_path_average_mm3_per_mm = weighted_sum_mm3_per_mm / total_multipath_length;
     // Orca: end of multipath average mm3_per_mm value calculation
 
-    for (const ExtrusionPath &path : multipath.paths){
-        gcode += this->_extrude(path, description, speed);
+
+    for (ExtrusionPath path : multipath.paths){
+        gcode += this->_extrude(path, description, speed, trafo);
         // Orca: Adaptive PA - dont adapt PA after the first pultipath extrusion is completed
         // as we have already set the PA value to the average flow over the totality of the path
         // in the first extrude move.
@@ -7541,26 +8050,27 @@ std::string GCode::extrude_multi_path(const ExtrusionMultiPath& multipath, const
 std::string GCode::extrude_entity(const ExtrusionEntity&      entity,
                                   const std::string&          description,
                                   double                      speed,
-                                  const ExtrusionEntitiesPtr& region_perimeters)
+                                  const ExtrusionEntitiesPtr& region_perimeters,
+                                  const Transform3d& trafo)
 {
     if (const ExtrusionPath* path = dynamic_cast<const ExtrusionPath*>(&entity))
-        return this->extrude_path(*path, description, speed);
+        return this->extrude_path(*path, description, speed, trafo);
     else if (const ExtrusionMultiPath* multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity))
-        return this->extrude_multi_path(*multipath, description, speed);
+        return this->extrude_multi_path(*multipath, description, speed, trafo);
     else if (const ExtrusionLoop* loop = dynamic_cast<const ExtrusionLoop*>(&entity))
-        return this->extrude_loop(*loop, description, speed, region_perimeters);
+        return this->extrude_loop(*loop, description, speed, region_perimeters, nullptr, trafo);
     else
         throw Slic3r::InvalidArgument("Invalid argument supplied to extrude()");
     return "";
 }
 
-std::string GCode::extrude_path(const ExtrusionPath& path, const std::string& description, double speed)
+std::string GCode::extrude_path(const ExtrusionPath &path, const std::string &description, double speed, const Transform3d& trafo)
 {
     // Orca: Reset average multipath flow as this is a single line, single extrude volumetric speed path
     m_multi_flow_segment_path_pa_set = false;
     m_multi_flow_segment_path_average_mm3_per_mm = 0;
     //    description += ExtrusionEntity::role_to_string(path.role());
-    std::string gcode = this->_extrude(path, description, speed);
+    std::string gcode = this->_extrude(path, description, speed, trafo);
     if (m_wipe.enable && FILAMENT_CONFIG(wipe)) {
         m_wipe.path = path.polyline.to_polyline();
         if (is_tree(this->config().support_type) && is_support(path.role())) {
@@ -7582,10 +8092,11 @@ std::string GCode::extrude_path(const ExtrusionPath& path, const std::string& de
 }
 
 // Extrude perimeters: Decide where to put seams (hide or align seams).
-std::string GCode::extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool is_first_layer, bool is_infill_first)
+std::string GCode::extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool is_first_layer, bool is_infill_first, const Transform3d &trafo)
 {
     std::string gcode;
     for (const ObjectByExtruder::Island::Region &region : by_region)
+
         if (! region.perimeters.empty()) {
             m_config.apply(print.get_print_region(&region - &by_region.front()).config());
             // BBS: for first layer, we always print wall firstly to get better bed adhesive force
@@ -7595,13 +8106,13 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
             if (!should_print) continue;
 
             for (const ExtrusionEntity* ee : region.perimeters)
-                gcode += this->extrude_entity(*ee, "perimeter", -1., region.perimeters);
+                gcode += this->extrude_entity(*ee, "perimeter", -1., region.perimeters, trafo);
         }
     return gcode;
 }
 
 // Chain the paths hierarchically by a greedy algorithm to minimize a travel distance.
-std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool ironing)
+std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool ironing, const Transform3d &trafo)
 {
     std::string 		 gcode;
     ExtrusionEntitiesPtr extrusions;
@@ -7619,17 +8130,18 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
                 for (const ExtrusionEntity *fill : extrusions) {
                     auto *eec = dynamic_cast<const ExtrusionEntityCollection*>(fill);
                     if (eec) {
-                        for (ExtrusionEntity *ee : eec->chained_path_from(m_last_pos.to_point()).entities)
-                            gcode += this->extrude_entity(*ee, extrusion_name);
+
+                        for (ExtrusionEntity* ee : eec->chained_path_from(m_last_pos.to_point()).entities)
+                            gcode += this->extrude_entity(*ee, extrusion_name, -1., ExtrusionEntitiesPtr(), trafo);
                     } else
-                        gcode += this->extrude_entity(*fill, extrusion_name);
+                        gcode += this->extrude_entity(*fill, extrusion_name, -1., ExtrusionEntitiesPtr(), trafo);
                 }
             }
         }
     return gcode;
 }
 
-std::string GCode::extrude_support(const ExtrusionEntityCollection &support_fills, const ExtrusionRole support_extrusion_role)
+std::string GCode::extrude_support(const ExtrusionEntityCollection &support_fills, const ExtrusionRole support_extrusion_role, const Transform3d &trafo)
 {
     static constexpr const char* support_label            = "support material";
     static constexpr const char* support_interface_label  = "support material interface";
@@ -7668,9 +8180,7 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection &support_fill
         if (extrusions.empty())
             return gcode;
 
-        //ORCA: Respect no_sort to preserve support base outline->fill order.
-        if (!support_fills.no_sort)
-            chain_and_reorder_extrusion_entities(extrusions, m_last_pos.to_point());
+        chain_and_reorder_extrusion_entities(extrusions, m_last_pos.to_point());
 
         for (const ExtrusionEntity *ee : extrusions) {
             ExtrusionRole role = ee->role();
@@ -7686,16 +8196,20 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection &support_fill
             const ExtrusionEntityCollection* collection = dynamic_cast<const ExtrusionEntityCollection*>(ee);
 
             if (path) {
-                gcode += extrude_path(*path, label, speed_for_path(path->length(), role));
+                gcode += extrude_path(*path, label, speed_for_path(path->length(), role), trafo);
             }
             else if (multipath) {
-                gcode += extrude_multi_path(*multipath, label, speed_for_path(multipath->length(), role));
+                gcode += extrude_multi_path(*multipath, label, speed_for_path(multipath->length(), role), trafo);
             }
             else if (loop) {
-                gcode += extrude_loop(*loop, label, speed_for_path(loop->length(), role));
+                // NOTE the trafo is extrude_loop's SIXTH parameter, after region_perimeters and
+                // start_point; both defaults are spelled out so it lands in the right slot.
+                gcode += extrude_loop(*loop, label, speed_for_path(loop->length(), role), ExtrusionEntitiesPtr(), nullptr, trafo);
             }
             else if (collection) {
-                gcode += extrude_support(*collection, support_extrusion_role);
+                // Nested collections must carry the transform down, or a sub-collection's paths
+                // silently fall back to the identity default.
+                gcode += extrude_support(*collection, support_extrusion_role, trafo);
             }
             else {
                 throw Slic3r::InvalidArgument("Unknown extrusion type");
@@ -7813,7 +8327,7 @@ double GCode::calc_max_volumetric_speed(const double layer_height, const double 
     return res;
 }
 
-std::string GCode::_extrude(const ExtrusionPath &path, std::string description, double speed)
+std::string GCode::_extrude(const ExtrusionPath &path, std::string description, double speed, const Transform3d &trafo)
 {
     std::string gcode;
 
@@ -7846,18 +8360,18 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
             z = unscale_(path.polyline.lines().begin()->a.z()) + m_nominal_z;
         }
 
-        gcode += this->travel_to(first_point, path.role(), "move to first " + description + " point", z);
+        gcode += this->travel_to(first_point, path.role(), "move to first " + description + " point", z, trafo);
 
         // Orca: ensure Z matches planned layer height
-        if (!slope_need_z_travel && (_last_pos_undefined || m_need_change_layer_lift_z)) {
-            const std::string z_sync_comment = _last_pos_undefined ?
-                "ensure Z matches planned layer height" : ""; // no comment for normal layer-Z lift
-            gcode += this->writer().travel_to_z(m_nominal_z, z_sync_comment, true);
-        }
+        //if (!slope_need_z_travel && (_last_pos_undefined || m_need_change_layer_lift_z)) {
+        //    const std::string z_sync_comment = _last_pos_undefined ?
+        //        "ensure Z matches planned layer height" : ""; // no comment for normal layer-Z lift
+        //    gcode += this->writer().travel_to_z(m_nominal_z, z_sync_comment, true);
+        //}
         m_need_change_layer_lift_z = false;
     }
 
-    if (path.z_contoured && !path.polyline.lines().empty()) {
+    /*if (path.z_contoured && !path.polyline.lines().empty()) {
         double current_z = m_writer.get_position().z();
         double first_z = unscale_(path.polyline.lines().begin()->a.z()) + m_nominal_z;
         if (GCodeFormatter::quantize_xyzf(first_z) != GCodeFormatter::quantize_xyzf(current_z)) {
@@ -7869,7 +8383,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
         if (GCodeFormatter::quantize_xyzf(current_z) != GCodeFormatter::quantize_xyzf(m_nominal_z)) {
             gcode += this->writer().travel_to_z(m_nominal_z, "reset Z after contouring", true);
         }
-    }
+    }*/
 
     // if needed, write the gcode_label_objects_end then gcode_label_objects_start
     // should be already done by travel_to, but just in case
@@ -8507,7 +9021,15 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
             }
             // BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode or we are doing sloped extrusion
             // Attention: G2 and G3 is not supported in spiral_mode mode
-            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr || path.z_contoured) {
+            // UNLAYERED_MOD: also fall back to linear moves whenever the path transform ROTATES.
+            // extrude_arc_to_xy() takes no transform, so a fitted arc would be emitted as the
+            // original XY-plane G2/G3 while the linear parts of the same path are un-rotated by the
+            // writer -- mixed-frame motion within one path. A tilted circle is not representable as an
+            // XY-plane arc anyway, so linearizing is the correct fallback rather than a limitation.
+            // A pure translation (an object lifted off the bed, or a ROOT cut-plane segment, whose
+            // frame is a Z shift only) keeps arcs valid: the writer carries the Z, and XY is unrotated.
+            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr || path.z_contoured
+                || !trafo.linear().isApprox(Matrix3d::Identity())) {
                 double path_length = 0.;
                 double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
                 double saved_z      = m_writer.get_position().z();
@@ -8527,7 +9049,10 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                             tempDescription += Slic3r::format(" | Old Flow Value: %0.5f Length: %0.5f",oldE, line_length);
                         }
                     }
-                    if (path.z_contoured) {
+                    // UNLAYERED_MOD: the 3D path is what carries the frame un-rotation (extrude_to_xy has no trafo), so a
+                    // ROTATING frame must take it; planar prints keep upstream's XY path (no Z word, scarf seams work).
+                    if (path.z_contoured || !trafo.linear().isApprox(Matrix3d::Identity())
+                || !this->last_trafo().linear().isApprox(Matrix3d::Identity())) { // whole object rotated: its identity-frame support must keep explicit Z too
                         // ZAA: Z anti-aliased extrusion with variable Z per point
                         Vec2d dest2d = this->point_to_gcode(line.b.to_point());
                         coordf_t z_diff = unscale_(line.b.z());
@@ -8539,13 +9064,11 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
 
                         double e = dE * extrusion_ratio;
 
+                        // The low-z guard moved into GCodeWriter::extrude_to_xyz, where it can
+                        // test the MACHINE coordinate; z here is slice-frame.
                         double z = m_nominal_z + z_diff;
-                        if (z < 0.1) {
-                            throw RuntimeError("GCode: very low z");
-                        }
                         gcode += m_writer.extrude_to_xyz(Vec3d(dest2d.x(), dest2d.y(), z), e,
-                                                         GCodeWriter::full_gcode_comment ? tempDescription : "");
-
+                                                         GCodeWriter::full_gcode_comment ? tempDescription : "", path.is_force_no_extrusion(), trafo);
                     } else if (sloped == nullptr) {
                         // Normal extrusion
                         gcode += m_writer.extrude_to_xy(
@@ -8557,7 +9080,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                         const auto [z_ratio, e_ratio] = sloped->interpolate(path_length / total_length);
                         Vec2d dest2d = this->point_to_gcode(line.b.to_point());
                         Vec3d dest3d(dest2d(0), dest2d(1), get_sloped_z(z_ratio));
-                        gcode += m_writer.extrude_to_xyz(
+                        gcode += m_writer.extrude_to_xyz( //we have 3d coordinates HOORAY
                             dest3d,
                             dE * e_ratio,
                             GCodeWriter::full_gcode_comment ? tempDescription : "", path.is_force_no_extrusion());
@@ -8588,10 +9111,16 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                                     tempDescription += Slic3r::format(" | Old Flow Value: %0.5f Length: %0.5f",oldE, line_length);
                                 }
                             }
-                            gcode += m_writer.extrude_to_xy(
+                            Vec2d p = this->point_to_gcode(line.b);
+                            Vec3d dest3d(p(0), p(1), m_nominal_z);
+
+                            gcode += m_writer.extrude_to_xyz( // we have 3d coordinates HOORAY
+                                dest3d, dE, GCodeWriter::full_gcode_comment ? tempDescription : "",
+                                path.is_force_no_extrusion(), trafo);
+                            /*gcode += m_writer.extrude_to_xy(
                                 this->point_to_gcode(line.b),
                                 dE,
-                                GCodeWriter::full_gcode_comment ? tempDescription : "", path.is_force_no_extrusion());
+                                GCodeWriter::full_gcode_comment ? tempDescription : "", path.is_force_no_extrusion());*/
                             check_and_insert_timelapse(line.b); // Inline farthest-point snapshot
                         }
                         break;
@@ -8738,7 +9267,10 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                     tempDescription += Slic3r::format(" | Old Flow Value: %0.5f Length: %0.5f",oldE, line_length);
                 }
             }
-            if (path.z_contoured) {
+            // UNLAYERED_MOD: the 3D path is what carries the frame un-rotation (extrude_to_xy has no trafo), so a
+            // ROTATING frame must take it; planar prints keep upstream's XY path (no Z word, scarf seams work).
+            if (path.z_contoured || !trafo.linear().isApprox(Matrix3d::Identity())
+                || !this->last_trafo().linear().isApprox(Matrix3d::Identity())) { // whole object rotated: its identity-frame support must keep explicit Z too
                 Vec2d    dest2d = p.head<2>();
                 coordf_t z_diff = unscale_(processed_point.p.z());
 
@@ -8749,12 +9281,10 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
 
                 double e = dE * extrusion_ratio;
 
+                // See above: guarded in GCodeWriter::extrude_to_xyz against machine z.
                 double z = m_nominal_z + z_diff;
-                if (z < 0.1) {
-                    throw RuntimeError("GCode: very low z");
-                }
                 gcode += m_writer.extrude_to_xyz(Vec3d(dest2d.x(), dest2d.y(), z), e,
-                                                 GCodeWriter::full_gcode_comment ? tempDescription : "");
+                                                 GCodeWriter::full_gcode_comment ? tempDescription : "", path.is_force_no_extrusion(), trafo);
             } else if (sloped == nullptr) {
                 // Normal extrusion
                 gcode += m_writer.extrude_to_xy(p.head<2>(), dE, GCodeWriter::full_gcode_comment ? tempDescription : "");
@@ -8865,7 +9395,214 @@ std::string GCode::_encode_label_ids_to_base64(std::vector<size_t> ids)
 }
 
 // This method accepts &point in print coordinates.
-std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string comment, double z/* = DBL_MAX*/)
+// UNLAYERED_MOD — the four-move inter-chunk transition, shared by sequential (ByObject)
+// chunk printing and ByGroup segment changes. `staging_z_local` is the staging altitude in
+// the target chunk's local (bed) frame: the approach distance above the local bed for a
+// fresh chunk, or above the chunk's current top when re-entering a partially printed
+// segment mid-group. Emits up to three moves; the caller's next ordinary travel is move 4,
+// descending onto the first extrusion point.
+std::string GCode::chunk_transition_gcode(const Print &print, const PrintObject &object, const Transform3d &trafo, double staging_z_local)
+{
+    std::string gcode;
+    // UNLAYERED_MOD — inter-chunk transition.
+    //
+    // RepRapFirmware performs the 5-axis compensation, so the X/Y/Z we emit are the
+    // nozzle tip in the bed frame (the frame that tilts and rotates with the plate)
+    // and B/C only tell the firmware the table orientation. The transition is a
+    // fixed four-move sequence:
+    //
+    //   1. hop off the finished surface along the OLD chunk's plane normal;
+    //   2. G0 swinging C to the new chunk's angle while parking the tip on the
+    //      farther-from-bed-center of (a) the hop point rotated by dC about the C
+    //      axis (machine X/Y hold still) and (b) the lifted staging XY, at the
+    //      higher of the two Zs, pre-compensated for the B-arm displacement that
+    //      move 3 will cause;
+    //   3. G0 moving X/Y to the new chunk's lifted position while B tilts;
+    //   4. (the ordinary travel_to) descend onto the first extrusion point.
+    //
+    // The lifted position stages over the new chunk: the XY center of its sliced
+    // footprint, nonplanar_approach_distance above its local bed plane.
+
+    // Drop the wipe path first: it was recorded in the frame of the chunk
+    // we are leaving, so replaying it after the rotation would emit moves in the new
+    // orientation. With the path gone this retract does not wipe.
+    m_wipe.reset_path();
+    gcode += this->retract();
+
+    double b_old, c_old, b_new, c_new;
+    trafo_to_bc(m_last_trafo, b_old, c_old);
+    trafo_to_bc(trafo, b_new, c_new);
+    const bool suppress_rotary = ! this->emit_rotary_axes();
+
+    // Lifted staging position of the next chunk, in the bed frame. Same math as
+    // point_to_gcode followed by apply_test_rotation2; m_origin is already the new
+    // instance's shift.
+    const Point  local_center = chunk_local_xy_center(object);
+    const double lift_h       = staging_z_local;
+    const Vec3d  lifted_gcode(unscale<double>(local_center.x()) + this->origin().x(),
+                              unscale<double>(local_center.y()) + this->origin().y(), lift_h);
+
+    // how much the joints move as a function of the B angle change. The 47mm is the distance from the B axis to the nozzle tip.    
+    const double b_arm = std::max(0., m_config.nonplanar_nozzle_to_b_axis.value);
+    const double bdz = (sin(b_new) - sin(b_old)) * b_arm;
+    const double bdy = (cos(b_new) - cos(b_old)) * b_arm;
+
+    const Vec3d lifted_bed = trafo.rotation() * lifted_gcode + trafo.translation() + Vec3d(0, 0, bdz);
+
+    // UNLAYERED_MOD — virtual 5-axis: plain 3-axis output, so the table never swings and the
+    // staging choreography below is not merely unnecessary, it is WRONG. Move 2 parks the tip on
+    // the hop point rotated about the bed centre to pre-compensate a C swing that will not happen
+    // (a ~100 mm excursion to a meaningless place on a 3-axis machine), moves 2-3 pre-compensate a
+    // B arm that does not exist, and both are emitted as G0 rapids -- a 5-axis-only construct here.
+    // Do instead exactly what sequential by-object printing does (the `! enable_nonplanar` branch
+    // in _do_export): retract (done above), lift straight up clear of everything printed so far,
+    // travel across at that height, and let move 4 -- the ordinary travel_to in _extrude --
+    // descend onto the first extrusion point.
+    if (suppress_rotary) {
+        const Vec3d  here    = m_writer.get_position();
+        // The staging point of the next chunk without the B-arm term: there is no arm to swing.
+        const Vec3d  staging = lifted_bed - Vec3d(0., 0., bdz);
+        const double margin  = std::max(0., m_config.nonplanar_departure_distance.value);
+        // Clear the chunk being LEFT as well as the one being entered. m_max_extrusion_z is the
+        // highest machine-frame Z this file has laid material at -- the bed-frame quantity that
+        // m_max_layer_z cannot supply, since for a tilted chunk print_z is a distance along that
+        // chunk's build normal rather than a height above the bed.
+        const double safe_z  = std::max({ here.z(), staging.z(), m_writer.max_extrusion_z() + margin });
+
+        if (GCodeWriter::full_gcode_comment) {
+            std::ostringstream dbg;
+            dbg << std::fixed << std::setprecision(3)
+                << "; chunk-transition (virtual 5-axis): lift " << here.z() << "->" << safe_z
+                << " maxExtrusionZ " << m_writer.max_extrusion_z() << " margin " << margin
+                << " staging " << staging.x() << "," << staging.y() << "," << staging.z() << "\n";
+            gcode += dbg.str();
+        }
+        if (safe_z > here.z() + EPSILON)
+            gcode += m_writer.travel_to_xyz_direct(Vec3d(here.x(), here.y(), safe_z),
+                                                   "lift clear of printed material");
+        gcode += m_writer.travel_to_xyz_direct(Vec3d(staging.x(), staging.y(), safe_z),
+                                               "travel to next chunk");
+        // Same contract as the 5-axis path below: last_pos in print coordinates so move 4 fires.
+        this->set_last_pos(local_center);
+
+        // UNLAYERED_MOD -- arm the safe hop for move 4. Without this the ordinary travel_to emits ONE
+        // combined XY+Z move from the staging point to the first extrusion point, which on a segment
+        // spanning tens of mm is a diagonal line straight down through everything printed so far --
+        // observed as a ~31 mm descent across 8-22 mm of XY at every tilted-segment transition. The
+        // comment above promises move 4 descends "straight onto the first extrusion point"; this is
+        // what makes that true. The rotary swing is already complete by here (moves 2-3 above, or not
+        // emitted at all under virtual 5-axis), so the hop must NOT re-emit B/C: leaving the angular
+        // distance at 0 selects the plain traverse-high-then-descend path in the writer.
+        m_bygroup_safe_hop         = true;
+        m_bygroup_hop_b_deg        = 0.;
+        m_bygroup_hop_c_deg        = 0.;
+        m_bygroup_hop_bc_dist_deg  = 0.;
+        return gcode;
+    }
+
+    // Move 1. Hop off the finished surface along the old chunk's plane normal.
+    Vec3d        hopped      = m_writer.get_position();
+    const double depart_dist = std::max(0., m_config.nonplanar_departure_distance.value);
+    if (depart_dist > EPSILON) {
+        hopped += m_last_trafo.linear() * Vec3d(0., 0., depart_dist);
+        gcode += m_writer.travel_to_xyz_direct(hopped, "hop along finished chunk plane normal");
+    }
+
+    // Move 2. Swing C while parking the tip on one of two staging points. The C
+    // axis pierces the bed center; holding the machine X/Y still while C moves by
+    // dC means the tip's bed-frame XY rotates by dC about that center ("rotated").
+    // Park on whichever of rotated / lifted-bed XY lies farther from the bed
+    // center, at the higher of the two Zs. The endpoint also pre-compensates the
+    // B-arm displacement move 3 will cause: horizontal bdy (along the bed-frame
+    // direction the new C sets) when parking on the lifted XY, vertical bdz when
+    // parking on the rotated XY. printable_area is in printer coordinates, so add
+    // the plate offset to reach the writer frame. Virtual 5-axis keeps the whole
+    // geometric path and drops only the B/C words, so the export still runs on a
+    // plain 3-axis printer.
+    const BoundingBoxf bed_bbox(print.config().printable_area.values);
+    const Vec2f        plate_offset = m_writer.get_xy_offset();
+    const Vec2d        pivot(bed_bbox.center().x() + plate_offset.x(),
+                             bed_bbox.center().y() + plate_offset.y());
+    const double dc = c_new - c_old; // this is the correct signage
+    const Vec2d  rel(hopped.x() - pivot.x(), hopped.y() - pivot.y());
+    const Vec2d  rotated_xy(pivot.x() + std::cos(dc) * rel.x() - std::sin(dc) * rel.y(),
+                            pivot.y() + std::sin(dc) * rel.x() + std::cos(dc) * rel.y());
+    const Vec2d  lifted_xy(lifted_bed.x(), lifted_bed.y());
+    // Rotation about the pivot preserves distance, so rotated's distance from the
+    // bed center is just the hop point's.
+    const bool   park_rotated = rel.norm() >= (lifted_xy - pivot).norm();
+    // bdz-free staging base: lifted_bed.z carries bdz (baked in above), so strip it
+    // here. bdz is then applied exactly once, and only where the spec wants it:
+    // in full on the rotated park (below), or at move 3 otherwise.
+    const double z_stage      = std::max(hopped.z(), lifted_bed.z() - bdz);
+    // RRF runs full kinematics, so bdz/bdy are not corrections — they are
+    // deliberate tip displacements matching the B-arm swing so the GANTRY holds
+    // still while B rotates (move 3). Move 2 (B constant) pre-gains the descent
+    // budget: when bdz < 0 the tip is raised |bdz| ABOVE the staging height here —
+    // a plain, safe gantry rise — so the gantry-hold swing's tip descent in move 3
+    // lands exactly at z_stage instead of inside the material below it. When
+    // bdz >= 0 nothing is added; the swing itself raises the tip. The bdy XY
+    // offset on the lifted park is the horizontal analog: park offset by the arm's
+    // horizontal swing so move 3 returns the tip to the staging XY with the gantry
+    // XY stationary.
+    const double z2 = z_stage - std::min(0., bdz);
+    const Vec3d  stage2 = park_rotated
+        ? Vec3d(rotated_xy.x(), rotated_xy.y(), z2)
+        : Vec3d(lifted_xy.x() + bdy * std::cos(c_new), lifted_xy.y() + bdy * std::sin(c_new), z2);
+    if (GCodeWriter::full_gcode_comment) {
+        // Instrumentation: every quantity the transition is built from, so a
+        // misbehaving move can be traced from the exported file alone. Only with
+        // verbose G-code comments enabled, so ordinary exports stay clean.
+        std::ostringstream dbg;
+        dbg << std::fixed << std::setprecision(3)
+            << "; chunk-transition: b " << b_old * 180.0 / M_PI << "->" << b_new * 180.0 / M_PI
+            << " c " << c_old * 180.0 / M_PI << "->" << c_new * 180.0 / M_PI
+            << " bdz " << bdz << " bdy " << bdy
+            << " hopZ " << hopped.z() << " liftedBed " << lifted_bed.x() << "," << lifted_bed.y() << "," << lifted_bed.z()
+            << " zStage " << z_stage << " park " << (park_rotated ? "rotated" : "lifted") << "\n";
+        gcode += dbg.str();
+    }
+    gcode += m_writer.rapid_to_xyzbc(stage2, std::nullopt,
+                                       suppress_rotary ? std::nullopt : std::optional<double>(c_new * 180.0 / M_PI),
+                                       park_rotated ? "rotate C to next chunk, park on rotated hop point"
+                                                    : "rotate C to next chunk, park on lifted staging point");
+
+    // Move 3. X/Y to the lifted staging XY while B tilts. z3 - z2 = bdz always, so
+    // the emitted tip displacement across this move equals the arm swing and the
+    // gantry Z holds perfectly still through the rotation, in both directions:
+    //   bdz >= 0: tip rises from z_stage to z_stage + bdz with the swing;
+    //   bdz <  0: tip descends from the move-2 pre-raise back down to z_stage.
+    // The tip therefore never goes below z_stage anywhere in moves 2-3; move 4
+    // does the only real descent, straight onto the first extrusion point.
+    // (Transient note: RRF interpolates the emitted words linearly while the arm
+    // follows sin/cos, so the gantry wobbles slightly mid-swing; endpoints are
+    // exact.)
+    const double z3 = std::max(z_stage + std::max(0., bdz), lifted_bed.z());
+    gcode += m_writer.rapid_to_xyzbc(Vec3d(lifted_xy.x(), lifted_xy.y(), z3),
+                                       suppress_rotary ? std::nullopt : std::optional<double>(b_new * 180.0 / M_PI),
+                                       std::nullopt, "move to next chunk staging XY, tilt B");
+
+    // Move 4 is the ordinary travel_to onto the first extrusion point. Seed the
+    // print-coordinate position with the point under the lifted staging position so
+    // the travel-length heuristic in needs_retraction sees the real distance.
+    this->set_last_pos(local_center);
+
+    // UNLAYERED_MOD -- arm the safe hop for move 4. Without this the ordinary travel_to emits ONE
+    // combined XY+Z move from the staging point to the first extrusion point, which on a segment
+    // spanning tens of mm is a diagonal line straight down through everything printed so far --
+    // observed as a ~31 mm descent across 8-22 mm of XY at every tilted-segment transition. The
+    // comment above promises move 4 descends "straight onto the first extrusion point"; this is
+    // what makes that true. The rotary swing is already complete by here (moves 2-3 above, or not
+    // emitted at all under virtual 5-axis), so the hop must NOT re-emit B/C: leaving the angular
+    // distance at 0 selects the plain traverse-high-then-descend path in the writer.
+    m_bygroup_safe_hop         = true;
+    m_bygroup_hop_b_deg        = 0.;
+    m_bygroup_hop_c_deg        = 0.;
+    m_bygroup_hop_bc_dist_deg  = 0.;
+    return gcode;
+}
+
+std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string comment, double z/* = DBL_MAX*/, const Transform3d &trafo)
 {
     /*  Define the travel move as a line between current position and the taget point.
         This is expressed in print coordinates, so it will need to be translated by
@@ -8963,7 +9700,9 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
             // If in the previous call of m_avoid_crossing_perimeters.travel_to was use_external_mp_once set to true restore this value for next call.
             if (used_external_mp_once)
                 m_avoid_crossing_perimeters.use_external_mp_once();
+
             travel = m_avoid_crossing_perimeters.travel_to(*this, point);
+
             // If state of use_external_mp_once was changed reset it to right value.
             if (used_external_mp_once)
                 m_avoid_crossing_perimeters.reset_once_modifiers();
@@ -8984,12 +9723,32 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     // if needed, write the gcode_label_objects_end then gcode_label_objects_start
     m_writer.add_object_change_labels(gcode);
 
+    // UNLAYERED_MOD — ByGroup cross-orientation hop: ignore any planned detour and traverse at the
+    // current machine-vertical (lifted) height, descending straight down onto the destination. This
+    // avoids dragging across neighboring members and the tool-axis bed-dive. One-shot.
+    if (m_bygroup_safe_hop) {
+        m_bygroup_safe_hop = false;
+        Vec2d dest2d = this->point_to_gcode(point);
+        Vec3d dest3d(dest2d(0), dest2d(1), z == DBL_MAX ? m_nominal_z : z);
+        // Rotate only when a swing was actually requested. Hardcoding true here would emit B0 C0
+        // on every hop -- wrong on a virtual 5-axis print, which must contain no rotary words at
+        // all, and wrong on a real one whose orientation moves 2-3 have already set.
+        gcode += m_writer.travel_to_xyz_high_then_down(dest3d, trafo, comment,
+                                                       m_bygroup_hop_bc_dist_deg > 0.,
+                                                       m_bygroup_hop_b_deg, m_bygroup_hop_c_deg,
+                                                       m_bygroup_hop_bc_dist_deg);
+        m_need_change_layer_lift_z = false;
+        this->set_last_pos(point);
+        return gcode;
+    }
+
     // use G1 because we rely on paths being straight (G0 may make round paths)
     if (travel.size() >= 2) {
         // Orca: use `travel_to_xyz` to ensure we start at the correct z, in case we moved z in custom/filament change gcode
         if (false/*m_spiral_vase*/) {
             // No lazy z lift for spiral vase mode
             for (size_t i = 1; i < travel.size(); ++i) {
+
                 gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);
             }
         } else {
@@ -8997,7 +9756,10 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
                 // No extra movements emitted by avoid_crossing_perimeters, simply move to the end point with z change
                 const auto& dest2d = this->point_to_gcode(travel.points.back());
                 Vec3d dest3d(dest2d(0), dest2d(1), z == DBL_MAX ? m_nominal_z : z);
-                gcode += m_writer.travel_to_xyz(dest3d, comment, m_need_change_layer_lift_z);
+                //gcode += m_writer.travel_to_xyz(dest3d, comment, m_need_change_layer_lift_z);
+
+                gcode += m_writer.travel_to_xyz(dest3d, comment, m_need_change_layer_lift_z, trafo);
+
                 m_need_change_layer_lift_z = false;
             } else {
                 // Extra movements emitted by avoid_crossing_perimeters, lift the z to normal height at the beginning, then apply the z
@@ -9007,16 +9769,26 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
                         // Lift to normal z at beginning
                         Vec2d dest2d = this->point_to_gcode(travel.points[i]);
                         Vec3d dest3d(dest2d(0), dest2d(1), m_nominal_z);
-                        gcode += m_writer.travel_to_xyz(dest3d, comment, m_need_change_layer_lift_z);
+
+                        gcode += m_writer.travel_to_xyz(dest3d, comment, m_need_change_layer_lift_z, trafo);
+                    
+                        //gcode += m_writer.travel_to_xyz(dest3d, comment, m_need_change_layer_lift_z);
                         m_need_change_layer_lift_z = false;
                     } else if (z != DBL_MAX && i == travel.size() - 1) {
                         // Apply z_ratio for the very last point
                         Vec2d dest2d = this->point_to_gcode(travel.points[i]);
                         Vec3d dest3d(dest2d(0), dest2d(1), z);
-                        gcode += m_writer.travel_to_xyz(dest3d, comment);
+
+                        gcode += m_writer.travel_to_xyz(dest3d, comment, false, trafo);
+                        //gcode += m_writer.travel_to_xyz(dest3d, comment);
                     } else {
                         // For all points in between, no z change
-                        gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);
+                        Vec2d dest2d = this->point_to_gcode(travel.points[i]);
+                        Vec3d dest3d(dest2d(0), dest2d(1), m_nominal_z);
+                        gcode += m_writer.travel_to_xyz(dest3d, comment, false, trafo);
+
+
+                        //gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);
                     }
                 }
             }
@@ -9173,7 +9945,6 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
 
     if (m_writer.filament() == nullptr)
         return gcode;
-
     // wipe (if it's enabled for this extruder and we have a stored wipe path and no-zero wipe distance)
     if (FILAMENT_CONFIG(wipe) && m_wipe.has_path() && scale_(FILAMENT_CONFIG(wipe_distance)) > SCALED_EPSILON) {
         Wipe::RetractionValues wipeRetractions = m_wipe.calculateWipeRetractionLengths(*this, toolchange);

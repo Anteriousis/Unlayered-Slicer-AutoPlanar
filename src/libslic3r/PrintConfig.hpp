@@ -97,8 +97,12 @@ enum class WipeTowerType {
     Type2,
 };
 
+// APPEND ONLY. PhysicalPrinterDialog::update_host_type() casts a combo-box INDEX straight to
+// this enum (static_cast<PrintHostType>(index + offset)), so an enumerator's integer value has
+// to keep matching its position in host_type's enum_values list in PrintConfig.cpp. Inserting
+// in the middle silently remaps every host type after the insertion point.
 enum PrintHostType {
-    htPrusaLink, htPrusaConnect, htOctoPrint, htDuet, htFlashAir, htAstroBox, htRepetier, htMKS, htESP3D, htCrealityPrint, htObico, htFlashforge, htSimplyPrint, htElegooLink, ht3DPrinterOS, htMoonraker
+    htPrusaLink, htPrusaConnect, htOctoPrint, htDuet, htFlashAir, htAstroBox, htRepetier, htMKS, htESP3D, htCrealityPrint, htObico, htFlashforge, htSimplyPrint, htElegooLink, ht3DPrinterOS, htMoonraker, htUnlayered
 };
 
 enum AuthorizationType {
@@ -229,9 +233,33 @@ enum class SurfaceFillOrder {
 enum class PrintSequence {
     ByLayer,
     ByObject,
+    ByGroup,
     ByDefault,
     Count,
 };
+
+// Orca 5-axis: which pair of rotary axes the machine drives. The slicer currently
+// drives two rotary axes at a time (5 total); A/B/C are the standard machining
+// rotary axes about X/Y/Z respectively.
+enum class AxisSelection {
+    AB,
+    BC,
+    AC,
+    // A plain 3-axis machine emulating tilt: toolpaths are still generated as if for a 5-axis
+    // printer, but no rotary words are written and a clearance pass lifts Z where the vertical
+    // nozzle would plow into material printed earlier. Must stay LAST before Count -- the
+    // combobox index is the enum integer (Field.cpp fills in enum_labels order), so this order
+    // IS the display order. Reordering is safe on disk: values persist as the strings in
+    // s_keys_map_AxisSelection, never as integers.
+    Virtual,
+    Count,
+};
+
+// Which of the A/B/C rotary axes a given selection drives. Keeps the AB/AC/BC -> {A,B,C}
+// membership in one place (next to the enum) instead of duplicated at each use site.
+inline bool axis_a_active(AxisSelection s) { return s == AxisSelection::AB || s == AxisSelection::AC; }
+inline bool axis_b_active(AxisSelection s) { return s == AxisSelection::AB || s == AxisSelection::BC; }
+inline bool axis_c_active(AxisSelection s) { return s == AxisSelection::AC || s == AxisSelection::BC; }
 
 enum class PrintOrder
 {
@@ -684,6 +712,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TimelapseType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BedType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SkirtType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InputShaperType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AxisSelection)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeThumbnailsFormat)
@@ -1138,6 +1167,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                support_on_build_plate_only))
     ((ConfigOptionBool,                support_critical_regions_only))
     ((ConfigOptionBool,                support_remove_small_overhang))
+    ((ConfigOptionFloat,               test_input))
+    ((ConfigOptionFloat,               layer_rotation_b))
+    ((ConfigOptionFloat,               layer_rotation_c))
     ((ConfigOptionFloat,               support_top_z_distance))
     ((ConfigOptionFloat,               support_bottom_z_distance))
     ((ConfigOptionInt,                 enforce_support_layers))
@@ -1253,6 +1285,10 @@ PRINT_CONFIG_CLASS_DEFINE(
 
     // Orca: internal use only
     ((ConfigOptionBool,  calib_flowrate_topinfill_special_order)) // ORCA: special flag for flow rate calibration
+
+    // ByGroup print sequence: objects sharing a group number are printed by layer together;
+    // groups are printed sequentially. 0 = own singleton group (ByObject behavior).
+    ((ConfigOptionInt,   print_group))
 )
 
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.
@@ -1498,6 +1534,43 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                input_shaping_freq_y))
     ((ConfigOptionFloat,                input_shaping_damp_x))
     ((ConfigOptionFloat,                input_shaping_damp_y))
+
+    // Orca non-planar printing settings.
+    // enable_nonplanar is the CANONICAL SOURCE OF TRUTH for whether non-planar printing
+    // is active. Consumers throughout the codebase should gate non-planar behavior on
+    // this option (not yet wired up everywhere -- see PrintConfig.cpp note).
+    ((ConfigOptionBool,                 enable_nonplanar))
+    // When true, suppress the B/C rotary control G-code so output runs on a normal
+    // 3-axis printer ("virtual 5-axis"). Consumed in GCode.cpp.
+    ((ConfigOptionBool,                 virtual_5axis))
+    // Which pair of rotary axes the machine drives (A/B, A/C or B/C).
+    ((ConfigOptionEnum<AxisSelection>,  axis_selection))
+    // Per-axis rotation limits in degrees (A about X, B about Y, C about Z).
+    // Stored for the machine definition; not consumed by slicing yet.
+    ((ConfigOptionFloat,                axis_a_rotation_min))
+    ((ConfigOptionFloat,                axis_a_rotation_max))
+    ((ConfigOptionFloat,                axis_b_rotation_min))
+    ((ConfigOptionFloat,                axis_b_rotation_max))
+    ((ConfigOptionFloat,                axis_c_rotation_min))
+    ((ConfigOptionFloat,                axis_c_rotation_max))
+    // Per-axis "continuous rotation": axis can rotate infinitely or firmware unwinds it,
+    // so the rotation limits above do not apply.
+    ((ConfigOptionBool,                 axis_a_continuous))
+    ((ConfigOptionBool,                 axis_b_continuous))
+    ((ConfigOptionBool,                 axis_c_continuous))
+    // Per-chunk usable build-volume visualization: a cylinder of `radius` spanning Z from
+    // `min_build_height` to `max_build_height`. See GLCanvas3D::_render_chunk_build_volumes.
+    ((ConfigOptionFloat,                radius))
+    ((ConfigOptionFloat,                max_build_height))
+    ((ConfigOptionFloat,                min_build_height))
+    // Inter-chunk travel geometry. See the ByObject transition in GCode::_do_export.
+    ((ConfigOptionFloat,                nonplanar_departure_distance))
+    ((ConfigOptionFloat,                nonplanar_approach_distance))
+    ((ConfigOptionFloat,                nonplanar_nozzle_to_b_axis))
+    ((ConfigOptionFloat,                nonplanar_hotend_cone_height))
+    ((ConfigOptionFloat,                nonplanar_hotend_cone_angle))
+    ((ConfigOptionFloat,                nonplanar_virtual_max_angle))
+    ((ConfigOptionFloat,                nonplanar_virtual_max_z))
 )
 
 // This object is mapped to Perl as Slic3r::Config::GCode.
@@ -2479,6 +2552,27 @@ static bool has_zero_flush_volume_for_used_filaments(const std::vector<T> &fv_ma
 }
 
 size_t get_extruder_index(const GCodeConfig& config, unsigned int filament_id);
+
+// UNLAYERED_MOD — the multiplanar pre-slice rotation, Rb(Y, layer_rotation_b) * Rc(Z, layer_rotation_c).
+// It turns a chunk's local print direction into +Z so the chunk can be sliced with flat layers; the
+// machine is then told the matching table orientation via B/C (see trafo_to_bc() in GCode.cpp).
+// Pure rotation: translation() is always zero.
+// Returns Identity unless non-planar printing is enabled for the machine (`enable_nonplanar`), which
+// the caller must supply because the accessor differs per call site (Print vs. DynamicPrintConfig).
+// This is the single definition of that matrix - do not re-derive it locally.
+Transform3d layer_rotation_trafo(const PrintObjectConfig &object_config, bool nonplanar_enabled);
+
+// UNLAYERED_MOD — the machine's rotary-axis convention, in one place.
+//
+// The "tool axis" is the unit vector the nozzle points AWAY from the surface along, expressed in the
+// bed frame the G-code coordinates live in. It equals post_trafo_inverse().rotation() * UnitZ().
+// The machine is commanded in B/C instead: C is the azimuth of the tool axis and B its elevation
+// minus 90 degrees, so an untilted tool axis (0,0,1) is B = -90, C = 0 - which is what the Unlayered
+// machine profiles home to ("G1 X0 Y0 Z10 B-90 C0").
+//
+// These two are exact inverses (up to C being arbitrary when the axis is vertical). Angles in radians.
+void  tool_axis_to_bc(const Vec3d &tool_axis, double &angle_b, double &angle_c);
+Vec3d bc_to_tool_axis(double angle_b, double angle_c);
 
 } // namespace Slic3r
 

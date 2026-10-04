@@ -114,6 +114,8 @@ PrintObject::PrintObject(Print* print, ModelObject* model_object, const Transfor
     m_max_z = scaled(model_object->instance_bounding_box(0).max(2));
 
     this->set_instances(std::move(instances));
+
+
 }
 
 PrintObject::~PrintObject()
@@ -454,6 +456,13 @@ std::vector<std::set<int>> PrintObject::detect_extruder_geometric_unprintables()
 // 3) Generates perimeters, gap fills and fill regions (fill regions of type stInternal).
 void PrintObject::make_perimeters()
 {
+    //this is the start of the actual logic
+    //add a rotation about x of 90 degrees to trafo
+    //ModelObject orig_model_object = this->m_model_object->clone();
+    //this->m_model_object->
+    //this->m_model_object->rotate(-0.8f, Z);
+    BOOST_LOG_TRIVIAL(info) << "am i getting here?" << log_memory_info();
+
     // prerequisites
     this->slice();
 
@@ -550,9 +559,12 @@ void PrintObject::make_perimeters()
             for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
                 m_print->throw_if_canceled();
                 m_layers[layer_idx]->make_perimeters();
+                //m_layers[layer_idx]->
             }
         }
     );
+    //this->m_model_object->rotate(0.8f, Z);
+
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
 
@@ -824,9 +836,63 @@ bool PrintObject::need_z_contouring() const
     return false;
 }
 
+//void PrintObject::contour_z()
+//{
+//    if (!this->set_started(posContouring)) {
+//        return;
+//    }
+//
+//    m_print->set_status(40, L("Z contouring"));
+//    BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - start";
+//
+//    TriangleMesh mesh = this->m_model_object->raw_mesh();
+//    if (m_model_object->instances.size() != 1) {
+//        throw RuntimeError("ContourZ: unexpected number of instances");
+//    }
+//
+//    ModelInstance *inst = m_model_object->instances.front();
+//    Point                    center_offset = this->center_offset();
+//    Geometry::Transformation trans = inst->get_transformation();
+//
+//    double z = this->m_model_object->min_z();
+//    trans.set_offset(Vec3d(-unscale<double>(center_offset.x()), -unscale<double>(center_offset.y()), 0));
+//    mesh.transform(trans.get_matrix());
+//
+//    sla::IndexedMesh imesh(mesh);
+//    imesh.ground_level_offset(-z);
+//
+//    std::mutex mtx;
+//    size_t completed = 0;
+//    tbb::parallel_for(
+//        // Contouring starting with layer second layer to avoid build plate collision
+//        tbb::blocked_range<size_t>(1, m_layers.size()),
+//        [&, this](const tbb::blocked_range<size_t>& range) {
+//            for (size_t layer_idx = range.begin(); layer_idx < range.end(); layer_idx++) {
+//                m_print->throw_if_canceled();
+//                m_layers[layer_idx]->make_contour_z(imesh);
+//
+//                std::scoped_lock lock(mtx);
+//                completed++;
+//                std::string msg = (boost::format("Z contoured layer %d/%d (%d%%)") % (completed) % m_layers.size() % int(double(completed) / m_layers.size() * 100)).str();
+//                m_print->set_status(40, msg);
+//            }
+//        }
+//    );
+//    m_print->throw_if_canceled();
+//    BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - end";
+//
+//    this->set_done(posContouring);
+//}
 void PrintObject::contour_z()
 {
     if (!this->set_started(posContouring)) {
+        return;
+    }
+
+    // Declarative cut-plane segments: z-contouring ray-casts the FULL object mesh, which does not
+    // match a segment's clipped geometry — skip it for segments until it is made segment-aware.
+    if (this->is_segment()) {
+        this->set_done(posContouring);
         return;
     }
 
@@ -838,37 +904,43 @@ void PrintObject::contour_z()
         throw RuntimeError("ContourZ: unexpected number of instances");
     }
 
-    ModelInstance *inst = m_model_object->instances.front();
-    Point                    center_offset = this->center_offset();
-    Geometry::Transformation trans = inst->get_transformation();
+    // m_post_trafo is built in slice() to include the instance transform,
+    // B/C rotation about the object center, and the Z floor correction.
+    // Use it here so the mesh seen by the ray caster exactly matches what was sliced.
+    Point center_offset = this->center_offset();
+    double z            = this->m_model_object->min_z();
 
-    double z = this->m_model_object->min_z();
-    trans.set_offset(Vec3d(-unscale<double>(center_offset.x()), -unscale<double>(center_offset.y()), 0));
-    mesh.transform(trans.get_matrix());
+    Transform3d trafo = m_post_trafo;
+    // Subtract the center offset the same way slice_volumes_inner receives it,
+    // so XY coordinates are in the same frame as the layer slices.
+    trafo.pretranslate(Vec3d(-unscale<double>(center_offset.x()), -unscale<double>(center_offset.y()), 0.0));
+
+    mesh.transform(trafo);
 
     sla::IndexedMesh imesh(mesh);
-    imesh.ground_level_offset(-z);
+    // ground_level_offset: the rotated mesh's actual floor may differ from
+    // the original min_z(), so recompute it from the transformed bounding box.
+    BoundingBoxf3 rotated_bbox = mesh.bounding_box();
+    imesh.ground_level_offset(-rotated_bbox.min.z());
 
     std::mutex mtx;
     size_t completed = 0;
-    tbb::parallel_for(
-        // Contouring starting with layer second layer to avoid build plate collision
-        tbb::blocked_range<size_t>(1, m_layers.size()),
-        [&, this](const tbb::blocked_range<size_t>& range) {
-            for (size_t layer_idx = range.begin(); layer_idx < range.end(); layer_idx++) {
-                m_print->throw_if_canceled();
-                m_layers[layer_idx]->make_contour_z(imesh);
+    tbb::parallel_for(tbb::blocked_range<size_t>(1, m_layers.size()), [&, this](const tbb::blocked_range<size_t>& range) {
+        for (size_t layer_idx = range.begin(); layer_idx < range.end(); layer_idx++) {
+            m_print->throw_if_canceled();
+            m_layers[layer_idx]->make_contour_z(imesh);
 
-                std::scoped_lock lock(mtx);
-                completed++;
-                std::string msg = (boost::format("Z contoured layer %d/%d (%d%%)") % (completed) % m_layers.size() % int(double(completed) / m_layers.size() * 100)).str();
-                m_print->set_status(40, msg);
-            }
+            std::scoped_lock lock(mtx);
+            completed++;
+            std::string msg = (boost::format("Z contoured layer %d/%d (%d%%)") % completed % m_layers.size() %
+                               int(double(completed) / m_layers.size() * 100))
+                                  .str();
+            m_print->set_status(40, msg);
         }
-    );
+    });
+
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - end";
-
     this->set_done(posContouring);
 }
 
@@ -952,7 +1024,12 @@ void PrintObject::generate_support_material()
 #endif
         }
 
-        if ((this->has_support() && m_layers.size() > 1) || (this->has_raft() && !m_layers.empty())) {
+        // The m_layers.size() > 1 rule is about natural overhangs: a single-layer object rests on the
+        // plate and can have none. A cut-plane segment can still carry INHERITED load handed up by a
+        // child, or be floating above its base plane, and dropping that would leave real support
+        // ungenerated while the step reports success.
+        const bool has_inherited_demand = ! m_segment_support_demand.empty();
+        if ((this->has_support() && (m_layers.size() > 1 || has_inherited_demand)) || (this->has_raft() && !m_layers.empty())) {
             m_print->set_status(50, L("Generating support"));
 
             this->_generate_support_material();
@@ -1261,6 +1338,9 @@ bool PrintObject::invalidate_state_by_config_options(
                opt_key == "elefant_foot_compensation"
             || opt_key == "elefant_foot_compensation_layers"
             || opt_key == "elefant_foot_layers_density"
+            || opt_key == "test_input"
+            || opt_key == "layer_rotation_b"
+            || opt_key == "layer_rotation_c"
             || opt_key == "support_top_z_distance"
             || opt_key == "support_bottom_z_distance"
             || opt_key == "xy_hole_compensation"
@@ -1556,6 +1636,12 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "flush_into_support") {
             invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);
+        } else if (opt_key == "print_group") {
+            // Only affects the ByGroup print sequence (grouping/ordering), not object slicing.
+            // Mirror print_sequence: invalidate skirt/brim + wipe tower; G-code export cascades.
+            invalidated |= m_print->invalidate_step(psSkirtBrim);
+            invalidated |= m_print->invalidate_step(psWipeTower);
+            invalidated |= m_print->invalidate_step(psGCodeExport);
         } else {
             // for legacy, if we can't handle this option let's invalidate all steps
             this->invalidate_all_steps();
@@ -1592,6 +1678,15 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         m_slicing_params.valid = false;
     }
 
+    // Declarative cut planes: the per-object step graph has no cross-object edge, but a parent
+    // segment's support is generated from demand handed up by its children. So if a child's slices
+    // or support change, its ANCESTORS' support is stale. Propagation is strictly upward (a
+    // sibling's support does not depend on this one, and a child's does not depend on its parent),
+    // so it terminates at the root. Ordinary objects have no descriptor and are unaffected.
+    if ((step == posSlice || step == posSupportMaterial) && m_print != nullptr && this->is_segment() && ! this->is_root_segment())
+        if (PrintObject *parent = m_print->segment_parent_of(this))
+            invalidated |= parent->invalidate_step(posSupportMaterial);
+
     // Wipe tower depends on the ordering of extruders, which in turn depends on everything.
     // It also decides about what the flush_into_infill / wipe_into_object / flush_into_support features will do,
     // and that too depends on many of the settings.
@@ -1607,7 +1702,29 @@ bool PrintObject::invalidate_all_steps()
     bool result = Inherited::invalidate_all_steps() | m_print->invalidate_all_steps();
 	// Then reset some of the depending values.
 	m_slicing_params.valid = false;
+    // Same upward edge as invalidate_step(): Print::invalidate_all_steps() clears the PRINT's own
+    // steps, not sibling objects', so a segment replaced wholesale (a changed descriptor at
+    // PrintApply time) would otherwise leave its parent's support built from stale demand.
+    if (m_print != nullptr && this->is_segment() && ! this->is_root_segment())
+        if (PrintObject *parent = m_print->segment_parent_of(this))
+            result |= parent->invalidate_step(posSupportMaterial);
 	return result;
+}
+
+void PrintObject::add_segment_support_demand(const std::vector<Polygons> &demand)
+{
+    if (demand.empty())
+        return;
+    if (m_segment_support_demand.size() < demand.size())
+        m_segment_support_demand.resize(demand.size());
+    for (size_t i = 0; i < demand.size(); ++ i)
+        if (! demand[i].empty())
+            append(m_segment_support_demand[i], demand[i]);
+    // Union per layer once, here, rather than leaving overlapping patches for every consumer to
+    // deal with: several children can land demand on the same parent layer.
+    for (Polygons &layer : m_segment_support_demand)
+        if (! layer.empty())
+            layer = union_(layer);
 }
 
 // This function analyzes slices of a region (SurfaceCollection slices).
@@ -3894,6 +4011,12 @@ void PrintObject::generate_support_preview()
     POProfiler profiler;
 
     boost::posix_time::ptime ts1 = boost::posix_time::microsec_clock::local_time();
+    // Declarative cut planes: a segment cannot be previewed on its own -- see
+    // Print::run_segment_support_preview().
+    if (m_print != nullptr && this->is_segment()) {
+        m_print->run_segment_support_preview(this);
+        return;
+    }
     this->slice();
     boost::posix_time::ptime ts2 = boost::posix_time::microsec_clock::local_time();
     profiler.duration1 = (ts2 - ts1).total_milliseconds();
@@ -3903,11 +4026,60 @@ void PrintObject::generate_support_preview()
     profiler.duration2 = (ts3 - ts2).total_milliseconds();
 }
 
+void PrintObject::effective_layer_rotation_bc(double &b_deg, double &c_deg) const
+{
+    // Declarative cut-plane segments: the root always slices along +Z exactly (legacy path, no
+    // drift), a non-root segment along its world-frame build normal. The build normal is stored
+    // object-local, so it maps to world by the inverse-transpose of the instance linear part —
+    // correct under rotation, non-uniform scale and mirror. Ordinary objects keep the per-object
+    // config values (legacy destructive-chunk workflow).
+    if (this->is_segment()) {
+        b_deg = 0.;
+        c_deg = 0.;
+        if (! this->is_root_segment()) {
+            const Vec3d n_world = (m_trafo.linear().inverse().transpose() * m_segment->build_normal).normalized();
+            Geometry::bc_from_build_normal(n_world, b_deg, c_deg);
+        }
+    } else {
+        b_deg = m_config.layer_rotation_b.getFloat();
+        c_deg = m_config.layer_rotation_c.getFloat();
+    }
+}
+
 void PrintObject::update_slicing_parameters()
 {
     // Orca: updated function call for XYZ shrinkage compensation
+    // Refresh the slice frame here, not only in slice(). Print::apply() reaches this during
+    // slicing-parameter preparation, so the frame is valid even for an object whose posSlice is
+    // already done -- otherwise a path that completes the step without calling slice() would be
+    // left with an identity frame.
+    // UNLAYERED_MOD: segments only. update_slice_frame() calls the uncached ModelObject::mesh()
+    // (a merge of every volume under every instance), and this function already does one such
+    // merge below for ordinary objects -- doing it twice per object on EVERY Print::apply made
+    // each settings tweak noticeably slower on large scenes. An ordinary object's frame is only
+    // ever read after slice(), which refreshes it before its posSlice early-return, and it is the
+    // identity for anything resting on the bed anyway.
+    if (this->is_segment())
+        this->update_slice_frame();
+
+    float object_max_z = 0.f;
+    if (this->is_segment()) {
+        // A cut-plane segment slices over ITS OWN extent along its build axis, not the whole
+        // object's. Sizing from the full object is what used to leave a non-root segment with a
+        // stack of empty leading layers (stripped after the fact) and its material starting well
+        // above slice z=0.
+        // slice_z_base(), not build_z_min: a sunk ROOT is not rebased, so slicing starts at the
+        // plate and the printable height is measured from there (see CutSegmentDescriptor).
+        object_max_z = float(m_segment->build_z_max - m_segment->slice_z_base());
+    } else {
+        // UNLAYERED_MOD -- the object is sliced in its rotated frame, so its printable height is the
+        // height of the ROTATED bounding box. Same matrix the slicer uses (layer_rotation_trafo()).
+        const Transform3d tempTrafo = layer_rotation_trafo(this->config(), this->print()->config().enable_nonplanar.value);
+        object_max_z = (float) this->model_object()->mesh().transformed_bounding_box(tempTrafo).size().z();
+    }
+
     if (!m_slicing_params.valid) {
-          m_slicing_params = SlicingParameters::create_from_config(this->print()->config(), m_config, this->model_object()->max_z(),
+          m_slicing_params = SlicingParameters::create_from_config(this->print()->config(), m_config, object_max_z,
                                                                    this->object_extruders(), this->print()->shrinkage_compensation());
       }
 }
@@ -3948,9 +4120,14 @@ SlicingParameters PrintObject::slicing_parameters(const DynamicPrintConfig &full
 		}
     sort_remove_duplicates(object_extruders);
     //FIXME add painting extruders
+    // UNLAYERED_MOD -- as in update_slicing_parameters(): measure the height of the ROTATED box.
+    // `print_config` derives from MachineEnvelopeConfig, so it carries enable_nonplanar; the option
+    // may still be absent from a hand-curated DynamicPrintConfig, in which case apply() left the
+    // default (false) in place, which is the safe answer.
+    const Transform3d tempTrafo = layer_rotation_trafo(object_config, print_config.enable_nonplanar.value);
 
-    if (object_max_z <= 0.f)
-        object_max_z = (float)model_object.raw_bounding_box().size().z();
+    object_max_z = (float) model_object.mesh().transformed_bounding_box(tempTrafo).size().z();
+
     return SlicingParameters::create_from_config(print_config, object_config, object_max_z, object_extruders, object_shrinkage_compensation);
 }
 
@@ -3975,7 +4152,7 @@ std::vector<unsigned int> PrintObject::object_extruders() const
     sort_remove_duplicates(extruders);
     return extruders;
 }
-
+//this is the first thing 
 bool PrintObject::update_layer_height_profile(const ModelObject &model_object, const SlicingParameters &slicing_parameters, std::vector<coordf_t> &layer_height_profile)
 {
     bool updated = false;

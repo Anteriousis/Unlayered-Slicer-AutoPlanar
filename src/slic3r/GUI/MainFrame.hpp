@@ -50,6 +50,13 @@
 #define TAB_ID_MULTI_DEVICE  "multi_device"
 #define TAB_ID_PROJECT       "project"
 #define TAB_ID_CALIBRATION   "calibration"
+// Unlayered: optional trailing tab hosting an embedded web application (WebAppPanel).
+#define TAB_ID_WEB_APP       "web_app"
+// Unlayered: the second WebAppPanel slot, home of the Unlayered Agent tab. Sits just before
+// TAB_ID_WEB_APP when both are present.
+#define TAB_ID_AGENT         "agent_app"
+// Unlayered: the third WebAppPanel slot, home of the Unlayered Universe tab.
+#define TAB_ID_UNIVERSE      "universe_app"
 
 #define ENABEL_PRINT_ALL 0
 
@@ -67,6 +74,8 @@ class PrintHostQueueDialog;
 class Plater;
 class MainFrame;
 class ParamsDialog;
+class WebAppPanel;
+struct WebAppSlot;
 #ifdef __WXGTK__
 class ResizeEdgePanel;
 #endif
@@ -211,6 +220,9 @@ class MainFrame : public DPIFrame
     {
         eSliceAll = 0,
         eSlicePlate = 1,
+        // Hand the plate to the external nonplanar slicing service instead of slicing locally
+        // (NONPLANAR_SLICE_SERVICE.md). Offered only when a service address is configured.
+        eSliceNonplanar = 2,
     };
 
     //jump to editor under preview only mode
@@ -331,6 +343,15 @@ public:
     void        select_tab(wxPanel* panel);
     void        select_tab(const wxString& id = wxString());
     void        request_select_tab(const wxString& id);
+    // Re-label and reload an embedded web application tab after its preferences change. The
+    // no-argument form is the generic slot.
+    void        refresh_web_app();
+    void        refresh_web_app(const WebAppSlot& slot);
+    // Resolve a slot to the panel hosting it and the notebook page name it was added under.
+    // One place knows the mapping, so adding a fourth slot is a single entry rather than another
+    // ternary in every caller. False when the slot is unknown; `panel` is still null when the
+    // slot is known but its tab is disabled, which callers must treat as "nothing to do".
+    bool        web_app_slot_view(const WebAppSlot& slot, WebAppPanel*& panel, const char*& tab_id);
     int         get_calibration_curr_tab();
     void        select_view(const std::string& direction);
     // Propagate changed configuration from the Tab to the Plater and save changes to the AppConfig
@@ -393,6 +414,9 @@ public:
     CalibrationPanel*     m_calibration{ nullptr };
     WebViewPanel*         m_webview { nullptr };
     PrinterWebView*       m_printer_view{nullptr};
+    WebAppPanel*          m_web_app_view{nullptr};
+    WebAppPanel*          m_agent_view{nullptr};
+    WebAppPanel*          m_universe_view{nullptr};
     PluginPages           m_plugin_pages;
     wxLogWindow*          m_log_window { nullptr };
     // BBS

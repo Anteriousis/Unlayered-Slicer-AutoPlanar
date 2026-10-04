@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop">
+    <id>com.unlayered3d.UnlayeredSlicer</id>
+    <launchable type="desktop-id">com.unlayered3d.UnlayeredSlicer.desktop</launchable>
+    <name>Unlayered Slicer</name>
+    <summary>Slicer for Unlayered 3D printers with non-planar printing</summary>
+    <developer id="com.unlayered3d">
+        <name>Unlayered 3D</name>
+    </developer>
+    <url type="homepage">https://unlayered3d.com/slicer/</url>
+    <url type="bugtracker">https://github.com/Unlayered3D/Unlayered-Slicer/issues/</url>
+    <url type="vcs-browser">https://github.com/Unlayered3D/Unlayered-Slicer</url>
+    <metadata_license>0BSD</metadata_license>
+    <project_license>AGPL-3.0-only</project_license>
+    <content_rating type="oars-1.1" />
+    <requires>
+        <display_length compare="gt">768</display_length>
+    </requires>
+    <recommends>
+        <control>keyboard</control>
+        <control>pointing</control>
+    </recommends>
+    <description>
+        <p>Unlayered Slicer is the slicer for Unlayered 3D printers. It is a fork of OrcaSlicer
+            that adds non-planar, multi-axis printing: models can be split with cut planes and
+            each chunk is sliced and printed on its own tilted plane.</p>
+        <p>It keeps the full OrcaSlicer feature set: advanced calibration tools, adaptive layer
+            heights, tree supports, multi-material support and network printing for a wide
+            range of FDM printers.</p>
+    </description>
+    <branding>
+        <color type="primary" scheme_preference="light">#4a4a4a</color>
+        <color type="primary" scheme_preference="dark">#2b2b2b</color>
+    </branding>
+    <releases>
+        <release version="0.1.0-dev" date="2026-09-15" type="development">
+            <url type="details">https://github.com/Unlayered3D/Unlayered-Slicer/releases</url>
+            <description>
+                <p>See the release page for the changelog.</p>
+            </description>
+        </release>
+        <release version="0.0.8-dev" date="2026-09-10" type="development">
+            <url type="details">https://github.com/Unlayered3D/Unlayered-Slicer/releases</url>
+            <description>
+                <p>See the release page for the changelog.</p>
+            </description>
+        </release>
+    </releases>
+</component>

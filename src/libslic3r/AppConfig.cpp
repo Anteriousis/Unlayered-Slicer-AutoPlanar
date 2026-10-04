@@ -40,11 +40,21 @@ using namespace nlohmann;
 
 namespace Slic3r {
 
-static const std::string VERSION_CHECK_URL = "https://check-version.orcaslicer.com/latest";
-static const std::string PROFILE_UPDATE_URL = "https://check-version.orcaslicer.com/profile";
+// Unlayered: the update manifest. A single static JSON file, served publicly over HTTPS with no
+// authentication, deliberately shaped like one GitHub releases entry so the same parser handles
+// both:
+//   { "tag_name": "v0.0.4", "prerelease": false, "html_url": "<download page>",
+//     "body": "<release notes, markdown>",
+//     "assets": [ { "name": ..., "browser_download_url": ..., "size": ..., "sha256": ... } ] }
+// An empty or absent "assets" array means the installer is not directly downloadable, and the
+// update dialog offers to open "html_url" in a browser instead of installing in place.
+// There is no server behind this - do not go looking for one.
+static const std::string VERSION_CHECK_URL = "https://unlayered3d.com/slicer/latest.json";
 
-constexpr const char* CONFIG_ORCA_UPDATER_URL = "orca_updater_url";
-
+// Where the firmware and printer-config updaters look for releases. Both speak the GitHub releases
+// API shape, so anything serving that shape can stand in - a local file server while testing, or
+// our own host if those artifacts ever need to stop being public.
+static const std::string GITHUB_API_BASE = "https://api.github.com";
 static const std::string MODELS_STR = "models";
 
 const std::string AppConfig::SECTION_FILAMENTS = "filaments";
@@ -146,6 +156,46 @@ void AppConfig::set_defaults()
         // remove old 'use_legacy_opengl' parameter from this config, if present
         if (!get("use_legacy_opengl").empty())
             erase("app", "use_legacy_opengl");
+
+        // Unlayered: one-shot cleanup for configs written before this fork detached from OrcaSlicer.
+        // Without it, everyone who has ever run an earlier build keeps stealth_mode=false and the
+        // dead updater keys forever, because set_defaults() only fills in values that are absent.
+        if (get("unlayered_detach_migrated").empty()) {
+            BOOST_LOG_TRIVIAL(info) << "Applying the Unlayered detach migration to this config";
+            // Stealth mode is the default now, and the services it used to gate are gone anyway.
+            set_bool("stealth_mode", true);
+            // The persistent installation identifier the old update check sent with every request.
+            erase("app", "updater_iid");
+            erase("app", "iid");
+            // Left over from the Bambu network-plugin update flow.
+            erase("app", "update_network_plugin");
+            // Only ever read by the preset sync that no longer exists.
+            erase("app", "sync_system_preset");
+            // The same identifier was also mirrored to a bare file next to the config.
+            try {
+                const auto machine_id = boost::filesystem::path(Slic3r::data_dir()) / ".orcaslicer_machine_id";
+                boost::system::error_code ec;
+                if (boost::filesystem::exists(machine_id, ec))
+                    boost::filesystem::remove(machine_id, ec);
+            } catch (...) {
+                // Never let a leftover file stop the application from starting.
+            }
+            set_bool("unlayered_detach_migrated", true);
+        }
+
+        // Unlayered: the setup wizard used to carry a stealth-mode page (guide 4unlayered) whose
+        // checkbox rendered unchecked and reported its state on load, so merely walking through
+        // the wizard wrote stealth_mode=false over the on-by-default value set below. That page is
+        // out of the flow now, but configs written by a build that had it still carry the forced-off
+        // value, and the detach migration above has already run for them so it will not fire again.
+        // One-shot correction so "on by default" actually holds for existing installs too.
+        if (get("unlayered_stealth_default_migrated").empty()) {
+            if (!get_bool("stealth_mode")) {
+                BOOST_LOG_TRIVIAL(info) << "Restoring stealth_mode to the Unlayered default (on)";
+                set_bool("stealth_mode", true);
+            }
+            set_bool("unlayered_stealth_default_migrated", true);
+        }
 
         // Migrate legacy_networking boolean to network_plugin_version string
         std::string legacy_networking = get("legacy_networking");
@@ -329,6 +379,12 @@ void AppConfig::set_defaults()
     if (get("show_3d_navigator").empty())
         set_bool("show_3d_navigator", true);
 
+    // Objects carrying cut planes are drawn one colour per chunk in the Prepare view, without
+    // opening the cut planes tool. The second key remembers "don't ask again" for the prompt
+    // that offers to turn this off once a plate uses more than one filament.
+    if (get("show_cut_chunk_colors").empty())
+        set_bool("show_cut_chunk_colors", true);
+
     // Show the one-time "Filament Track Switch is ready" tip until it has been seen once.
     if (get("show_fila_switch_tips").empty())
         set_bool("show_fila_switch_tips", true);
@@ -399,8 +455,11 @@ void AppConfig::set_defaults()
     }
 
     // Orca
+    // Unlayered: on by default. get_stealth_mode() already forces it on until the setup wizard
+    // finishes; this is the value the wizard bakes in afterwards. See the migration below for
+    // configs written by a build that predates the change.
     if (get("stealth_mode").empty()) {
-        set_bool("stealth_mode", false);
+        set_bool("stealth_mode", true);
     }
     if (get("hide_login_side_panel").empty()) {
         set_bool("hide_login_side_panel", false);
@@ -412,6 +471,69 @@ void AppConfig::set_defaults()
     if (get("preset_bundle_auto_update").empty()) {
         set_bool("preset_bundle_auto_update", false);
     }
+
+    // Unlayered: embedded web application tab. Off with no URL by default; the shipped defaults are
+    // seeded once from resources/web/webapp/default.json (see WebAppPanel::seed_defaults) so that
+    // this source tree carries no application-specific address. Every key is user-editable.
+    if (get(SETTING_WEB_APP_ENABLED).empty())
+        set_bool(SETTING_WEB_APP_ENABLED, false);
+    if (!has(SETTING_WEB_APP_URL))
+        set(SETTING_WEB_APP_URL, "");
+    if (!has(SETTING_WEB_APP_TITLE))
+        set(SETTING_WEB_APP_TITLE, "");
+    if (get(SETTING_WEB_APP_ALLOW_LOCAL).empty())
+        set_bool(SETTING_WEB_APP_ALLOW_LOCAL, false);
+    if (!has(SETTING_WEB_APP_PATH_ROOTS))
+        set(SETTING_WEB_APP_PATH_ROOTS, "");
+    if (!has(SETTING_WEB_APP_DOWNLOAD_HOSTS))
+        set(SETTING_WEB_APP_DOWNLOAD_HOSTS, "");
+    if (!has(SETTING_WEB_APP_EXTRA_ORIGINS))
+        set(SETTING_WEB_APP_EXTRA_ORIGINS, "");
+    if (get(SETTING_WEB_APP_ALLOW_SETTINGS).empty())
+        set_bool(SETTING_WEB_APP_ALLOW_SETTINGS, false);
+
+    // Unlayered: the second slot, the Unlayered Agent tab, seeded once from
+    // resources/web/webapp/agent.json. Same defaults as the generic slot above.
+    if (get(SETTING_AGENT_APP_ENABLED).empty())
+        set_bool(SETTING_AGENT_APP_ENABLED, false);
+    if (!has(SETTING_AGENT_APP_URL))
+        set(SETTING_AGENT_APP_URL, "");
+    if (!has(SETTING_AGENT_APP_TITLE))
+        set(SETTING_AGENT_APP_TITLE, "");
+    if (get(SETTING_AGENT_APP_ALLOW_LOCAL).empty())
+        set_bool(SETTING_AGENT_APP_ALLOW_LOCAL, false);
+    if (!has(SETTING_AGENT_APP_PATH_ROOTS))
+        set(SETTING_AGENT_APP_PATH_ROOTS, "");
+    if (!has(SETTING_AGENT_APP_DOWNLOAD_HOSTS))
+        set(SETTING_AGENT_APP_DOWNLOAD_HOSTS, "");
+    if (!has(SETTING_AGENT_APP_EXTRA_ORIGINS))
+        set(SETTING_AGENT_APP_EXTRA_ORIGINS, "");
+    if (get(SETTING_AGENT_APP_ALLOW_SETTINGS).empty())
+        set_bool(SETTING_AGENT_APP_ALLOW_SETTINGS, false);
+
+    // Unlayered: the third slot, the Unlayered Universe tab, seeded once from
+    // resources/web/webapp/universe.json. Same defaults as the two slots above.
+    if (get(SETTING_UNIVERSE_APP_ENABLED).empty())
+        set_bool(SETTING_UNIVERSE_APP_ENABLED, false);
+    if (!has(SETTING_UNIVERSE_APP_URL))
+        set(SETTING_UNIVERSE_APP_URL, "");
+    if (!has(SETTING_UNIVERSE_APP_TITLE))
+        set(SETTING_UNIVERSE_APP_TITLE, "");
+    if (get(SETTING_UNIVERSE_APP_ALLOW_LOCAL).empty())
+        set_bool(SETTING_UNIVERSE_APP_ALLOW_LOCAL, false);
+    if (!has(SETTING_UNIVERSE_APP_PATH_ROOTS))
+        set(SETTING_UNIVERSE_APP_PATH_ROOTS, "");
+    if (!has(SETTING_UNIVERSE_APP_DOWNLOAD_HOSTS))
+        set(SETTING_UNIVERSE_APP_DOWNLOAD_HOSTS, "");
+    if (!has(SETTING_UNIVERSE_APP_EXTRA_ORIGINS))
+        set(SETTING_UNIVERSE_APP_EXTRA_ORIGINS, "");
+    if (get(SETTING_UNIVERSE_APP_ALLOW_SETTINGS).empty())
+        set_bool(SETTING_UNIVERSE_APP_ALLOW_SETTINGS, false);
+
+    // Unlayered: external nonplanar slicing service (NONPLANAR_SLICE_SERVICE.md). No address by
+    // default, which leaves "Slice nonplanar" out of the UI entirely until the user sets one.
+    if (!has(SETTING_NONPLANAR_SLICE_URL))
+        set(SETTING_NONPLANAR_SLICE_URL, "");
 
 #ifdef __linux__
     if (get(SETTING_USE_ENCRYPTED_TOKEN_FILE).empty())
@@ -450,8 +572,9 @@ void AppConfig::set_defaults()
         set_bool("show_daily_tips", true);
     }
 
+    // Unlayered: off by default - it advertised OrcaSlicer's cloud bundle browser.
     if (get("show_shared_profiles_notification").empty()) {
-        set_bool("show_shared_profiles_notification", true);
+        set_bool("show_shared_profiles_notification", false);
     }
 
     if (get("auto_calculate_flush").empty()){
@@ -554,9 +677,9 @@ void AppConfig::set_defaults()
     //     set_bool("staff_pick_switch", false);
     // }
 
-    if (get("sync_system_preset").empty()) {
-        set_bool("sync_system_preset", true);
-    }
+    // Unlayered: "sync_system_preset" is not seeded any more. Its only reader was the preset sync
+    // that fetched vendor profiles from OrcaSlicer; built-in profiles now ship with the application
+    // and are installed unconditionally.
 
     if (get("backup_switch").empty() || get("version") < "01.06.00.00") {
         set_bool("backup_switch", true);
@@ -1817,16 +1940,38 @@ std::string AppConfig::config_path()
 
 std::string AppConfig::version_check_url() const
 {
+    // The "version_check_url" key is intentionally undocumented and has no UI. It exists so the
+    // updater can be pointed at a local file server for testing without publishing to the live
+    // host - see the update manifest contract above VERSION_CHECK_URL.
     auto from_settings = get("version_check_url");
     return from_settings.empty() ? VERSION_CHECK_URL : from_settings;
 }
 
-std::string AppConfig::profile_update_url() const
+std::string AppConfig::github_api_base() const
 {
-    std::string orca_updater_url = get(CONFIG_ORCA_UPDATER_URL);
-    if (orca_updater_url.empty())
-        return PROFILE_UPDATE_URL;
-    return orca_updater_url;
+    // Undocumented and deliberately without UI, exactly like "version_check_url" above: it exists
+    // so the firmware and config updaters can be pointed at a local server without publishing a
+    // release. A trailing slash would produce a double slash in every URL built from it, so it is
+    // stripped here rather than at each of the six call sites.
+    std::string base = get("github_api_base");
+    if (base.empty())
+        return GITHUB_API_BASE;
+    while (!base.empty() && base.back() == '/')
+        base.pop_back();
+    return base;
+}
+
+std::string AppConfig::printer_updates_token() const
+{
+    // Trimmed because this value is pasted by hand: copying it out of a web page very often picks
+    // up a trailing newline or a leading space, and an untrimmed token would be sent in the
+    // Authorization header verbatim and rejected, with nothing on screen to suggest why.
+    std::string token = get(SETTING_PRINTER_UPDATES_TOKEN);
+    const auto  first = token.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return {};
+    const auto last = token.find_last_not_of(" \t\r\n");
+    return token.substr(first, last - first + 1);
 }
 
 bool AppConfig::exists()

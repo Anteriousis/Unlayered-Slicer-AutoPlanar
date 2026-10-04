@@ -1,0 +1,39 @@
+{
+	"type": "filament",
+	"name": "SUNLU PLA @base",
+	"inherits": "fdm_filament_pla",
+	"from": "system",
+	"filament_id": "OGFSNL01",
+	"instantiation": "false",
+	"filament_vendor": [
+		"SUNLU"
+	],
+	"filament_density": [
+		"1.24"
+	],
+	"filament_notes": "SUNLU standard PLA (not PLA+). Datasheet: density 1.24 g/cm3, nozzle 190-230C, melting point 165-180C, 50-100 mm/s, tolerance +/-0.02 mm.",
+	"nozzle_temperature": [
+		"210"
+	],
+	"nozzle_temperature_initial_layer": [
+		"210"
+	],
+	"hot_plate_temp": [
+		"60"
+	],
+	"hot_plate_temp_initial_layer": [
+		"60"
+	],
+	"textured_plate_temp": [
+		"60"
+	],
+	"textured_plate_temp_initial_layer": [
+		"60"
+	],
+	"temperature_vitrification": [
+		"54"
+	],
+	"filament_max_volumetric_speed": [
+		"12"
+	]
+}

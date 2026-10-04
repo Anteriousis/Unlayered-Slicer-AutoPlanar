@@ -14,21 +14,20 @@ function HandleStudio(pVal)
 	{
 		m_ProfileItem=pVal['response'];
 		SortUI();
-		InstallNetworkPlugin();
-	}
-}
-
-function InstallNetworkPlugin()
-{
-	if(m_ProfileItem["network_plugin_install"]!='1' || (m_ProfileItem["network_plugin_install"]=='1' && m_ProfileItem["network_plugin_compability"]=='0') )
-	{
-		$("#AcceptBtn").hide();
-		$("#GotoNetPluginBtn").show();
 	}
 }
 
 function ReturnPreviewPage()
 {
+	/* ORCA the profile reply is held until the filament data is loaded, so this can fire before
+	   m_ProfileItem exists. Fall back to the printer picker rather than throwing - page 22 is the
+	   last page of the wizard and the first-run dialog has no close box. */
+	if(!m_ProfileItem)
+	{
+		document.location.href="../21/index.html";
+		return;
+	}
+
 	let nMode=m_ProfileItem["model"].length;
 	
 	if( nMode==1)
@@ -37,27 +36,13 @@ function ReturnPreviewPage()
 		document.location.href="../21/index.html";	
 }
 
-function GotoNetPluginPage()
-{
-	let bRet=ResponseFilamentResult();
-	
-	if(bRet)
-		window.location.href="../4orca/index.html";
-}
-
 function FinishGuide()
 {
+	/* ORCA the filament selection still has to be saved here -- ResponseFilamentResult() posts it and
+	   refuses to advance when nothing is ticked. The wizard now ends on page 25 (the multiplanar
+	   tutorial offer), which is what sends user_guide_finish. */
 	let bRet=ResponseFilamentResult();
-	
-	if(bRet)	
-	{
-		var tSend={};
-		tSend['sequence_id']=Math.round(new Date() / 1000);
-		tSend['command']="user_guide_finish";
-		tSend['data']={};
-		tSend['data']['action']="finish";
-		
-		SendWXMessage( JSON.stringify(tSend) );	
-	}
-	//window.location.href="../6/index.html";
+
+	if(bRet)
+		window.location.href="../25/index.html";
 }

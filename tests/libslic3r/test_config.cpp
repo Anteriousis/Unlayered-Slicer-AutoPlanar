@@ -285,7 +285,7 @@ TEST_CASE("Flush-volume warning predicate respects used filament transitions", "
     }
 }
 
-// TODO: https://github.com/SoftFever/OrcaSlicer/issues/11269 - Is this test still relevant? Delete if not.
+// TODO: https://github.com/OrcaSlicer/OrcaSlicer/issues/11269 - Is this test still relevant? Delete if not.
 // It was failing so at least "nozzle_type" and "extruder_printable_area" could not be serialized
 // and an exception was thrown, but "nozzle_type" has been around for at least 3 months now.
 // So maybe this test and the serialization logic in Config.?pp should be deleted if it doesn't get used.
@@ -832,7 +832,7 @@ SCENARIO("ConfigOptionVector::set_to_index throws on incompatible type", "[Confi
 TEST_CASE("read_cli applies valid values and collects non-option arguments", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--nozzle-temperature", "210,190", "--reduce-crossing-wall=1", "model.3mf"};
+    const char* argv[] = {"unlayered-slicer", "--nozzle-temperature", "210,190", "--reduce-crossing-wall=1", "model.3mf"};
     REQUIRE(config.read_cli(5, argv, &extra, &keys));
     REQUIRE(config.opt<ConfigOptionInts>("nozzle_temperature")->values == std::vector<int>{210, 190});
     REQUIRE(config.opt<ConfigOptionBool>("reduce_crossing_wall")->value);
@@ -843,14 +843,14 @@ TEST_CASE("read_cli applies valid values and collects non-option arguments", "[C
 TEST_CASE("read_cli rejects nil for a non-nullable vector option", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--nozzle-temperature", "nil"};
+    const char* argv[] = {"unlayered-slicer", "--nozzle-temperature", "nil"};
     REQUIRE_FALSE(config.read_cli(3, argv, &extra, &keys));
 }
 
 TEST_CASE("read_cli rejects an invalid boolean value", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--reduce-crossing-wall=maybe"};
+    const char* argv[] = {"unlayered-slicer", "--reduce-crossing-wall=maybe"};
     REQUIRE_FALSE(config.read_cli(2, argv, &extra, &keys));
 }
 
@@ -875,7 +875,7 @@ TEST_CASE("read_cli accepts the common spellings of a boolean value", "[Config]"
     DYNAMIC_SECTION(text) {
         Slic3r::DynamicPrintConfig config;
         t_config_option_keys extra, keys;
-        const char* argv[] = {"orca-slicer", text};
+        const char* argv[] = {"unlayered-slicer", text};
         REQUIRE(config.read_cli(2, argv, &extra, &keys));
         REQUIRE(config.opt<ConfigOptionBool>("reduce_crossing_wall")->value == expected);
     }
@@ -884,7 +884,7 @@ TEST_CASE("read_cli accepts the common spellings of a boolean value", "[Config]"
 TEST_CASE("read_cli accepts the common boolean spellings inside a bools vector", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--filament-soluble=true,no,1"};
+    const char* argv[] = {"unlayered-slicer", "--filament-soluble=true,no,1"};
     REQUIRE(config.read_cli(2, argv, &extra, &keys));
     REQUIRE(config.opt<ConfigOptionBools>("filament_soluble")->values == std::vector<unsigned char>{1, 0, 1});
 }
@@ -892,7 +892,7 @@ TEST_CASE("read_cli accepts the common boolean spellings inside a bools vector",
 TEST_CASE("read_cli trims whitespace around boolean spellings", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--reduce-crossing-wall= true ", "--filament-soluble= true , no ,1"};
+    const char* argv[] = {"unlayered-slicer", "--reduce-crossing-wall= true ", "--filament-soluble= true , no ,1"};
     REQUIRE(config.read_cli(3, argv, &extra, &keys));
     REQUIRE(config.opt<ConfigOptionBool>("reduce_crossing_wall")->value);
     REQUIRE(config.opt<ConfigOptionBools>("filament_soluble")->values == std::vector<unsigned char>{1, 0, 1});
@@ -901,7 +901,7 @@ TEST_CASE("read_cli trims whitespace around boolean spellings", "[Config]") {
 TEST_CASE("read_cli normalizes boolean spellings when a bools vector is repeated", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--filament-soluble=true", "--filament-soluble=off"};
+    const char* argv[] = {"unlayered-slicer", "--filament-soluble=true", "--filament-soluble=off"};
     REQUIRE(config.read_cli(3, argv, &extra, &keys));
     REQUIRE(config.opt<ConfigOptionBools>("filament_soluble")->values == std::vector<unsigned char>{1, 0});
 }
@@ -909,7 +909,7 @@ TEST_CASE("read_cli normalizes boolean spellings when a bools vector is repeated
 TEST_CASE("read_cli keeps nil alongside boolean spellings in a nullable bools vector", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--enable-overhang-speed=nil,yes,off"};
+    const char* argv[] = {"unlayered-slicer", "--enable-overhang-speed=nil,yes,off"};
     REQUIRE(config.read_cli(2, argv, &extra, &keys));
     auto* opt = config.opt<ConfigOptionBoolsNullable>("enable_overhang_speed");
     REQUIRE(opt != nullptr);
@@ -922,14 +922,14 @@ TEST_CASE("read_cli keeps nil alongside boolean spellings in a nullable bools ve
 TEST_CASE("read_cli rejects an empty item inside a bools vector", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--filament-soluble=true,,1"};
+    const char* argv[] = {"unlayered-slicer", "--filament-soluble=true,,1"};
     REQUIRE_FALSE(config.read_cli(2, argv, &extra, &keys));
 }
 
 TEST_CASE("read_cli rejects an unknown spelling next to a valid one in a bools vector", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--filament-soluble=true,affirmative"};
+    const char* argv[] = {"unlayered-slicer", "--filament-soluble=true,affirmative"};
     REQUIRE_FALSE(config.read_cli(2, argv, &extra, &keys));
 }
 
@@ -939,14 +939,14 @@ TEST_CASE("read_cli leaves boolean spellings alone for non-boolean options", "[C
     SECTION("string option") {
         Slic3r::DynamicPrintAndCLIConfig config;
         t_config_option_keys extra, keys;
-        const char* argv[] = {"orca-slicer", "--logfile=true"};
+        const char* argv[] = {"unlayered-slicer", "--logfile=true"};
         REQUIRE(config.read_cli(2, argv, &extra, &keys));
         REQUIRE(config.opt<ConfigOptionString>("logfile")->value == "true");
     }
     SECTION("strings vector option") {
         Slic3r::DynamicPrintConfig config;
         t_config_option_keys extra, keys;
-        const char* argv[] = {"orca-slicer", "--filament-colour=on;off"};
+        const char* argv[] = {"unlayered-slicer", "--filament-colour=on;off"};
         REQUIRE(config.read_cli(2, argv, &extra, &keys));
         REQUIRE(config.opt<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"on", "off"});
     }
@@ -955,7 +955,7 @@ TEST_CASE("read_cli leaves boolean spellings alone for non-boolean options", "[C
 TEST_CASE("read_cli treats a bare boolean flag as true without consuming the next argument", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--reduce-crossing-wall", "model.3mf"};
+    const char* argv[] = {"unlayered-slicer", "--reduce-crossing-wall", "model.3mf"};
     REQUIRE(config.read_cli(3, argv, &extra, &keys));
     REQUIRE(config.opt<ConfigOptionBool>("reduce_crossing_wall")->value);
     REQUIRE(extra == t_config_option_keys{"model.3mf"});
@@ -964,14 +964,14 @@ TEST_CASE("read_cli treats a bare boolean flag as true without consuming the nex
 TEST_CASE("read_cli rejects an invalid scalar numeric value", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--top-shell-layers", "several"};
+    const char* argv[] = {"unlayered-slicer", "--top-shell-layers", "several"};
     REQUIRE_FALSE(config.read_cli(3, argv, &extra, &keys));
 }
 
 TEST_CASE("read_cli appends values when a vector option is repeated", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--nozzle-temperature", "210", "--nozzle-temperature", "190,200"};
+    const char* argv[] = {"unlayered-slicer", "--nozzle-temperature", "210", "--nozzle-temperature", "190,200"};
     REQUIRE(config.read_cli(5, argv, &extra, &keys));
     REQUIRE(config.opt<ConfigOptionInts>("nozzle_temperature")->values == std::vector<int>{210, 190, 200});
     // the key is recorded once, on first use
@@ -981,7 +981,7 @@ TEST_CASE("read_cli appends values when a vector option is repeated", "[Config]"
 TEST_CASE("read_cli parses a bools vector given in the --flag=values form", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--filament-soluble=1,0,1"};
+    const char* argv[] = {"unlayered-slicer", "--filament-soluble=1,0,1"};
     REQUIRE(config.read_cli(2, argv, &extra, &keys));
     REQUIRE(config.opt<ConfigOptionBools>("filament_soluble")->values == std::vector<unsigned char>{1, 0, 1});
 }
@@ -989,14 +989,14 @@ TEST_CASE("read_cli parses a bools vector given in the --flag=values form", "[Co
 TEST_CASE("read_cli rejects an invalid value inside a bools vector", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--filament-soluble=1,maybe"};
+    const char* argv[] = {"unlayered-slicer", "--filament-soluble=1,maybe"};
     REQUIRE_FALSE(config.read_cli(2, argv, &extra, &keys));
 }
 
 TEST_CASE("read_cli appends true for a bare bools vector flag", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--filament-soluble"};
+    const char* argv[] = {"unlayered-slicer", "--filament-soluble"};
     REQUIRE(config.read_cli(2, argv, &extra, &keys));
     REQUIRE(config.opt<ConfigOptionBools>("filament_soluble")->values == std::vector<unsigned char>{1});
 }
@@ -1004,7 +1004,7 @@ TEST_CASE("read_cli appends true for a bare bools vector flag", "[Config]") {
 TEST_CASE("read_cli splits a strings vector on semicolons and unescapes quoted items", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--filament-colour", "#FF0000;\"a\\nb\";#00FF00"};
+    const char* argv[] = {"unlayered-slicer", "--filament-colour", "#FF0000;\"a\\nb\";#00FF00"};
     REQUIRE(config.read_cli(3, argv, &extra, &keys));
     auto& values = config.opt<ConfigOptionStrings>("filament_colour")->values;
     REQUIRE(values == std::vector<std::string>{"#FF0000", "a\nb", "#00FF00"});
@@ -1013,14 +1013,14 @@ TEST_CASE("read_cli splits a strings vector on semicolons and unescapes quoted i
 TEST_CASE("read_cli rejects a strings vector with an unterminated quote", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--filament-colour", "\"oops"};
+    const char* argv[] = {"unlayered-slicer", "--filament-colour", "\"oops"};
     REQUIRE_FALSE(config.read_cli(3, argv, &extra, &keys));
 }
 
 TEST_CASE("read_cli parses a points vector in the NxM coordinate form", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--printable-area", "0x0,200x0,200x200,0x200"};
+    const char* argv[] = {"unlayered-slicer", "--printable-area", "0x0,200x0,200x200,0x200"};
     REQUIRE(config.read_cli(3, argv, &extra, &keys));
     auto& points = config.opt<ConfigOptionPoints>("printable_area")->values;
     REQUIRE(points.size() == 4);
@@ -1034,7 +1034,7 @@ TEST_CASE("read_cli parses a points vector in the NxM coordinate form", "[Config
 TEST_CASE("read_cli stores the log file path as a string", "[Config]") {
     Slic3r::DynamicPrintAndCLIConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--logfile", "orca.log"};
+    const char* argv[] = {"unlayered-slicer", "--logfile", "orca.log"};
     REQUIRE(config.read_cli(3, argv, &extra, &keys));
     REQUIRE(config.opt<ConfigOptionString>("logfile")->value == "orca.log");
 }
@@ -1042,7 +1042,7 @@ TEST_CASE("read_cli stores the log file path as a string", "[Config]") {
 TEST_CASE("read_cli accepts nil entries for a nullable vector option", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
-    const char* argv[] = {"orca-slicer", "--filament-retraction-length", "nil,2.5"};
+    const char* argv[] = {"unlayered-slicer", "--filament-retraction-length", "nil,2.5"};
     REQUIRE(config.read_cli(3, argv, &extra, &keys));
     auto* opt = config.opt<ConfigOptionFloatsNullable>("filament_retraction_length");
     REQUIRE(opt != nullptr);

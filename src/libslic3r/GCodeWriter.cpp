@@ -21,6 +21,24 @@
 
 namespace Slic3r {
 
+// UNLAYERED_MOD — sliced-frame point -> emitted (bed-frame) point. `trafo` is the print object's
+// post_trafo_inverse(); the firmware is told the matching table orientation via B/C.
+//
+// `extruder_offset` is the active nozzle's XY offset in the MACHINE frame. GCode::point_to_gcode
+// has already subtracted it from v's XY, so without a correction the rotation below carries that
+// machine-frame quantity into the chunk's frame: the emitted point becomes R*(P - eo) + t when it
+// should be R*P + t - eo. The difference is (R - I) * eo, which is exactly zero for an untilted
+// segment — so a tilted chunk ends up displaced relative to the root it sits on, by the full offset
+// and along a different axis. Adding it back puts the subtraction where it belongs.
+static inline Vec3d apply_test_rotation2(const Vec3d& v, const Transform3d& trafo,
+                                         const Vec3d& extruder_offset = Vec3d::Zero())
+{
+    const Vec3d out = trafo.rotation() * v + trafo.translation();
+    if (extruder_offset.isZero())
+        return out;                      // the usual case: nothing to correct, output unchanged
+    return out + trafo.rotation() * extruder_offset - extruder_offset;
+}
+
 bool GCodeWriter::full_gcode_comment = true;
 
 bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
@@ -31,6 +49,12 @@ bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 {
     this->config.apply(print_config, true);
+
+    // UNLAYERED_MOD — see extruder_offset_xy(). GCodeConfig does not carry extruder_offset, so the
+    // per-extruder XY offsets are cached here, where the full PrintConfig is in hand.
+    m_extruder_offsets = print_config.extruder_offset.values;
+    // UNLAYERED_MOD — see the clamp in lazy_lift()/eager_lift().
+    m_nonplanar = print_config.enable_nonplanar.value;
 
     // Some machine limits are stride-2 (normal, silent) pairs, here we extract the value that will be used,
     // which is always normal mode at the moment
@@ -765,12 +789,24 @@ std::string GCodeWriter::travel_to_xy(const Vec2d &point, const std::string &com
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
     return w.string();
 }
+//HEAVILY UNLAYERED_MOD
 
 /*  If this method is called more than once before calling unlift(),
 it will not perform subsequent lifts, even if Z was raised manually
 (i.e. with travel_to_z()) and thus _lifted was reduced. */
 std::string GCodeWriter::lazy_lift(LiftType lift_type, bool spiral_vase)
 {
+    // UNLAYERED_MOD — only a straight lift is safe when printing non-planar. A lift works on m_pos,
+    // which is the MACHINE-frame position, so NormalLift rises along machine Z and is correct under
+    // any table tilt. Spiral and slope lifts sweep in XY while they climb, which on a tilted chunk
+    // drives the nozzle sideways into the material it has just laid; the spiral additionally emits
+    // G2/G3, which cannot describe a non-planar path at all, and its printable-area test is flat.
+    // Clamped here rather than in GCode::to_lift_type() because several sites pick SpiralLift or
+    // SlopeLift directly and never consult z_hop_types (GCode.cpp ~1135, ~6022, ~7663, ~9613,
+    // ~9900, ~9934, ~10407) -- lazy_lift/eager_lift are the only choke points every lift passes.
+    if (m_nonplanar)
+        lift_type = LiftType::NormalLift;
+
     // check whether the above/below conditions are met
     double target_lift = 0;
     {
@@ -798,7 +834,9 @@ std::string GCodeWriter::lazy_lift(LiftType lift_type, bool spiral_vase)
 
 // BBS: immediately execute an undelayed lift move with a spiral lift pattern
 // designed specifically for subsequent gcode injection (e.g. timelapse) 
-std::string GCodeWriter::eager_lift(const LiftType type) {
+std::string GCodeWriter::eager_lift(const LiftType type_in) {
+    // UNLAYERED_MOD — see lazy_lift(): straight lift only when printing non-planar.
+    const LiftType type = m_nonplanar ? LiftType::NormalLift : type_in;
     std::string lift_move;
     double target_lift = 0;
     {
@@ -836,7 +874,7 @@ std::string GCodeWriter::eager_lift(const LiftType type) {
     return lift_move;
 }
 
-std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &comment, bool force_z)
+std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &comment, bool force_z, Transform3d trafo)
 {
     // FIXME: This function was not being used when travel_speed_z was separated (bd6badf).
     // Calculation of feedrate was not updated accordingly. If you want to use
@@ -848,7 +886,8 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         adjust the nominal Z by reducing the lift amount that will be
         used for unlift. */
         // BBS
-    Vec3d dest_point = point;
+
+    Vec3d dest_point = apply_test_rotation2(point, trafo, this->extruder_offset_xy());
     auto travel_speed =
         m_is_first_layer ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);
     //BBS: a z_hop need to be handle when travel
@@ -857,11 +896,17 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         //BBS: don't need to do real lift if the current position is absolutely same with target.
         //This ususally happens when the last extrusion line is short and the end of wipe position
         //is same with the traget point by chance.
-        if ((!this->is_current_position_clear() || m_pos != dest_point) &&
+        //UNLAYERED_MOD
+        /*if ((!this->is_current_position_clear() || m_pos != dest_point) &&
             m_to_lift + m_pos(2) > point(2)) {
             m_lifted = m_to_lift + m_pos(2) - point(2);
             dest_point(2) = m_to_lift + m_pos(2);
-        }
+        }*/
+        Vec3d liftVec = {0, 0, m_to_lift};
+
+        liftVec = trafo.rotation() * liftVec;
+        
+
         m_to_lift = 0.;
 
         std::string slop_move;
@@ -870,80 +915,59 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         Vec3d target = { dest_point(0) - m_x_offset, dest_point(1) - m_y_offset, dest_point(2) };
         Vec3d delta = target - source;
         Vec2d delta_no_z = { delta(0), delta(1) };
-        //BBS: don'need slope travel because we don't know where is the source position the first time
-        //BBS: Also don't need to do slope move or spiral lift if x-y distance is absolute zero
-        if (delta(2) > 0 && delta_no_z.norm() != 0.0f)    {
-            //BBS: SpiralLift
-            if (m_to_lift_type == LiftType::SpiralLift && this->is_current_position_clear()) {
-                //BBS: todo: check the arc move all in bed area, if not, then use lazy lift
-                double radius = delta(2) / (2 * PI * atan(this->filament()->travel_slope()));
-                Vec2d ij_offset = radius * delta_no_z.normalized();
-                ij_offset = { -ij_offset(1), ij_offset(0) };
-                // Orca: only perform the spiral lift if its full circle stays inside the
-                // printable area of the active extruder, otherwise fall back to a normal
-                // lift to avoid colliding with the print boundary. `source` is already in
-                // bed coordinates (plate offset removed), matching the printable area.
-                const Vec2d spiral_center = { source.x() + ij_offset.x(), source.y() + ij_offset.y() };
-                if (this->spiral_lift_fits_printable_area(spiral_center, radius))
-                    slop_move = this->_spiral_travel_to_z(target(2), ij_offset, "spiral lift Z");
-                else
-                    slop_move = _travel_to_z(target.z(), "normal lift Z");
-            }
-            //BBS: SlopeLift
-            else if (m_to_lift_type == LiftType::SlopeLift &&
-                this->is_current_position_clear() &&
-                atan2(delta(2), delta_no_z.norm()) < this->filament()->travel_slope()) {
-                //BBS: check whether we can make a travel like
-                //   _____
-                //  /       to make the z list early to avoid to hit some warping place when travel is long.
-                Vec2d temp = delta_no_z.normalized() * delta(2) / tan(this->filament()->travel_slope());
-                Vec3d slope_top_point = Vec3d(temp(0), temp(1), delta(2)) + source;
-                GCodeG1Formatter w0;
-                w0.emit_xyz(slope_top_point);
-                w0.emit_f(travel_speed * 60.0);
-                //BBS
-                w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
-                slop_move = w0.string();
-            }
-            else if (m_to_lift_type == LiftType::NormalLift) {
-                slop_move = _travel_to_z(target.z(), "normal lift Z");
-            }
+        // UNLAYERED_MOD: the BBS spiral/slope lift variants are not used here — the hop is taken
+        // along the chunk's plane normal (liftVec), so it is always a plain XYZ move.
+        //
+        // UNLAYERED_MOD: only lift in place when we actually know where the head is. After custom
+        // start / tool-change / timelapse G-code the writer's position is fictional — m_pos is still
+        // the origin — so this move commands an X/Y the head was never at. With a plate offset
+        // applied that lands a whole plate stride off the bed: plate 2 of a multi-plate project on a
+        // 250x210 bed emits "G1 X-300 Y0", which RepRapFirmware 3.7 rejects as outside the machine
+        // limits and abandons the print (3.6 silently clamped it, which is why this went unnoticed).
+        // Skipping it is safe — the travel below rises to target + liftVec regardless, so the head
+        // still clears the part. Same rule as eager_lift's "spiral lift only safe with known position".
+        if (this->is_current_position_clear()) {
+            GCodeG1Formatter w0;
+            w0.emit_xyz(source + liftVec);
+            w0.emit_f(travel_speed * 60.0);
+            // BBS
+            w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
+            slop_move = w0.string();
         }
-
+        //added this back to deal with z hop issue for now
         std::string xy_z_move;
         {
             GCodeG1Formatter w0;
-            if (this->is_current_position_clear()) {
-                w0.emit_xyz(target);
-                w0.emit_f(travel_speed * 60.0);
-                w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
-                xy_z_move = w0.string();
-            }
-            else {
-                w0.emit_xy(Vec2d(target.x(), target.y()));
-                w0.emit_f(travel_speed * 60.0);
-                w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
-                xy_z_move = w0.string() + _travel_to_z(target.z(), comment);
-            }
+            w0.emit_xyz(target + liftVec);
+            w0.emit_f(travel_speed * 60.0);
+            w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
+
+            GCodeG1Formatter w1;
+            w1.emit_xyz(target);
+            w1.emit_f(travel_speed * 60.0);
+            w1.emit_comment(GCodeWriter::full_gcode_comment, comment);
+
+            xy_z_move = w0.string() + w1.string();
         }
         m_pos = dest_point;
         this->set_current_position_clear(true);
         return slop_move + xy_z_move;
-    }
-    else if (!force_z && !this->will_move_z(point(2))) {
+
+    } else if (!force_z && !this->will_move_z(dest_point(2))) {
         double nominal_z = m_pos(2) - m_lifted;
-        m_lifted -= (point(2) - nominal_z);
+        m_lifted -= (dest_point(2) - nominal_z);
         // In case that z_hop == layer_height we could end up with almost zero in_m_lifted
         // and a retract could be skipped
         if (std::abs(m_lifted) < EPSILON)
             m_lifted = 0.;
         //BBS
         this->set_current_position_clear(true);
-        return this->travel_to_xy(to_2d(point));
+        return this->travel_to_xy(to_2d(dest_point));
     }
     else {
         /*  In all the other cases, we perform an actual XYZ move and cancel
             the lift. */
+
         m_lifted = 0;
     }
 
@@ -951,6 +975,50 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
     Vec3d point_on_plate = { dest_point(0) - m_x_offset, dest_point(1) - m_y_offset, dest_point(2) };
     std::string out_string;
     GCodeG1Formatter w;
+
+    // UNLAYERED_MOD — approach a ROTATED frame's target along the chunk normal.
+    //
+    // The xy-then-z split below is a clearing manoeuvre: travel at the hop height, then come down.
+    // That works in an unrotated frame, where the head already sits at the layer's height so the XY
+    // leg travels level. In a rotated frame a layer is a tilted plane whose emitted Z varies across
+    // it, so the start of one layer can sit MILLIMETRES above the end of the last (measured 5.1 mm
+    // on a 20-degree segment). The XY leg then crosses the part at the lower height and the hop
+    // never clears anything -- the hotend collision check caught exactly that: tip at Z10.87 with
+    // earlier material 4.5 mm directly overhead, one hit per layer change.
+    //
+    // Branch A above already does the right thing (hop along the normal, traverse, descend) but
+    // only fires when a lift is PENDING (m_to_lift). Nothing is pending at a layer change, so this
+    // tail runs instead. Do the same manoeuvre here: arrive ABOVE the target along the normal, then
+    // descend onto it -- still two moves, and both absolute, so it does not depend on m_pos being
+    // known (which is precisely why the split branch exists). The hop is added and then taken back
+    // off, so it cancels exactly instead of leaving the head displaced along Z only.
+    //
+    // Skipped when z_hop is 0 (no clearance asked for) and in an unrotated frame, so planar output
+    // is unchanged.
+    Vec3d approach_vec = Vec3d::Zero();
+    if (! trafo.linear().isApprox(Eigen::Matrix3d::Identity())) {
+        double hop = 0.;
+        if (const Extruder *e = this->filament(); e != nullptr)
+            hop = this->config.z_hop.get_at(e->id());
+        if (hop > EPSILON)
+            approach_vec = trafo.rotation() * Vec3d(0., 0., hop);
+    }
+    if (! approach_vec.isZero()) {
+        GCodeG1Formatter w0;
+        w0.emit_xyz(point_on_plate + approach_vec);
+        w0.emit_f(travel_speed * 60.0);
+        w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
+        GCodeG1Formatter w1;
+        w1.emit_xyz(point_on_plate);
+        w1.emit_f(travel_speed * 60.0);
+        w1.emit_comment(GCodeWriter::full_gcode_comment, comment);
+        out_string = w0.string() + w1.string();
+        m_lifted = 0;
+        m_pos    = dest_point;
+        this->set_current_position_clear(true);
+        return out_string;
+    }
+
     if (!this->is_current_position_clear())
     {
         //force to move xy first then z after filament change
@@ -969,6 +1037,126 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
     m_pos = dest_point;
     this->set_current_position_clear(true);
     return out_string;
+}
+
+// UNLAYERED_MOD — see header.
+double GCodeWriter::_clamp_feed_for_rotary(double linear_dist, double bc_angular_dist_deg, double travel_feed) const
+{
+    static constexpr double ROT_FEED = 5000.; // deg/min; matches trafo_to_rotation_gcode
+    if (bc_angular_dist_deg <= 1e-3 || linear_dist <= 0.)
+        return travel_feed;
+    return std::min(travel_feed, linear_dist * ROT_FEED / bc_angular_dist_deg);
+}
+
+// UNLAYERED_MOD — see header. The point is already in the bed frame; emit it verbatim.
+std::string GCodeWriter::travel_to_xyz_direct(const Vec3d &bed_point, const std::string &comment)
+{
+    const double travel_speed =
+        m_is_first_layer ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);
+
+    GCodeG1Formatter w;
+    w.emit_xyz(Vec3d(bed_point(0) - m_x_offset, bed_point(1) - m_y_offset, bed_point(2)));
+    w.emit_f(travel_speed * 60.0);
+    w.emit_comment(GCodeWriter::full_gcode_comment, comment);
+
+    m_pos     = bed_point;
+    m_lifted  = 0.;
+    m_to_lift = 0.;
+    this->set_current_position_clear(true);
+    return w.string();
+}
+
+// UNLAYERED_MOD — see header. F is emitted so a G1-style interpretation of G0 does not inherit a
+// stale print feed; a firmware that treats G0 as a true rapid ignores it.
+std::string GCodeWriter::rapid_to_xyzbc(const Vec3d &bed_point, std::optional<double> angle_b_deg, std::optional<double> angle_c_deg,
+                                        const std::string &comment)
+{
+    const double travel_speed =
+        m_is_first_layer ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);
+
+    GCodeG0Formatter w;
+    w.emit_xyz(Vec3d(bed_point(0) - m_x_offset, bed_point(1) - m_y_offset, bed_point(2)));
+    if (angle_b_deg)
+        w.emit_axis('B', *angle_b_deg, GCodeFormatter::XYZF_EXPORT_DIGITS);
+    if (angle_c_deg)
+        w.emit_axis('C', *angle_c_deg, GCodeFormatter::XYZF_EXPORT_DIGITS);
+    w.emit_f(travel_speed * 60.0);
+    w.emit_comment(GCodeWriter::full_gcode_comment, comment);
+
+    m_pos     = bed_point;
+    m_lifted  = 0.;
+    m_to_lift = 0.;
+    this->set_current_position_clear(true);
+    return w.string();
+}
+
+// UNLAYERED_MOD — see header. Traverse at the current machine-vertical height, then descend.
+std::string GCodeWriter::travel_to_xyz_high_then_down(const Vec3d &local_point, const Transform3d &trafo, const std::string &comment,
+                                                      bool rotate, double angle_b_deg, double angle_c_deg, double bc_angular_dist_deg)
+{
+    // Destination in machine coordinates (orientation already set by the caller's rotation gcode).
+    Vec3d dest = apply_test_rotation2(local_point, trafo, this->extruder_offset_xy());
+    double travel_speed =
+        m_is_first_layer ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);
+    const double travel_feed = travel_speed * 60.0; // mm/min
+
+    // Keep the current (lifted) machine Z for the XY traverse, then drop straight down. Coordinates
+    // are emitted with the plate offset removed, matching travel_to_xyz / _travel_to_z.
+    Vec3d over   = { dest(0) - m_x_offset, dest(1) - m_y_offset, m_pos(2) };
+    Vec3d target = { dest(0) - m_x_offset, dest(1) - m_y_offset, dest(2) };
+
+    std::string out;
+
+    if (rotate && bc_angular_dist_deg > 1e-3) {
+        // ByGroup hop: swing B/C simultaneously with the high XY traverse. The firmware finishes
+        // every axis of a G1 together, so a large rotary swing over a short XY hop would whip the
+        // B/C axes. F is interpreted over the XY distance (T = d_xy / F), so bounding the rotary
+        // speed to ROT_FEED (deg/min) means F <= d_xy * ROT_FEED / d_bc.
+        const double rot_feed = 5000.0; // matches the standalone trafo_to_rotation_gcode feedrate
+        const double d_xy = std::hypot(over(0) - m_pos(0), over(1) - m_pos(1));
+        if (d_xy >= 1.0) {
+            const double f = this->_clamp_feed_for_rotary(d_xy, bc_angular_dist_deg, travel_feed);
+            GCodeG1Formatter w0;
+            w0.emit_xyz(over);
+            w0.emit_axis('B', angle_b_deg, GCodeFormatter::XYZF_EXPORT_DIGITS);
+            w0.emit_axis('C', angle_c_deg, GCodeFormatter::XYZF_EXPORT_DIGITS);
+            w0.emit_f(f);
+            w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
+            out += w0.string();
+        } else {
+            // Negligible XY traverse: a combined move would force F ~ 0, so rotate in place at the
+            // safe height (bounded to ROT_FEED) and then traverse the small XY remainder.
+            GCodeG1Formatter wr;
+            wr.emit_axis('B', angle_b_deg, GCodeFormatter::XYZF_EXPORT_DIGITS);
+            wr.emit_axis('C', angle_c_deg, GCodeFormatter::XYZF_EXPORT_DIGITS);
+            wr.emit_f(rot_feed);
+            wr.emit_comment(GCodeWriter::full_gcode_comment, comment);
+            out += wr.string();
+            GCodeG1Formatter w0;
+            w0.emit_xyz(over);
+            w0.emit_f(travel_feed);
+            w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
+            out += w0.string();
+        }
+    } else {
+        GCodeG1Formatter w0;
+        w0.emit_xyz(over);
+        w0.emit_f(travel_feed);
+        w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
+        out += w0.string();
+    }
+
+    GCodeG1Formatter w1;
+    w1.emit_xyz(target);
+    w1.emit_f(travel_feed);
+    w1.emit_comment(GCodeWriter::full_gcode_comment, comment);
+    out += w1.string();
+
+    m_pos     = dest;
+    m_lifted  = 0.;
+    m_to_lift = 0.;
+    this->set_current_position_clear(true);
+    return out;
 }
 
 std::string GCodeWriter::travel_to_z(double z, const std::string &comment, bool force)
@@ -1102,8 +1290,10 @@ std::string GCodeWriter::extrude_to_xy(const Vec2d &point, double dE, const std:
     if(std::abs(dE) <= std::numeric_limits<double>::epsilon())
         force_no_extrusion = true;
 
-    if (!force_no_extrusion)
+    if (!force_no_extrusion) {
         filament()->extrude(dE);
+        m_max_extrusion_z = std::max(m_max_extrusion_z, m_pos.z());   // UNLAYERED_MOD
+    }
 
     //BBS: take plate offset into consider
     Vec2d point_on_plate = { point(0) - m_x_offset, point(1) - m_y_offset };
@@ -1124,8 +1314,10 @@ std::string GCodeWriter::extrude_arc_to_xy(const Vec2d& point, const Vec2d& cent
 {
     m_pos(0) = point(0);
     m_pos(1) = point(1);
-    if (!force_no_extrusion)
+    if (!force_no_extrusion) {
         filament()->extrude(dE);
+        m_max_extrusion_z = std::max(m_max_extrusion_z, m_pos.z());   // UNLAYERED_MOD
+    }
 
     Vec2d point_on_plate = { point(0) - m_x_offset, point(1) - m_y_offset };
 
@@ -1139,20 +1331,43 @@ std::string GCodeWriter::extrude_arc_to_xy(const Vec2d& point, const Vec2d& cent
     return w.string();
 }
 
-std::string GCodeWriter::extrude_to_xyz(const Vec3d &point, double dE, const std::string &comment, bool force_no_extrusion)
+std::string GCodeWriter::extrude_to_xyz(const Vec3d &point, double dE, const std::string &comment, bool force_no_extrusion, Transform3d trafo)
 {
     // Check if Z actually changes (at export precision) before emitting it.
     // ZAA sloped extrusions call this for every segment, but many consecutive
     // segments share the same quantized Z — emitting it every time is redundant.
-    bool z_changed = (GCodeG1Formatter::quantize_xyzf(point(2)) != GCodeG1Formatter::quantize_xyzf(m_pos(2)));
+    // Compare in the MACHINE frame: `point` is slice-frame, m_pos is the last machine position.
+    const Vec3d new_pos   = apply_test_rotation2(point, trafo, this->extruder_offset_xy());
+    const bool  z_changed = (GCodeG1Formatter::quantize_xyzf(new_pos(2)) != GCodeG1Formatter::quantize_xyzf(m_pos(2)));
 
-    m_pos = point;
+    m_pos = new_pos;
+    // Machine-space floor check. This invariant used to live in GCode::_extrude, where it tested
+    // m_nominal_z + z_diff -- SLICE-frame z, which equals the nozzle height only for planar prints.
+    // A cut-plane segment slices in its own rebased frame, where a negative z is both legitimate
+    // and meaningless as a height; the un-rotation into machine coordinates happens on the line
+    // above. Testing m_pos.z() applies the same 0.1mm invariant to the coordinate actually being
+    // written, so planar output is bit-identical while a rotated segment is judged on where the
+    // nozzle really goes.
+    // Only for moves that actually lay material. The checks this replaced sat on the two extrusion
+    // paths in GCode::_extrude, so guarding wipes and pre-travel inward moves here would be new
+    // behaviour for ordinary prints -- those legitimately move without extruding, and a policy
+    // check does not belong in a motion primitive.
+    // UNLAYERED_MOD: require the point to be low in BOTH frames. A legacy layer_rotation_b/c chunk
+    // standing tilted on the bed has first-layer wall points at machine z ~ 0 where the tilted slice
+    // meets the bottom face; the slice-frame check this replaced accepted those and such prints
+    // have been made, so a machine-only test turned every one of them into "GCode: very low z".
+    // Planar prints are unchanged (both frames coincide), and a cut-plane segment's rebased frame
+    // still passes a legitimately negative slice z as long as the nozzle really is above the bed.
+    if (! force_no_extrusion && m_pos.z() < 0.1 && point.z() < 0.1)
+        throw RuntimeError("GCode: very low z");
     m_lifted = 0;
-    if (!force_no_extrusion)
+    if (!force_no_extrusion) {
         filament()->extrude(dE);
+        m_max_extrusion_z = std::max(m_max_extrusion_z, m_pos.z());   // UNLAYERED_MOD
+    }
 
     //BBS: take plate offset into consider
-    Vec3d point_on_plate = { point(0) - m_x_offset, point(1) - m_y_offset, point(2) };
+    Vec3d point_on_plate = { m_pos(0) - m_x_offset, m_pos(1) - m_y_offset, m_pos(2) };
 
     GCodeG1Formatter w;
     if (z_changed)

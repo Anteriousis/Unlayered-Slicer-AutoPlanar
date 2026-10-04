@@ -22,6 +22,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/FilamentLoad.hpp
     GUI/AboutDialog.cpp
     GUI/AboutDialog.hpp
+    GUI/AccentColor.hpp
     GUI/AmsMappingPopup.cpp
     GUI/AmsMappingPopupUpdate.cpp
     GUI/AmsMappingPopup.hpp
@@ -166,6 +167,12 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoBrimEars.hpp
     GUI/Gizmos/GLGizmoCut.cpp
     GUI/Gizmos/GLGizmoCut.hpp
+    GUI/Gizmos/GLGizmoCutChunks.cpp
+    GUI/Gizmos/GLGizmoCutChunks.hpp
+    GUI/Gizmos/GLGizmoCutPlanes.cpp
+    GUI/Gizmos/GLGizmoCutPlanes.hpp
+    GUI/Gizmos/GLGizmoSkeleton.cpp
+    GUI/Gizmos/GLGizmoSkeleton.hpp
     GUI/Gizmos/GLGizmoEmboss.cpp
     GUI/Gizmos/GLGizmoEmboss.hpp
     #GUI/Gizmos/GLGizmoFaceDetector.cpp
@@ -324,11 +331,19 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/ProgressIndicator.hpp
     GUI/Jobs/RotoptimizeJob.cpp
     GUI/Jobs/RotoptimizeJob.hpp
+    GUI/Jobs/SkeletonJob.cpp
+    GUI/Jobs/SkeletonJob.hpp
     GUI/Jobs/SendJob.cpp
     GUI/Jobs/SendJob.hpp
     GUI/Jobs/SLAImportDialog.hpp
     GUI/Jobs/SLAImportJob.cpp
     GUI/Jobs/SLAImportJob.hpp
+    GUI/Jobs/FirmwareUpdateJob.cpp
+    GUI/Jobs/FirmwareUpdateJob.hpp
+    GUI/Jobs/NonplanarSliceJob.cpp
+    GUI/Jobs/NonplanarSliceJob.hpp
+    GUI/Jobs/SysFilesUpdateJob.cpp
+    GUI/Jobs/SysFilesUpdateJob.hpp
     GUI/Jobs/ThreadSafeQueue.hpp
     GUI/Jobs/UpgradeNetworkJob.cpp
     GUI/Jobs/UpgradeNetworkJob.hpp
@@ -517,6 +532,12 @@ set(SLIC3R_GUI_SOURCES
     GUI/TroubleshootDialog.cpp
     GUI/TroubleshootDialog.hpp
     GUI/UnsavedChangesDialog.cpp
+    GUI/DuetConnectionPicker.cpp
+    GUI/DuetConnectionPicker.hpp
+    GUI/FirmwareUpdateDialog.cpp
+    GUI/FirmwareUpdateDialog.hpp
+    GUI/SysFilesUpdateDialog.cpp
+    GUI/SysFilesUpdateDialog.hpp
     GUI/UnsavedChangesDialog.hpp
     GUI/UpdateDialogs.cpp
     GUI/UpdateDialogs.hpp
@@ -528,6 +549,13 @@ set(SLIC3R_GUI_SOURCES
     GUI/UserManager.hpp
     GUI/UserNotification.cpp
     GUI/UserNotification.hpp
+    GUI/WebAppBridge.cpp
+    GUI/WebAppBridge.hpp
+    GUI/WebAppPanel.cpp
+    GUI/WebAppPanel.hpp
+    GUI/WebAppSettings.cpp
+    GUI/WebAppSettings.hpp
+    GUI/WebAppSlot.hpp
     GUI/WebDownPluginDlg.cpp
     GUI/WebDownPluginDlg.hpp
     GUI/WebGuideDialog.cpp
@@ -675,6 +703,8 @@ set(SLIC3R_GUI_SOURCES
     pchheader.hpp
     Utils/ASCIIFolding.cpp
     Utils/ASCIIFolding.hpp
+    Utils/AppUpdater.cpp
+    Utils/AppUpdater.hpp
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp
@@ -692,6 +722,18 @@ set(SLIC3R_GUI_SOURCES
     Utils/CrealityHostDiscovery.hpp
     Utils/Duet.cpp
     Utils/Duet.hpp
+    Utils/DuetClient.cpp
+    Utils/DuetClient.hpp
+    Utils/DuetRrfClient.cpp
+    Utils/DuetRrfClient.hpp
+    Utils/DuetSerialClient.cpp
+    Utils/DuetSerialClient.hpp
+    Utils/NonplanarSliceClient.cpp
+    Utils/NonplanarSliceClient.hpp
+    Utils/FirmwareBundle.cpp
+    Utils/FirmwareBundle.hpp
+    Utils/SysFilesBundle.cpp
+    Utils/SysFilesBundle.hpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
     Utils/EmbossStyleManager.cpp
@@ -712,8 +754,6 @@ set(SLIC3R_GUI_SOURCES
     Utils/HexFile.hpp
     Utils/Http.cpp
     Utils/Http.hpp
-    Utils/InstanceID.cpp
-    Utils/InstanceID.hpp
     Utils/json_diff.cpp
     Utils/json_diff.hpp
     Utils/minilzo_extension.cpp
@@ -813,6 +853,9 @@ if (APPLE)
     FIND_LIBRARY(DISKARBITRATION_LIBRARY DiskArbitration)
 endif ()
 
+# Unlayered: the update check is a plain GET of a static JSON file, so ORCA_UPDATER_SIG_KEY is never
+# set here and ORCA_UPDATER_SIG_KEY_AVAILABLE stays 0. The generated header is kept because upstream
+# now also routes the bundled Python location through it (ORCA_BUNDLED_PYTHON_ROOT).
 set(ORCA_UPDATER_SIG_KEY_B64 "${ORCA_UPDATER_SIG_KEY}")
 string(STRIP "${ORCA_UPDATER_SIG_KEY_B64}" ORCA_UPDATER_SIG_KEY_B64)
 string(REPLACE "\n" "" ORCA_UPDATER_SIG_KEY_B64 "${ORCA_UPDATER_SIG_KEY_B64}")

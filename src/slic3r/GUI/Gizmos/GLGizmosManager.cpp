@@ -18,6 +18,9 @@
 #include "slic3r/GUI/Gizmos/GLGizmoFuzzySkin.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoBrimEars.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoCut.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoCutChunks.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoCutPlanes.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoSkeleton.hpp"
 //#include "slic3r/GUI/Gizmos/GLGizmoFaceDetector.hpp"
 //#include "slic3r/GUI/Gizmos/GLGizmoHollow.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSeam.hpp"
@@ -71,9 +74,24 @@ std::vector<size_t> GLGizmosManager::get_selectable_idxs() const
                 out.push_back(i);
     }
     else {
-        for (size_t i = 0; i < m_gizmos.size(); ++i)
+        // Unlayered: which of the fork's own gizmos appear on the toolbar.
+        //   CutChunks / RotateLayers - superseded by CutPlanes and unused; never shown.
+        //   Skeleton                 - Advanced settings visibility and above.
+        //   CutPlanes                - every mode, Simple included.
+        // The policy lives here rather than in each gizmo's on_is_selectable() so it reads in
+        // one place, and the two dead gizmos are HIDDEN rather than unregistered: EType is
+        // indexed straight into m_gizmos ("Order must match index in m_gizmos!"), so dropping
+        // entries from the vector would silently renumber every gizmo after them.
+        const ConfigOptionMode mode = wxGetApp().get_mode();
+        for (size_t i = 0; i < m_gizmos.size(); ++i) {
+            const unsigned int sprite_id = m_gizmos[i]->get_sprite_id();
+            if (sprite_id == (unsigned int) CutChunks || sprite_id == (unsigned int) RotateLayers)
+                continue;
+            if (sprite_id == (unsigned int) Skeleton && mode < comAdvanced)
+                continue;
             if (m_gizmos[i]->is_selectable())
                 out.push_back(i);
+        }
     }
     return out;
 }
@@ -149,6 +167,18 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case(EType::Cut):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_cut_dark.svg" : "toolbar_cut.svg");
             break;
+        case (EType::CutChunks):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_cut_chunks_dark.svg" : "toolbar_cut_chunks.svg"); // new
+            break;
+        case (EType::RotateLayers):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_rotate_layerss_dark.svg" : "toolbar_rotate_layers.svg"); // new
+            break;
+        case (EType::Skeleton):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_skeleton_dark.svg" : "toolbar_skeleton.svg");
+            break;
+        case (EType::CutPlanes):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_cut_planes_dark.svg" : "toolbar_cut_planes.svg"); // new
+            break;
         case(EType::FdmSupports):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_support_dark.svg" : "toolbar_support.svg");
             break;
@@ -209,6 +239,10 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoFlatten(m_parent, m_is_dark ? "toolbar_flatten_dark.svg" : "toolbar_flatten.svg", EType::Flatten));
     m_gizmos.emplace_back(new GLGizmoCut3D(m_parent, m_is_dark ? "toolbar_cut_dark.svg" : "toolbar_cut.svg", EType::Cut));
     m_gizmos.emplace_back(new GLGizmoMeshBoolean(m_parent, m_is_dark ? "toolbar_meshboolean_dark.svg" : "toolbar_meshboolean.svg", EType::MeshBoolean));
+    m_gizmos.emplace_back(new GLGizmoCutChunks3D(m_parent, m_is_dark ? "toolbar_cut_chunks_dark.svg" : "toolbar_cut_chunks.svg", EType::CutChunks)); //new
+    m_gizmos.emplace_back(new GLGizmoRotateLayers3D(m_parent, m_is_dark ? "toolbar_rotate_layers_dark.svg" : "toolbar_rotate_layers.svg", EType::RotateLayers)); //new
+    m_gizmos.emplace_back(new GLGizmoSkeleton(m_parent, m_is_dark ? "toolbar_skeleton_dark.svg" : "toolbar_skeleton.svg", EType::Skeleton)); //new
+    m_gizmos.emplace_back(new GLGizmoCutPlanes(m_parent, m_is_dark ? "toolbar_cut_planes_dark.svg" : "toolbar_cut_planes.svg", EType::CutPlanes)); //new
     m_gizmos.emplace_back(new GLGizmoFdmSupports(m_parent, m_is_dark ? "toolbar_support_dark.svg" : "toolbar_support.svg", EType::FdmSupports));
     m_gizmos.emplace_back(new GLGizmoSeam(m_parent, m_is_dark ? "toolbar_seam_dark.svg" : "toolbar_seam.svg", EType::Seam));
     m_gizmos.emplace_back(new GLGizmoFuzzySkin(m_parent, m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg", EType::FuzzySkin));
@@ -360,6 +394,15 @@ void GLGizmosManager::refresh_on_off_state()
 {
     if (m_serializing || m_current == Undefined || m_gizmos.empty())
         return;
+
+    // Unlayered: a gizmo the toolbar no longer offers must not stay open -- otherwise
+    // dropping from Advanced to Simple leaves Skeleton active with no icon to close it.
+    const std::vector<size_t> selectable = get_selectable_idxs();
+    if (std::find(selectable.begin(), selectable.end(), (size_t) m_current) == selectable.end()) {
+        if (activate_gizmo(Undefined))
+            update_data();
+        return;
+    }
 
     // FS: Why update data after Undefined gizmo activation?
     if (!m_gizmos[m_current]->is_activable() && activate_gizmo(Undefined))
@@ -1336,6 +1379,10 @@ GLGizmosManager::EType GLGizmosManager::get_gizmo_from_name(const std::string& g
     {
         std::string filename = m_gizmos[selectable_idxs[idx]]->get_icon_filename();
         filename = filename.substr(0, filename.find_first_of('.'));
+        // Icon filenames carry the theme ("toolbar_cut_planes_dark"); hints.ini names the gizmo
+        // theme-neutrally, so gizmo highlighting used to silently no-op in dark mode.
+        if (filename.size() > 5 && filename.compare(filename.size() - 5, 5, "_dark") == 0)
+            filename.resize(filename.size() - 5);
         if (filename == gizmo_name)
             return (GLGizmosManager::EType)selectable_idxs[idx];
     }
@@ -1357,12 +1404,16 @@ bool GLGizmosManager::generate_icons_texture()
         }
     }
 
+    // 1: white only, 2: gray only, 3: hover plate, 4: selected plate, 0: as authored.
+    // The active gizmo used to be marked by the teal accent path inside its own SVG; the
+    // grayscale palette flattens that onto the Activable grey, so the plate carries it now.
+    // See the ramp in GLTexture::load_from_svg_files_as_sprites_array.
     std::vector<std::pair<int, bool>> states;
     states.push_back(std::make_pair(1, false)); // Activable
-    states.push_back(std::make_pair(0, false)); // Hovered
-    states.push_back(std::make_pair(0, true));  // Selected
+    states.push_back(std::make_pair(3, false)); // Hovered
+    states.push_back(std::make_pair(4, false)); // Selected
     states.push_back(std::make_pair(2, false)); // Disabled
-    states.push_back(std::make_pair(0, false)); // HighlightedShown
+    states.push_back(std::make_pair(3, false)); // HighlightedShown
     states.push_back(std::make_pair(2, false)); // HighlightedHidden
 
     unsigned int sprite_size_px = (unsigned int)m_layout.scaled_icons_size();
@@ -1514,6 +1565,10 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "Color Painting";
     case GLGizmosManager::EType::FuzzySkin:
         return "Fuzzy Skin Painting";
+    case GLGizmosManager::EType::Skeleton:
+        return "Skeleton Cut";
+    case GLGizmosManager::EType::CutPlanes:
+        return "Cut Planes";
     default:
         return "";
     }

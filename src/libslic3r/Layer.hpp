@@ -136,6 +136,7 @@ public:
     coordf_t            slice_z;       // Z used for slicing in unscaled coordinates
     coordf_t            print_z;       // Z used for printing in unscaled coordinates
     coordf_t            height;        // layer height in unscaled coordinates
+    coordf_t            angle_b;        //angle about y axis to slice at.
     coordf_t            bottom_z() const { return this->print_z - this->height; }
 
     //Extrusions estimated to be seriously malformed, estimated during "Estimating curled extrusions" step. These lines should be avoided during fast travels.
@@ -258,10 +259,12 @@ protected:
     friend std::vector<Layer*> new_layers(PrintObject*, const std::vector<coordf_t>&);
     friend std::string fix_slicing_errors(PrintObject* object, LayerPtrs&, const std::function<void()>&, int &);
 
-    Layer(size_t id, PrintObject *object, coordf_t height, coordf_t print_z, coordf_t slice_z) :
-        upper_layer(nullptr), lower_layer(nullptr), slicing_errors(false),
-        slice_z(slice_z), print_z(print_z), height(height),
-        m_id(id), m_object(object) {}
+    Layer(size_t id, PrintObject *object, coordf_t height, coordf_t print_z, coordf_t slice_z, coordf_t angle_b = 1.0) :
+        upper_layer(nullptr), lower_layer(nullptr), slicing_errors(false), slice_z(slice_z)
+        , print_z(print_z)
+        , height(height)
+        , angle_b(angle_b)
+        , m_id(id), m_object(object) {}
     virtual ~Layer();
 
 //BBS: method to simplify support path

@@ -204,7 +204,7 @@ elseif(APPLE)
             --disable-test-modules
             ${_python_build_tgt}
             # Tcl/Tk 9.0 (e.g. from Homebrew) is incompatible with CPython 3.12's
-            # _tkinter; OrcaSlicer's embedded Python does not need tkinter anyway.
+            # _tkinter; Unlayered Slicer's embedded Python does not need tkinter anyway.
             py_cv_module__tkinter=n/a
         )
     endif()

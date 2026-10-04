@@ -194,7 +194,7 @@ echo -n "[9/9] Generating Linux app..."
     cp -fl "${ORIGINAL_BINARY_LOCATION}" "$BIN_DIR/@SLIC3R_APP_CMD@"
 
     # Bundle the embedded Python runtime (interpreter + stdlib) that CMake staged
-    # next to the binary. OrcaSlicer resolves PYTHONHOME at <resources_dir>/../lib/python,
+    # next to the binary. Unlayered Slicer resolves PYTHONHOME at <resources_dir>/../lib/python,
     # which is $APPDIR/lib/python (resources_dir is $APPDIR/resources). Staging it here,
     # before the dependency-closure pass below, lets that pass also bundle the extension
     # modules' shared libraries; libpython itself is found via rpath ($ORIGIN entries set
@@ -406,8 +406,8 @@ cat << EOF >@SLIC3R_APP_CMD@
 DIR=\$(dirname "\$(readlink -f "\$0")")
 export APPDIR="\${APPDIR:-\$DIR}"
 
-# FIXME: OrcaSlicer segfault workarounds
-# 1) OrcaSlicer will segfault on systems where locale info is not as expected (i.e. Holo-ISO arch-based distro)
+# FIXME: Unlayered Slicer segfault workarounds
+# 1) Unlayered Slicer will segfault on systems where locale info is not as expected (i.e. Holo-ISO arch-based distro)
 export LC_ALL=C
 
 if [ "\$XDG_SESSION_TYPE" = "wayland" ] && [ "\$ZINK_DISABLE_OVERRIDE" != "1" ]; then
@@ -451,7 +451,7 @@ echo -n "Creating Appimage for distribution..."
     chmod +x ../build_appimage.sh
     if ../build_appimage.sh; then
         popd > /dev/null
-        mv package_appimage/"@SLIC3R_APP_KEY@_Linux_V@SoftFever_VERSION@.AppImage" "@SLIC3R_APP_KEY@_Linux_V@SoftFever_VERSION@.AppImage"
+        APP_IMAGE_NAME="@SLIC3R_APP_KEY@"; APP_IMAGE_NAME="${APP_IMAGE_NAME// /_}_Linux_V@UNLAYERED_VERSION@.AppImage"; mv "package_appimage/${APP_IMAGE_NAME}" "${APP_IMAGE_NAME}"
         rm -fR package_appimage
     else
         popd > /dev/null

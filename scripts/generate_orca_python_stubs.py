@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate Python .pyi stubs for OrcaSlicer's pybind11 plugin API.
+Generate Python .pyi stubs for the Unlayered Slicer pybind11 plugin API.
 
 The script creates a local virtual environment, installs pybind11-stubgen,
 imports the built `orca` extension module, and writes stubs to ./typings by

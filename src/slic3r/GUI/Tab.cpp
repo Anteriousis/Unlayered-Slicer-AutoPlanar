@@ -59,6 +59,10 @@
 #include "BedShapeDialog.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
 #include "WipeTowerDialog.hpp"
+#include "WebAppPanel.hpp"
+#include "WebAppSettings.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include "DeviceCore/DevManager.h"
 
@@ -320,7 +324,7 @@ void Tab::create_preset_tab()
     //search input
     m_search_item = new StaticBox(m_top_panel);
     StateColor box_colour(std::pair<wxColour, int>(*wxWHITE, StateColor::Normal));
-    StateColor box_border_colour(std::pair<wxColour, int>(wxColour("#009688"), StateColor::Normal)); // ORCA match border color with other input/combo boxes
+    StateColor box_border_colour(std::pair<wxColour, int>(wxColour("#767676"), StateColor::Normal)); // ORCA match border color with other input/combo boxes
 
     m_search_item->SetBackgroundColor(box_colour);
     m_search_item->SetBorderColor(box_border_colour);
@@ -1804,6 +1808,14 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         return;
     }
 
+    // Unlayered: report the edit to embedded web applications (WEB_APP_BRIDGE.md section 4.5),
+    // unless it arrived over the bridge, which reports it once itself as source:"bridge".
+    if (!WebAppBridgeWriteScope::active())
+        WebAppPanel::notify_all("slicer.settingsChanged",
+                                nlohmann::json{{"type", WebAppSettings::preset_type_name(m_type)},
+                                               {"keys", nlohmann::json::array({opt_key})},
+                                               {"source", "user"}});
+
     // Keep this preset's "plugins" manifest in sync when a plugin picker changes, so full_config() and
     // save_to_json() always find resolved "name;uuid;capability" references and rebuild it nowhere else.
     // Also drop any plugin config override entries for a capability the change just stopped
@@ -2007,19 +2019,23 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         }
     }
 
-    if (opt_key == "print_sequence" && m_config->opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject) {
-        auto printer_structure_opt = m_preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure");
-        if (printer_structure_opt && printer_structure_opt->value == PrinterStructure::psI3) {
-            wxString msg_text = _(L("The current printer does not support timelapse in Traditional Mode when printing By-Object."));
-            msg_text += "\n\n" + _(L("Still print by object?"));
+    if (opt_key == "print_sequence") {
+        auto seq = m_config->opt_enum<PrintSequence>("print_sequence");
+        if (seq == PrintSequence::ByObject || seq == PrintSequence::ByGroup) {
+            auto printer_structure_opt = m_preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure");
+            if (printer_structure_opt && printer_structure_opt->value == PrinterStructure::psI3) {
+                wxString seq_name = seq == PrintSequence::ByObject ? _(L("By-Object")) : _(L("By-Group"));
+                wxString msg_text = wxString::Format(_(L("The current printer does not support timelapse in Traditional Mode when printing %s.")), seq_name);
+                msg_text += "\n\n" + wxString::Format(_(L("Still print %s?")), seq_name);
 
-            MessageDialog dialog(wxGetApp().plater(), msg_text, "", wxICON_WARNING | wxYES | wxNO);
-            auto          answer = dialog.ShowModal();
-            if (answer == wxID_NO) {
-                DynamicPrintConfig new_conf = *m_config;
-                new_conf.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
-                m_config_manipulation.apply(m_config, &new_conf);
-                wxGetApp().plater()->update();
+                MessageDialog dialog(wxGetApp().plater(), msg_text, "", wxICON_WARNING | wxYES | wxNO);
+                auto          answer = dialog.ShowModal();
+                if (answer == wxID_NO) {
+                    DynamicPrintConfig new_conf = *m_config;
+                    new_conf.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
+                    m_config_manipulation.apply(m_config, &new_conf);
+                    wxGetApp().plater()->update();
+                }
             }
         }
     }
@@ -2076,6 +2092,9 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
                 Slic3r::Preset *filament         = filaments.find_preset(filament_presets[interface_filament_id]);
                 std::string     filament_type    = filament->config.option<ConfigOptionStrings>("filament_type")->values[0];
 
+                // UNLAYERED_MOD: this dialog is about soluble support interfaces. It used to also
+                // zero layer_rotation_b/c and test_input here, silently discarding the user's
+                // multiplanar orientation. Those keys have nothing to do with supports.
                 new_conf.set_key_value("support_top_z_distance", new ConfigOptionFloat(0));
                 new_conf.set_key_value("support_interface_spacing", new ConfigOptionFloat(0));
                 new_conf.set_key_value("support_interface_pattern", new ConfigOptionEnum<SupportMaterialInterfacePattern>(SupportMaterialInterfacePattern::smipRectilinearInterlaced));
@@ -2431,12 +2450,8 @@ void Tab::on_presets_changed()
     // Check if printer agent needs switching
     if (m_type == Preset::TYPE_PRINTER) {
         wxGetApp().switch_printer_agent();
-
-        // Trigger per-vendor preset update check
-        const Preset& printer_preset = m_preset_bundle->printers.get_edited_preset();
-        if (printer_preset.vendor) {
-            wxGetApp().get_preset_updater()->check_vendor_update(printer_preset.vendor->id);
-        }
+        // Unlayered: this used to fire a per-vendor profile update check at OrcaSlicer's profile
+        // service on every printer preset change. Vendor profiles now ship with the application.
     }
 
     bool is_bbl_vendor_preset = m_preset_bundle->is_bbl_vendor();
@@ -2472,6 +2487,12 @@ void Tab::on_presets_changed()
     auto& plate_list = wxGetApp().plater()->get_partplate_list();
     for (auto plate : plate_list.get_plate_list())
         plate->update_slice_result_valid_state(false);
+
+    // Unlayered: for embedded web applications (WEB_APP_BRIDGE.md section 4.5).
+    WebAppPanel::notify_all("slicer.presetChanged",
+                            nlohmann::json{{"type", WebAppSettings::preset_type_name(m_type)},
+                                           {"selected", m_presets->get_selected_preset_name()},
+                                           {"dirty", m_presets->current_is_dirty()}});
 }
 
 void Tab::build_preset_description_line(ConfigOptionsGroup* optgroup)
@@ -2944,6 +2965,7 @@ void TabPrint::build()
 
         // Support
         optgroup = page->new_optgroup(L("Advanced"), L"param_advanced");
+        optgroup->append_single_option_line("test_input", "support_settings_advanced#z-distance");
         optgroup->append_single_option_line("support_top_z_distance", "support_settings_advanced#z-distance");
         optgroup->append_single_option_line("support_bottom_z_distance", "support_settings_advanced#z-distance");
         optgroup->append_single_option_line("tree_support_wall_count", "support_settings_advanced#support-wall-loops");
@@ -3033,7 +3055,11 @@ void TabPrint::build()
         optgroup->append_single_option_line("interlocking_depth", "multimaterial_settings_advanced#interlocking-depth");
         optgroup->append_single_option_line("interlocking_boundary_avoidance", "multimaterial_settings_advanced#interlocking-boundary-avoidance");
 
-    page = add_options_page(L("Others"), "custom-gcode_other"); // ORCA: icon only visible on placeholders
+page = add_options_page(L("Others"), "custom-gcode_other"); // ORCA: icon only visible on placeholders
+        optgroup = page->new_optgroup(L("Multiplanar"), L"param_multiplanar"); //second paramater is the icon used
+        optgroup->append_single_option_line("layer_rotation_b", "others_settings_multiplanar#layer_rotation_b");
+        optgroup->append_single_option_line("layer_rotation_c", "others_settings_multiplanar#layer_rotation_c");
+
         optgroup = page->new_optgroup(L("Skirt"), L"param_skirt");
         optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops");
         optgroup->append_single_option_line("skirt_type", "others_settings_skirt#type");
@@ -3060,6 +3086,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("slicing_mode", "others_settings_special_mode#slicing-mode");
         optgroup->append_single_option_line("print_sequence", "others_settings_special_mode#print-sequence");
         optgroup->append_single_option_line("print_order", "others_settings_special_mode#intra-layer-order");
+        optgroup->append_single_option_line("print_group", "others_settings_special_mode#print-group");
         optgroup->append_single_option_line("spiral_mode", "others_settings_special_mode#spiral-vase");
         optgroup->append_single_option_line("spiral_mode_smooth", "others_settings_special_mode#smooth-spiral");
         optgroup->append_single_option_line("spiral_mode_max_xy_smoothing", "others_settings_special_mode#max-xy-smoothing");
@@ -3089,6 +3116,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("gcode_comments", "others_settings_g_code_output#verbose-g-code");
         optgroup->append_single_option_line("gcode_label_objects", "others_settings_g_code_output#label-objects");
         optgroup->append_single_option_line("exclude_object", "others_settings_g_code_output#exclude-objects");
+
         option = optgroup->get_option("filename_format");
         // option.opt.full_width = true;
         option.opt.is_code = true;
@@ -5416,7 +5444,55 @@ PageShp TabPrinter::build_kinematics_page()
 
         optgroup->append_line(line);
     }
-    auto optgroup = page->new_optgroup(L("Advanced"), "param_advanced");
+
+    // Orca non-planar printing section. The "Enable non-planar printing" toggle is the
+    // source of truth for non-planar printing; the rest of the section is hidden unless on.
+    auto optgroup = page->new_optgroup(L("Non-planar Printing"), "param_nonplanar");
+    optgroup->append_single_option_line("enable_nonplanar", "printer_motion_ability#non-planar-printing");
+    // "Virtual" is the fourth value of this dropdown; the old virtual_5axis checkbox is gone and the
+    // key is now derived in DynamicPrintConfig::normalize_fdm_1.
+    optgroup->append_single_option_line("axis_selection", "printer_motion_ability#non-planar-printing");
+    {
+        Line line = { L("A axis (about X)"), L("Rotation limits of the A axis (rotation about X). Stored for the machine definition; not consumed by slicing yet.") };
+        line.label_path = "printer_motion_ability#non-planar-printing";
+        line.append_option(optgroup->get_option("axis_a_rotation_min"));
+        line.append_option(optgroup->get_option("axis_a_rotation_max"));
+        line.append_option(optgroup->get_option("axis_a_continuous"));
+        optgroup->append_line(line);
+    }
+    {
+        Line line = { L("B axis (about Y)"), L("Rotation limits of the B axis (rotation about Y). Stored for the machine definition; not consumed by slicing yet.") };
+        line.label_path = "printer_motion_ability#non-planar-printing";
+        line.append_option(optgroup->get_option("axis_b_rotation_min"));
+        line.append_option(optgroup->get_option("axis_b_rotation_max"));
+        line.append_option(optgroup->get_option("axis_b_continuous"));
+        optgroup->append_line(line);
+    }
+    {
+        Line line = { L("C axis (about Z)"), L("Rotation limits of the C axis (rotation about Z). Stored for the machine definition; not consumed by slicing yet.") };
+        line.label_path = "printer_motion_ability#non-planar-printing";
+        line.append_option(optgroup->get_option("axis_c_rotation_min"));
+        line.append_option(optgroup->get_option("axis_c_rotation_max"));
+        line.append_option(optgroup->get_option("axis_c_continuous"));
+        optgroup->append_line(line);
+    }
+    // radius / max_build_height / min_build_height are deliberately NOT shown. They feed nothing but
+    // the translucent per-chunk cylinder drawn in the Prepare view (GLCanvas3D::_render_chunk_build_volumes
+    // is their only reader); they constrain no slicing and validate nothing, so presenting them beside
+    // real machine geometry invited people to "configure" their printer with them. The keys are still
+    // in the printer preset, so existing values are honoured and the visualization is unchanged.
+    // Inter-chunk travel geometry.
+    optgroup->append_single_option_line("nonplanar_departure_distance", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_approach_distance", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_nozzle_to_b_axis", "printer_motion_ability#non-planar-printing");
+    // Hotend model for the post-slice collision check.
+    optgroup->append_single_option_line("nonplanar_hotend_cone_height", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_hotend_cone_angle", "printer_motion_ability#non-planar-printing");
+    // Virtual-only safety limits; hidden unless Printer type = Virtual (see toggle_line below).
+    optgroup->append_single_option_line("nonplanar_virtual_max_angle", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_virtual_max_z", "printer_motion_ability#non-planar-printing");
+
+    optgroup = page->new_optgroup(L("Advanced"), "param_advanced");
     optgroup->append_single_option_line("emit_machine_limits_to_gcode", "printer_motion_ability#emit-limits-to-g-code");
 
     // resonance avoidance ported over from qidi slicer
@@ -6235,6 +6311,51 @@ void TabPrinter::toggle_options()
     }
 
     if (m_active_page->title() == L("Motion ability")) {
+        // Orca non-planar: the "Enable non-planar printing" master toggle SHOWS/HIDES the
+        // rest of the section (toggle_line, not toggle_option), per design feedback. This
+        // includes "virtual 5-axis" -- it only makes sense while non-planar printing is on.
+        bool enable_nonplanar = m_config->opt_bool("enable_nonplanar");
+        // Each axis's min/max/continuous share one Line, so toggling that line by any one
+        // of its options hides/shows the whole row. Iterate the 3 axis-line anchors, the two
+        // standalone lines, the 3 build-volume lines and the 3 inter-chunk travel lines rather
+        // than every option key.
+        for (auto opt : {"axis_selection",
+                         "axis_a_rotation_min", "axis_b_rotation_min", "axis_c_rotation_min",
+                         "nonplanar_departure_distance", "nonplanar_approach_distance",
+                         "nonplanar_nozzle_to_b_axis", "nonplanar_hotend_cone_height", "nonplanar_hotend_cone_angle",
+                         "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"})
+            toggle_line(opt, enable_nonplanar);
+
+        // Within the section, grey out the rotary axis that is NOT part of the selected
+        // pair (e.g. A/B selected -> C's options are disabled), and grey out an axis's
+        // min/max rotation limits when that axis is set to "continuous" (the limits don't
+        // apply then). The continuous checkbox itself stays editable while the axis is active.
+        if (enable_nonplanar) {
+            AxisSelection sel = m_config->opt_enum<AxisSelection>("axis_selection");
+            // Virtual drives no rotary axis at all, so axis_{a,b,c}_active are all false and the
+            // whole per-axis block greys out on its own. Its two limits take their place.
+            const bool is_virtual = sel == AxisSelection::Virtual;
+            for (auto opt : {"nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"})
+                toggle_line(opt, is_virtual);
+            // Grey what the selected printer type never reads, so the panel stops implying that
+            // every box matters. Virtual keeps the nozzle upright and the transition explicitly
+            // drops the B-arm term ("there is no arm to swing", GCode.cpp), so the arm length is
+            // dead there.
+            toggle_option("nonplanar_nozzle_to_b_axis", ! is_virtual);
+            bool a_on = axis_a_active(sel);
+            bool b_on = axis_b_active(sel);
+            bool c_on = axis_c_active(sel);
+            toggle_option("axis_a_continuous", a_on);
+            toggle_option("axis_b_continuous", b_on);
+            toggle_option("axis_c_continuous", c_on);
+            bool a_lim = a_on && !m_config->opt_bool("axis_a_continuous");
+            bool b_lim = b_on && !m_config->opt_bool("axis_b_continuous");
+            bool c_lim = c_on && !m_config->opt_bool("axis_c_continuous");
+            for (auto opt : {"axis_a_rotation_min", "axis_a_rotation_max"}) toggle_option(opt, a_lim);
+            for (auto opt : {"axis_b_rotation_min", "axis_b_rotation_max"}) toggle_option(opt, b_lim);
+            for (auto opt : {"axis_c_rotation_min", "axis_c_rotation_max"}) toggle_option(opt, c_lim);
+        }
+
         auto gcf = m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
         update_input_shaper_menu(gcf);
 

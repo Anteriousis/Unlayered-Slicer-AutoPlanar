@@ -442,6 +442,21 @@ void Preview::check_layers_slider_values(std::vector<CustomGCode::Item>& ticks_f
 static int find_close_layer_idx(const std::vector<double> &zs, double &z, double eps)
 {
     if (zs.empty()) return -1;
+    // UNLAYERED_MOD: with tilted layers the per-layer Z is no longer monotonic (each chunk restarts
+    // near the bed), and a binary search over an unsorted range is undefined. Fall back to a linear
+    // nearest-match, which gives the same answer as the search below whenever the range is sorted.
+    if (! std::is_sorted(zs.begin(), zs.end())) {
+        int    best      = -1;
+        double best_dist = eps;
+        for (size_t i = 0; i < zs.size(); ++i) {
+            const double dist = std::abs(zs[i] - z);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best      = int(i);
+            }
+        }
+        return best;
+    }
     auto it_h = std::lower_bound(zs.begin(), zs.end(), z);
     if (it_h == zs.end()) {
         auto it_l = it_h;
@@ -586,6 +601,9 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
 
     auto print_mode_stat = m_gcode_result->print_statistics.modes.front();
     m_layers_slider->SetLayersTimes(m_canvas->get_gcode_layers_times_cache(), print_mode_stat.time);
+    // UNLAYERED_MOD: tell the slider which layers are horizontal, so tilted ones do not advertise an
+    // exact Z. Empty for an ordinary print, which keeps the labels exactly as they were.
+    m_layers_slider->SetLayersPlanar(m_canvas->get_gcode_layers_planar());
 
     // Suggest the auto color change, if model looks like sign
     if (m_layers_slider->IsNewPrint()) {

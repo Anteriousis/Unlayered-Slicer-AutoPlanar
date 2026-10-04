@@ -31,6 +31,10 @@ class PhysicalPrinterDialog : public DPIDialog
 
     Button*     m_printhost_browse_btn              {nullptr};
     Button*     m_printhost_test_btn                {nullptr};
+    // Duet/RepRapFirmware only; opens the firmware updater for this printer.
+    Button*     m_printhost_firmware_btn            {nullptr};
+    // Duet/RepRapFirmware only; writes config.g and the macros to the printer's SD card.
+    Button*     m_printhost_sysfiles_btn            {nullptr};
     Button*     m_printhost_logout_btn              {nullptr};
     Button*     m_printhost_cafile_browse_btn       {nullptr};
     Button*     m_printhost_port_browse_btn         {nullptr};

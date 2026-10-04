@@ -4,15 +4,14 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "monthly"
+      interval: "quarterly"
+    # Monthly runs left ~8 stale branches on the fork. Cap the queue so reviewing them stays optional.
+    open-pull-requests-limit: 2
     ignore: # Only suggest major updates for built-in actions
       - dependency-name: "github/*"
         update-types: ["version-update:semver-patch", "version-update:semver-minor"]
       - dependency-name: "actions/*"
         update-types: ["version-update:semver-patch", "version-update:semver-minor"]
-  # Docker dependencies
-  - package-ecosystem: "docker"
-    directory: "/"
-    schedule:
-      interval: "monthly"
+  # The "docker" ecosystem was configured here too, but there is no Dockerfile at the repository
+  # root, so it never had anything to update.
   # no support for c/cpp

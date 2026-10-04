@@ -349,6 +349,61 @@ enum class ModelVolumeType : int {
     SUPPORT_ENFORCER,
 };
 
+// A single non-destructive cut plane, authored in the Prepare view and stored in the object's
+// LOCAL coordinate frame. Unlike the legacy "Cut Chunks" workflow, defining a plane never splits
+// the ModelObject in the user's model: the mesh partition and the derived per-segment print
+// orientation are computed at slice time from the full set of planes. The plane normal is the
+// single source of truth for the print direction of the far-from-bed side; B/C angles are derived
+// downstream, never stored here (avoids the "stored angle vs. geometry drift" class of bugs).
+struct CutPlane
+{
+    Vec3d point  { Vec3d::Zero() };   // a point on the plane (object-local coordinates)
+    Vec3d normal { Vec3d::UnitZ() };  // unit normal (object-local); print direction of the far side
+
+    // Optional override of the build direction of the segment on this plane's far side. When unset
+    // (has_build_normal == false) the segment builds along `normal`, tracking later plane edits; a
+    // set override is independent of the plane orientation until reset. Object-local, like `normal`.
+    Vec3d build_normal     { Vec3d::Zero() };
+    bool  has_build_normal { false };
+    // Per-plane toggle: a disabled plane is ignored by segmentation without being discarded.
+    bool  enabled          { true };
+
+    Vec3d effective_build_normal() const { return has_build_normal ? build_normal : normal; }
+
+    bool operator==(const CutPlane &rhs) const {
+        return point == rhs.point && normal == rhs.normal
+            && build_normal == rhs.build_normal && has_build_normal == rhs.has_build_normal
+            && enabled == rhs.enabled;
+    }
+    bool operator!=(const CutPlane &rhs) const { return !(*this == rhs); }
+
+    template<class Archive> void serialize(Archive &ar) { ar(point, normal, build_normal, has_build_normal, enabled); }
+};
+
+// The non-destructive set of cut planes attached to a ModelObject. By default the peel/print
+// order of the derived sections is automatic — each piece merges into the chunk of the plane it
+// sits on (the seat rule), regardless of list order. When `user_ordered` is set (the gizmo sets it
+// on a manual reorder) the LIST ORDER alone decides: the first plane in the list peels last, so it
+// prints last and claims any contested far-of-both wedge. `enabled` lets the user toggle the whole
+// declarative-multiplanar behavior off for an object without discarding the authored planes.
+struct CutPlaneStack
+{
+    bool                  enabled      { false };
+    bool                  user_ordered { false };
+    std::vector<CutPlane> planes;
+
+    bool empty()  const { return planes.empty(); }
+    // Active == the feature is on AND at least one plane exists (what slicing keys off).
+    bool active() const { return enabled && ! planes.empty(); }
+
+    bool operator==(const CutPlaneStack &rhs) const {
+        return enabled == rhs.enabled && user_ordered == rhs.user_ordered && planes == rhs.planes;
+    }
+    bool operator!=(const CutPlaneStack &rhs) const { return !(*this == rhs); }
+
+    template<class Archive> void serialize(Archive &ar) { ar(enabled, user_ordered, planes); }
+};
+
 // A printable object, possibly having multiple print volumes (each with its own set of parameters and materials),
 // and possibly having multiple modifier volumes, each modifier volume with its set of parameters and materials.
 // Each ModelObject may be instantiated mutliple times, each instance having different placement on the print bed,
@@ -370,6 +425,9 @@ public:
     ModelConfigObject 		config;
     // Variation of a layer thickness for spans of Z coordinates + optional parameter overrides.
     t_layer_config_ranges   layer_config_ranges;
+    // Declarative, non-destructive cut planes for multiplanar (5-axis) printing. Authored in the
+    // Prepare view; the object is never physically split in the user's model. Empty for ordinary objects.
+    CutPlaneStack           cut_planes;
     // Profile of increasing z to a layer height, to be linearly interpolated when calculating the layers.
     // The pairs of <z, layer_height> are packed into a 1D array.
     LayerHeightProfile      layer_height_profile;
@@ -434,6 +492,8 @@ public:
     // Even if true is returned, the layer height profile may be "flat" with no difference to default layering.
     bool                    has_custom_layering() const
         { return ! this->layer_config_ranges.empty() || ! this->layer_height_profile.empty(); }
+    // True when declarative multiplanar cut planes are enabled and present for this object.
+    bool                    has_cut_planes() const { return this->cut_planes.active(); }
 
     ModelInstance*          add_instance();
     ModelInstance*          add_instance(const ModelInstance &instance);
@@ -685,7 +745,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, cut_planes);
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -698,7 +758,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, cut_planes);
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)
@@ -1405,6 +1465,14 @@ private:
     Polygon convex_hull; // BBS
 
     // Constructor, which assigns a new unique ID.
+    // UNLAYERED_MOD: auto_drop defaults to true, as upstream (#11801) has it. It was flipped to
+    // false in 79790311cf, which silently broke every path that creates an instance and then
+    // relies on ModelObject::ensure_on_bed() to seat it -- ensure_on_bed() skips instances with
+    // auto_drop off (Model.cpp), so the call became a no-op. ObjectList::load_mesh_object() is
+    // the visible case: it centres the mesh on the origin without going through
+    // center_around_origin(), so origin_translation stays zero and the instance offset is Z=0;
+    // with the seating call dead, an added primitive lands half below the bed. Paths that want
+    // the flag off set it explicitly (bbs_3mf.cpp on load, GLGizmoCutChunks per chunk).
     explicit ModelInstance(ModelObject* object)
         : print_volume_state(ModelInstancePVS_Inside), printable(true), auto_drop(true), object(object), m_assemble_initialized(false)
     {

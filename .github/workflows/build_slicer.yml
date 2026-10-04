@@ -1,0 +1,555 @@
+on:
+    workflow_call:
+      inputs:
+        cache-key:
+          required: false
+          type: string
+        cache-path:
+          required: false
+          type: string
+        os:
+          required: true
+          type: string
+        arch:
+          required: false
+          type: string
+        compiler:
+          required: false
+          type: string
+          default: msvc
+        macos-combine-only:
+          required: false
+          type: boolean
+          default: false
+
+jobs:
+  build_orca:
+    name: Build Unlayered Slicer
+    runs-on: ${{ inputs.os }}
+    env:
+      date:
+      ver:
+      ver_pure:
+      ubuntu-ver: '2404'
+      ubuntu-ver-str: '_Ubuntu2404'
+      ORCA_UPDATER_SIG_KEY: ${{ secrets.ORCA_UPDATER_SIG_KEY }}
+      # Branches whose builds are published to the nightly release. The
+      # belt-printer branch ships alongside main but its assets carry a `_belt`
+      # suffix (nightly_suffix) so they never overwrite the main nightly assets.
+      deploy_nightly: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/belt-printer' }}
+      nightly_suffix: ${{ github.ref == 'refs/heads/belt-printer' && '_belt' || '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - name: load cached deps
+        if: ${{ !(runner.os == 'macOS' && inputs.macos-combine-only) }}
+        uses: actions/cache@v6
+        with:
+          path: ${{ inputs.cache-path }}
+          key: ${{ inputs.cache-key }}
+          fail-on-cache-miss: true
+
+      - uses: lukka/get-cmake@latest
+        # The windows-11-arm runner needs CMake <= 3.31 (handled in the next step).
+        if: ${{ !(runner.os == 'Windows' && inputs.arch == 'arm64') }}
+        with:
+          cmakeVersion: "~4.3.0"  # use most recent 4.3.x version
+          useLocalCache: true         # <--= Use the local cache (default is 'false').
+          useCloudCache: true
+
+      - name: Install CMake 3.31.x (Windows ARM64)
+        # windows-11-arm ships CMake 4.x, which removed pre-3.5 policy
+        # compatibility AND has incomplete ASM_ARMASM linker modules
+        # (breaks Boost.Context on ARM64). Pin to the last 3.x release.
+        if: runner.os == 'Windows' && inputs.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $ver = "3.31.6"
+          $url = "https://github.com/Kitware/CMake/releases/download/v$ver/cmake-$ver-windows-arm64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\cmake.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\cmake.zip" -DestinationPath "$env:RUNNER_TEMP\cmake" -Force
+          $cmakeBin = "$env:RUNNER_TEMP\cmake\cmake-$ver-windows-arm64\bin"
+          if (-not (Test-Path "$cmakeBin\cmake.exe")) { throw "cmake.exe not found at $cmakeBin" }
+          Add-Content -Path $env:GITHUB_PATH -Value $cmakeBin
+
+      - name: Get the version and date on Ubuntu and macOS
+        if: runner.os != 'Windows'
+        run: |
+          ver_pure=$(grep 'set(UNLAYERED_VERSION' version.inc | cut -d '"' -f2)
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            ver="PR-${{ github.event.number }}"
+            git_commit_hash="${{ github.event.pull_request.head.sha }}"
+          else
+            ver=V$ver_pure
+            git_commit_hash=""
+          fi
+          echo "ver=$ver" >> $GITHUB_ENV
+          echo "ver_pure=$ver_pure" >> $GITHUB_ENV
+          echo "date=$(date +'%Y%m%d')" >> $GITHUB_ENV
+          echo "git_commit_hash=$git_commit_hash" >> $GITHUB_ENV
+          # Per-arch Linux AppImage naming: amd64 keeps the historical unsuffixed
+          # name (arch_suffix empty). Unused on macOS/Windows.
+          if [ '${{ inputs.arch }}' = 'aarch64' ]; then
+            echo "arch_suffix=_aarch64" >> $GITHUB_ENV
+          fi
+        shell: bash
+
+      - name: Get the version and date on Windows
+        if: runner.os == 'Windows'
+        run: |
+          $date = Get-Date -Format 'yyyyMMdd'
+          $ref = "${{ github.ref }}"
+          $eventName = "${{ github.event_name }}"
+          $prNumber = "${{ github.event.number }}"
+
+          # ver_pure is always the raw UNLAYERED_VERSION, even on a PR build. CPack names the
+          # installer from it, so a path built out of $ver would not exist on pull requests.
+          $versionContent = Get-Content version.inc -Raw
+          if ($versionContent -match 'set\(UNLAYERED_VERSION "(.*?)"\)') {
+              $ver_pure = $matches[1]
+          }
+
+          if ($eventName -eq 'pull_request') {
+              $ver = "PR" + $prNumber
+              $git_commit_hash = "${{ github.event.pull_request.head.sha }}"
+          } else {
+              $ver = "V$ver_pure"
+              $git_commit_hash = ""
+          }
+
+          echo "ver=$ver" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          echo "ver_pure=$ver_pure" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          echo "date=$date" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          echo "git_commit_hash=$git_commit_hash" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          echo "date: ${{ env.date }} version: ${{ env.ver }}"
+        shell: pwsh
+
+#   Mac
+      - name: Install tools mac
+        if: runner.os == 'macOS' && !inputs.macos-combine-only
+        run: |
+          if [ -z "${{ vars.SELF_HOSTED }}" ]; then
+            brew install libtool
+            brew list
+          fi
+          mkdir -p ${{ github.workspace }}/deps/build/${{ inputs.arch }}
+
+      - name: Free disk space
+        if: runner.os == 'macOS' && !inputs.macos-combine-only && !vars.SELF_HOSTED
+        run: |
+          df -hI /dev/disk3s1s1
+          sudo find /Applications -maxdepth 1 -type d -name "Xcode_*.app" ! -name "Xcode_15.4.app" -exec rm -rf {} +
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/*
+          df -hI /dev/disk3s1s1
+
+      - name: Build slicer mac
+        if: runner.os == 'macOS' && !inputs.macos-combine-only
+        working-directory: ${{ github.workspace }}
+        # arm64 only: build the tests here; the unit_tests_macos job runs them.
+        env:
+          ORCA_TESTS_BUILD_ONLY: ${{ inputs.arch == 'arm64' && '1' || '' }}
+        run: |
+          ./build_release_macos.sh -s -n -x ${{ !vars.SELF_HOSTED && '-j 3' || '' }} -a ${{ inputs.arch }} -t 10.15 ${{ inputs.arch == 'arm64' && '-T' || '' }}
+
+      - name: Pack unit tests mac
+        if: runner.os == 'macOS' && !inputs.macos-combine-only && inputs.arch == 'arm64'
+        working-directory: ${{ github.workspace }}
+        run: tar -cvf build_tests.tar build/arm64/tests
+
+      - name: Upload Test Artifact mac
+        if: runner.os == 'macOS' && !inputs.macos-combine-only && inputs.arch == 'arm64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.sha }}-tests-macos-arm64
+          overwrite: true
+          path: build_tests.tar
+          retention-days: 5
+          if-no-files-found: error
+
+      - name: Build system preset cache (macOS)
+        if: runner.os == 'macOS' && !inputs.macos-combine-only
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        # The bundle was already packed from resources/, so the caches have to be
+        # installed into it here; the source tree keeps its JSONs for later jobs.
+        run: ./scripts/build_preset_cache.sh -b build/${{ inputs.arch }} build/${{ inputs.arch }}/UnlayeredSlicer/UnlayeredSlicer.app/Contents/Resources/profiles
+
+      - name: Pack macOS app bundle ${{ inputs.arch }}
+        if: runner.os == 'macOS' && !inputs.macos-combine-only
+        working-directory: ${{ github.workspace }}
+        run: |
+          tar -czvf UnlayeredSlicer_Mac_bundle_${{ inputs.arch }}_${{ github.sha }}.tar.gz -C build/${{ inputs.arch }} UnlayeredSlicer
+
+      - name: Upload macOS app bundle ${{ inputs.arch }}
+        if: runner.os == 'macOS' && !inputs.macos-combine-only
+        uses: actions/upload-artifact@v7
+        with:
+          name: UnlayeredSlicer_Mac_bundle_${{ inputs.arch }}_${{ github.sha }}
+          path: ${{ github.workspace }}/UnlayeredSlicer_Mac_bundle_${{ inputs.arch }}_${{ github.sha }}.tar.gz
+
+      - name: Download macOS app bundles
+        if: runner.os == 'macOS' && inputs.macos-combine-only
+        uses: actions/download-artifact@v8
+        with:
+          pattern: UnlayeredSlicer_Mac_bundle_*_${{ github.sha }}
+          path: ${{ github.workspace }}/mac_bundles
+
+      - name: Extract macOS app bundles
+        if: runner.os == 'macOS' && inputs.macos-combine-only
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p build/arm64 build/x86_64
+          arm_bundle=$(find "${{ github.workspace }}/mac_bundles/UnlayeredSlicer_Mac_bundle_arm64_${{ github.sha }}" -name '*.tar.gz' -print -quit)
+          x86_bundle=$(find "${{ github.workspace }}/mac_bundles/UnlayeredSlicer_Mac_bundle_x86_64_${{ github.sha }}" -name '*.tar.gz' -print -quit)
+          tar -xzvf "$arm_bundle" -C "${{ github.workspace }}/build/arm64"
+          tar -xzvf "$x86_bundle" -C "${{ github.workspace }}/build/x86_64"
+
+      - name: Build universal mac app bundle
+        if: runner.os == 'macOS' && inputs.macos-combine-only
+        working-directory: ${{ github.workspace }}
+        run: |
+          ./build_release_macos.sh -u -x ${{ !vars.SELF_HOSTED && '-j 3' || '' }} -a universal -t 10.15
+
+ # Thanks to RaySajuuk, it's working now
+      - name: Sign app and notary
+        if: vars.MACOS_SIGNING == 'true' && runner.os == 'macOS' && inputs.macos-combine-only
+        working-directory: ${{ github.workspace }}
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+        run: |
+          # Load the `retry` helper (retries flaky commands such as `hdiutil create`).
+          source ${{ github.workspace }}/scripts/retry.sh
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode --output $CERTIFICATE_PATH
+          security create-keychain -p $KEYCHAIN_PASSWORD $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p $KEYCHAIN_PASSWORD $KEYCHAIN_PATH
+          # Set the temporary keychain as the default to prevent codesign from accessing the locked login keychain
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security import $CERTIFICATE_PATH -P $P12_PASSWORD -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k $P12_PASSWORD $KEYCHAIN_PATH
+          # codesign --deep is deprecated and cannot sign the bundled Python
+          # runtime (see relocate_python_runtime in build_release_macos.sh).
+          # Sign every nested Mach-O in the bundle explicitly -- notarization
+          # requires the hardened-runtime signature on each -- then seal the
+          # bundle itself last, and verify so coverage gaps fail at CI time
+          # rather than at notarization.
+          ENTITLEMENTS=${{ github.workspace }}/scripts/disable_validation.entitlements
+          sign() {
+            codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$CERTIFICATE_ID" "$@"
+          }
+          sign_app() {
+            local app="$1"
+            local machos=()
+            # file is batched via xargs (per-file it costs minutes); universal
+            # binaries also print per-architecture lines, dropped by grep -v.
+            while IFS= read -r f; do machos+=("$f"); done < <(
+              find "$app" -type f -print0 |
+                xargs -0 file --no-pad --mime-type -- |
+                grep -v ' (for architecture ' |
+                grep ': application/x-mach-binary$' |
+                sed 's|: application/x-mach-binary$||'
+            )
+            if [ "${#machos[@]}" -eq 0 ]; then
+              echo "ERROR: no Mach-O files found in $app -- detection is broken" >&2
+              exit 1
+            fi
+            echo "signing ${#machos[@]} Mach-O files in $app"
+            sign "${machos[@]}"
+            sign --verbose "$app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+          }
+          sign_app "${{ github.workspace }}/build/universal/UnlayeredSlicer/UnlayeredSlicer.app"
+          # Sign UnlayeredSlicer_profile_validator.app if it exists
+          if [ -f "${{ github.workspace }}/build/universal/UnlayeredSlicer/UnlayeredSlicer_profile_validator.app/Contents/MacOS/UnlayeredSlicer_profile_validator" ]; then
+            sign_app "${{ github.workspace }}/build/universal/UnlayeredSlicer/UnlayeredSlicer_profile_validator.app"
+          fi
+          
+          # Create main Unlayered Slicer DMG without the profile validator helper
+          mkdir -p ${{ github.workspace }}/build/universal/UnlayeredSlicer_dmg
+          rm -rf ${{ github.workspace }}/build/universal/UnlayeredSlicer_dmg/*
+          cp -R ${{ github.workspace }}/build/universal/UnlayeredSlicer/UnlayeredSlicer.app ${{ github.workspace }}/build/universal/UnlayeredSlicer_dmg/
+          ln -sfn /Applications ${{ github.workspace }}/build/universal/UnlayeredSlicer_dmg/Applications
+          retry hdiutil create -volname "Unlayered Slicer" -srcfolder ${{ github.workspace }}/build/universal/UnlayeredSlicer_dmg -ov -format UDZO Unlayered_Slicer_Mac_universal_${{ env.ver }}.dmg
+          codesign --deep --force --verbose --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$CERTIFICATE_ID" Unlayered_Slicer_Mac_universal_${{ env.ver }}.dmg
+          
+          # Create separate UnlayeredSlicer_profile_validator DMG if the app exists
+          if [ -f "${{ github.workspace }}/build/universal/UnlayeredSlicer/UnlayeredSlicer_profile_validator.app/Contents/MacOS/UnlayeredSlicer_profile_validator" ]; then
+            mkdir -p ${{ github.workspace }}/build/universal/UnlayeredSlicer_profile_validator_dmg
+            rm -rf ${{ github.workspace }}/build/universal/UnlayeredSlicer_profile_validator_dmg/*
+            cp -R ${{ github.workspace }}/build/universal/UnlayeredSlicer/UnlayeredSlicer_profile_validator.app ${{ github.workspace }}/build/universal/UnlayeredSlicer_profile_validator_dmg/
+            ln -sfn /Applications ${{ github.workspace }}/build/universal/UnlayeredSlicer_profile_validator_dmg/Applications
+            retry hdiutil create -volname "Unlayered Slicer Profile Validator" -srcfolder ${{ github.workspace }}/build/universal/UnlayeredSlicer_profile_validator_dmg -ov -format UDZO Unlayered_Slicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
+            codesign --deep --force --verbose --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$CERTIFICATE_ID" Unlayered_Slicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
+          fi
+          
+          # Notarize main DMG
+          xcrun notarytool submit "Unlayered_Slicer_Mac_universal_${{ env.ver }}.dmg" --apple-id "${{ secrets.APPLE_DEV_ACCOUNT }}" --team-id "${{ secrets.TEAM_ID }}" --password "${{ secrets.APP_PWD }}" --wait
+          xcrun stapler staple Unlayered_Slicer_Mac_universal_${{ env.ver }}.dmg
+
+          # Notarize profile validator DMG if it exists
+          if [ -f "Unlayered_Slicer_profile_validator_Mac_universal_${{ env.ver }}.dmg" ]; then
+            xcrun notarytool submit "Unlayered_Slicer_profile_validator_Mac_universal_${{ env.ver }}.dmg" --apple-id "${{ secrets.APPLE_DEV_ACCOUNT }}" --team-id "${{ secrets.TEAM_ID }}" --password "${{ secrets.APP_PWD }}" --wait
+            xcrun stapler staple Unlayered_Slicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
+          fi
+
+      - name: Create DMG without notary
+        if: vars.MACOS_SIGNING != 'true' && runner.os == 'macOS' && inputs.macos-combine-only
+        working-directory: ${{ github.workspace }}
+        run: |
+          # Load the `retry` helper (retries flaky commands such as `hdiutil create`).
+          source ${{ github.workspace }}/scripts/retry.sh
+          mkdir -p ${{ github.workspace }}/build/universal/UnlayeredSlicer_dmg
+          rm -rf ${{ github.workspace }}/build/universal/UnlayeredSlicer_dmg/*
+          cp -R ${{ github.workspace }}/build/universal/UnlayeredSlicer/UnlayeredSlicer.app ${{ github.workspace }}/build/universal/UnlayeredSlicer_dmg/
+          ln -sfn /Applications ${{ github.workspace }}/build/universal/UnlayeredSlicer_dmg/Applications
+          retry hdiutil create -volname "Unlayered Slicer" -srcfolder ${{ github.workspace }}/build/universal/UnlayeredSlicer_dmg -ov -format UDZO Unlayered_Slicer_Mac_universal_${{ env.ver }}.dmg
+          
+          # Create separate UnlayeredSlicer_profile_validator DMG if the app exists
+          if [ -f "${{ github.workspace }}/build/universal/UnlayeredSlicer/UnlayeredSlicer_profile_validator.app/Contents/MacOS/UnlayeredSlicer_profile_validator" ]; then
+            mkdir -p ${{ github.workspace }}/build/universal/UnlayeredSlicer_profile_validator_dmg
+            rm -rf ${{ github.workspace }}/build/universal/UnlayeredSlicer_profile_validator_dmg/*
+            cp -R ${{ github.workspace }}/build/universal/UnlayeredSlicer/UnlayeredSlicer_profile_validator.app ${{ github.workspace }}/build/universal/UnlayeredSlicer_profile_validator_dmg/
+            ln -sfn /Applications ${{ github.workspace }}/build/universal/UnlayeredSlicer_profile_validator_dmg/Applications
+            retry hdiutil create -volname "Unlayered Slicer Profile Validator" -srcfolder ${{ github.workspace }}/build/universal/UnlayeredSlicer_profile_validator_dmg -ov -format UDZO Unlayered_Slicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
+          fi
+
+      # Delete the per-arch bundles only after signing/DMG creation succeeded, so a
+      # failed run keeps them available for a re-run instead of forcing a full rebuild.
+      - name: Delete intermediate per-arch artifacts
+        if: success() && runner.os == 'macOS' && inputs.macos-combine-only
+        uses: geekyeggo/delete-artifact@v6
+        with:
+          name: |
+            UnlayeredSlicer_Mac_bundle_arm64_${{ github.sha }}
+            UnlayeredSlicer_Mac_bundle_x86_64_${{ github.sha }}
+
+      - name: Upload artifacts mac
+        if: runner.os == 'macOS' && inputs.macos-combine-only
+        uses: actions/upload-artifact@v7
+        with:
+          name: Unlayered_Slicer_Mac_universal_${{ env.ver }}
+          path: ${{ github.workspace }}/Unlayered_Slicer_Mac_universal_${{ env.ver }}.dmg
+
+      - name: Upload UnlayeredSlicer_profile_validator DMG mac
+        if: runner.os == 'macOS' && inputs.macos-combine-only && !vars.SELF_HOSTED
+        uses: actions/upload-artifact@v7
+        with:
+          name: Unlayered_Slicer_profile_validator_Mac_universal_DMG_${{ env.ver }}
+          path: ${{ github.workspace }}/Unlayered_Slicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
+          if-no-files-found: ignore
+
+
+
+# Windows
+      - name: Set Windows build variables
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ("${{ inputs.arch }}" -eq "arm64") {
+            "BUILD_DIR=build-arm64"  | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+            "ARCH_SUFFIX=_arm64"     | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          } else {
+            "BUILD_DIR=build"        | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+            "ARCH_SUFFIX=_x64"       | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          }
+
+      - name: setup MSVC
+        if: runner.os == 'Windows'
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Install nsis
+        if: runner.os == 'Windows' && !vars.SELF_HOSTED
+        run: |
+          dir "C:/Program Files (x86)/Windows Kits/10/Include"
+          choco install nsis
+
+      - name: Build slicer Win
+        if: runner.os == 'Windows'
+        working-directory: ${{ github.workspace }}
+        # Orca: Removed Netfabb STL fixing service support in favor of CGAL.
+        # env:
+        #   WindowsSdkDir: 'C:\Program Files (x86)\Windows Kits\10\'
+        #   WindowsSDKVersion: '10.0.26100.0\'
+        # "tests" builds the unit tests too; the unit_tests_windows_* jobs run them.
+        run: |
+          $arch = "${{ inputs.arch }}"
+          # -l selects clang-cl and -x Ninja; together they build the slicer with clang.
+          $clang = "${{ inputs.compiler }}" -eq "clang"
+          $flags = if ($clang) { "-l", "-x" } else { @() }
+          if ($clang) {
+            # Build against the same VC toolchain and SDK as the dependencies.
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $vs = & $vswhere -latest -property installationPath
+            $devArch = if ($arch -eq "arm64") { "arm64" } else { "amd64" }
+            Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+            Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=$devArch"
+          }
+          if ($arch -eq "arm64") { .\build_release_vs.bat slicer arm64 @flags tests } else { .\build_release_vs.bat slicer @flags tests }
+        shell: pwsh
+
+      - name: Build system preset cache (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        # Shipped into both the already-installed tree (portable zip, MSIX) and
+        # the checkout cpack re-installs from when it builds the NSIS installer.
+        run: scripts\build_preset_cache.bat --prune-source "%BUILD_DIR%" "resources\profiles" "%BUILD_DIR%\UnlayeredSlicer\resources\profiles"
+
+      - name: Pack unit tests Win
+        if: runner.os == 'Windows'
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: tar -cvf build_tests.tar ${{ env.BUILD_DIR }}/tests
+
+      - name: Upload Test Artifact Win
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.sha }}-tests-windows-${{ inputs.arch }}
+          overwrite: true
+          path: build_tests.tar
+          retention-days: 5
+          if-no-files-found: error
+
+      # NSIS is x86-only; it runs (and the installer it emits runs) under ARM64's
+      # x86 emulation, packaging the native arm64 payload from build-arm64.
+      - name: Create installer Win
+        if: runner.os == 'Windows' && !vars.SELF_HOSTED
+        working-directory: ${{ github.workspace }}/${{ env.BUILD_DIR }}
+        run: |
+          cpack -G NSIS
+
+      - name: Pack app
+        if: runner.os == 'Windows'
+        working-directory: ${{ github.workspace }}/${{ env.BUILD_DIR }}
+        shell: cmd
+        run: '"C:/Program Files/7-Zip/7z.exe" a -tzip Unlayered_Slicer_Windows_${{ env.ver }}${{ env.ARCH_SUFFIX }}_portable.zip ${{ github.workspace }}/${{ env.BUILD_DIR }}/UnlayeredSlicer'
+
+      - name: Pack PDB
+        if: runner.os == 'Windows' && inputs.arch != 'arm64' && !vars.SELF_HOSTED
+        working-directory: ${{ github.workspace }}/${{ env.BUILD_DIR }}/src/Release
+        shell: cmd
+        run: '"C:/Program Files/7-Zip/7z.exe" a -m0=lzma2 -mx9 Debug_PDB_${{ env.ver }}_for_developers_only.7z  *.pdb'
+
+      - name: Upload artifacts Win zip
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Unlayered_Slicer_Windows_${{ env.ver }}${{ env.ARCH_SUFFIX }}_portable
+          path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/UnlayeredSlicer
+
+      - name: Upload artifacts Win installer
+        if: runner.os == 'Windows' && !vars.SELF_HOSTED
+        uses: actions/upload-artifact@v7
+        with:
+          name: Unlayered_Slicer_Windows_${{ env.ver }}${{ env.ARCH_SUFFIX }}
+          # The exact name CPack produces, from CPACK_PACKAGE_FILE_NAME in CMakeLists.txt (which
+          # appends ARCH_SUFFIX). Not a glob: a glob that matches nothing makes this step a silent
+          # no-op, which is how the installer quietly stopped being uploaded after the rebrand.
+          path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/Unlayered_Slicer_Windows_Installer_V${{ env.ver_pure }}${{ env.ARCH_SUFFIX }}.exe
+          if-no-files-found: error
+
+      - name: Upload artifacts Win PDB
+        if: runner.os == 'Windows' && inputs.arch != 'arm64' && !vars.SELF_HOSTED
+        uses: actions/upload-artifact@v7
+        with:
+          name: PDB
+          path: ${{ github.workspace }}/build/src/Release/Debug_PDB_${{ env.ver }}_for_developers_only.7z
+
+      - name: Upload UnlayeredSlicer_profile_validator Win
+        if: runner.os == 'Windows' && inputs.arch != 'arm64' && !vars.SELF_HOSTED
+        uses: actions/upload-artifact@v7
+        with:
+          name: Unlayered_Slicer_profile_validator_Windows_${{ env.ver }}
+          path: ${{ github.workspace }}/build/src/Release/UnlayeredSlicer_profile_validator.exe
+
+
+
+
+      - name: Build MSIX Store package Win
+        if: runner.os == 'Windows' && !vars.SELF_HOSTED
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          ./scripts/msix/build_msix.ps1 `
+            -InstallDir "${{ github.workspace }}/${{ env.BUILD_DIR }}/UnlayeredSlicer" `
+            -OutputPath "${{ github.workspace }}/${{ env.BUILD_DIR }}/UnlayeredSlicer_Windows_MSIX_${{ env.ver }}${{ env.ARCH_SUFFIX }}.msix" `
+            -Architecture "${{ inputs.arch }}" `
+            -IdentityName "${{ vars.ORCA_MSIX_IDENTITY_NAME || 'Unlayered3D.UnlayeredSlicer' }}" `
+            -Publisher "${{ vars.ORCA_MSIX_PUBLISHER || 'CN=38F7EA55-C73B-4072-B3B2-C8E0EA15BB82' }}" `
+            -PublisherDisplayName "${{ vars.ORCA_MSIX_PUBLISHER_DISPLAY_NAME || 'Unlayered 3D' }}"
+
+      - name: Upload artifacts Win MSIX
+        if: runner.os == 'Windows' && !vars.SELF_HOSTED
+        uses: actions/upload-artifact@v7
+        with:
+          name: Unlayered_Slicer_Windows_MSIX_${{ env.ver }}${{ env.ARCH_SUFFIX }}
+          path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/UnlayeredSlicer_Windows_MSIX_${{ env.ver }}${{ env.ARCH_SUFFIX }}.msix
+
+# Ubuntu
+      - name: Apt-Install Dependencies
+        if: runner.os == 'Linux' && !vars.SELF_HOSTED
+        uses: ./.github/actions/apt-install-deps
+
+        # Tests must built at the same time as the slicer;
+        # if you untangle them feel free to separate them here too
+      - name: Build slicer and tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Build + tar the unit tests (-t) on both Linux legs so each arch
+          # (x86_64 + aarch64) gets tested by its own unit_tests_linux_* job.
+          ./build_linux.sh -istrlL
+          ./scripts/check_appimage_libs.sh ./build/package ./build/package/bin/unlayered-slicer
+          appimage=./build/Unlayered_Slicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch_suffix }}_${{ env.ver }}.AppImage
+          mv -n ./build/Unlayered_Slicer_Linux_V${{ env.ver_pure }}.AppImage "$appimage"
+          chmod +x "$appimage"
+          tar -cvf build_tests.tar build/tests
+
+        # Use tar because upload-artifacts won't always preserve directory structure
+        # and doesn't preserve file permissions
+      - name: Upload Test Artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.sha }}-tests-linux-${{ inputs.arch == 'aarch64' && 'aarch64' || 'x86_64' }}
+          overwrite: true
+          path: build_tests.tar
+          retention-days: 5
+          if-no-files-found: error
+
+
+      - name: Build orca_custom_preset_tests
+        if: github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64'
+        working-directory: ${{ github.workspace }}/build/src/Release
+        shell: bash
+        run: |
+          ./UnlayeredSlicer_profile_validator -p ${{ github.workspace }}/resources/profiles -g 1
+          cd ${{ github.workspace }}/resources/profiles
+          zip -r orca_custom_preset_tests.zip user/
+
+      - name: Upload artifacts Ubuntu
+        if: ${{ ! env.ACT && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: Unlayered_Slicer_Linux_ubuntu_${{ env.ubuntu-ver }}${{ env.arch_suffix }}_${{ env.ver }}
+          path: "./build/Unlayered_Slicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch_suffix }}_${{ env.ver }}.AppImage"
+
+      - name: Upload UnlayeredSlicer_profile_validator Ubuntu
+        if: ${{ ! env.ACT && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: Unlayered_Slicer_profile_validator_Linux_ubuntu_${{ env.ubuntu-ver }}_${{ env.ver }}
+          path: './build/src/Release/UnlayeredSlicer_profile_validator'
+
+
+

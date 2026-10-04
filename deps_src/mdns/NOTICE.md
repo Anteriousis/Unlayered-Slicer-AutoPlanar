@@ -26,7 +26,7 @@ It sends a DNS-SD meta-discovery query (`_services._dns-sd._udp.local.`),
 listens for ~5 seconds, and returns `{ip, service_name}` for every
 service announcement whose name contains any of the given prefixes.
 
-OrcaSlicer uses this to find Creality K-series printers on the LAN
+Unlayered Slicer uses this to find Creality K-series printers on the LAN
 (service-name prefix "Creality"), since K-series firmware announces
 each printer under a per-device-unique service type
 `_Creality-<MAC-derived-hex>._udp.local.` that no fixed-name query can
@@ -34,6 +34,6 @@ target.
 
 - Source: CrealityOfficial/CrealityPrint v7.1.1
   `src/slic3r/GUI/print_manage/utils/cxmdns.{h,cpp}`
-- License: GNU AGPL-3.0 (compatible with OrcaSlicer's AGPL-3.0; see
+- License: GNU AGPL-3.0 (compatible with Unlayered Slicer's AGPL-3.0; see
   top-level LICENSE.txt)
 - Imported: 2026-05-19

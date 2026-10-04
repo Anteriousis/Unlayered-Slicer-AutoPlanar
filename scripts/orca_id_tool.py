@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Assign and validate the deterministic ids of OrcaSlicer system profiles: the
+Assign and validate the deterministic ids of Unlayered Slicer system profiles: the
 per-product filament_id and the per-preset setting_id.
 
 Both ids are pure functions of the thing they name, so nothing here is ever
@@ -1292,7 +1292,7 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="orca_id_tool.py", allow_abbrev=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Assign and validate the deterministic ids of OrcaSlicer system\n"
+        description="Assign and validate the deterministic ids of Unlayered Slicer system\n"
                     "profiles: the per-product filament_id and the per-preset setting_id.\n"
                     "\n"
                     "Both are pure functions of the profile's own identity, so this tool\n"

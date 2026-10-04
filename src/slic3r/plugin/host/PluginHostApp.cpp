@@ -17,7 +17,7 @@ namespace {
 GUI::Plater* current_plater()
 {
     if (wxTheApp == nullptr)
-        throw std::runtime_error("OrcaSlicer application is not initialized");
+        throw std::runtime_error("Unlayered Slicer application is not initialized");
 
     GUI::Plater* plater = GUI::wxGetApp().plater();
     if (plater == nullptr)
@@ -29,7 +29,7 @@ GUI::Plater* current_plater()
 PresetBundle* current_preset_bundle()
 {
     if (wxTheApp == nullptr)
-        throw std::runtime_error("OrcaSlicer application is not initialized");
+        throw std::runtime_error("Unlayered Slicer application is not initialized");
 
     PresetBundle* preset_bundle = GUI::wxGetApp().preset_bundle;
     if (preset_bundle == nullptr)
@@ -62,7 +62,7 @@ void host_bindings::register_app(py::module_& host)
     // read-only accessor is the supported way to get just the language.
     host.def("app_language", []() -> std::string {
         if (wxTheApp == nullptr)
-            throw std::runtime_error("OrcaSlicer application is not initialized");
+            throw std::runtime_error("Unlayered Slicer application is not initialized");
         return GUI::into_u8(GUI::wxGetApp().current_language_code_safe());
     });
 }

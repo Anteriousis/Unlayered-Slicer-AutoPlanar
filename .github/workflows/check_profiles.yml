@@ -48,8 +48,8 @@ jobs:
       - name: Download
         working-directory: ${{ github.workspace }}
         run: |
-          curl -L -o OrcaSlicer_profile_validator https://github.com/OrcaSlicer/OrcaSlicer/releases/download/nightly-builds/OrcaSlicer_profile_validator_Linux_Ubuntu2404_nightly
-          chmod +x ./OrcaSlicer_profile_validator
+          curl -L -o UnlayeredSlicer_profile_validator https://github.com/OrcaSlicer/OrcaSlicer/releases/download/nightly-builds/OrcaSlicer_profile_validator_Linux_Ubuntu2404_nightly  # upstream prebuilt validator
+          chmod +x ./UnlayeredSlicer_profile_validator
 
       # Validate all system profiles.
       - name: validate system profiles
@@ -57,7 +57,7 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          ./OrcaSlicer_profile_validator -p ${{ github.workspace }}/resources/profiles -l 2 2>&1 | tee ${{ runner.temp }}/validate_system.log
+          ./UnlayeredSlicer_profile_validator -p ${{ github.workspace }}/resources/profiles -l 2 2>&1 | tee ${{ runner.temp }}/validate_system.log
           exit ${PIPESTATUS[0]}
       # Slice a two-colour cube through every printer so all custom g-code (incl. change_filament_gcode)
       # is expanded - catches undefined-placeholder / invalid-flow bugs the static checks above cannot see.
@@ -66,7 +66,7 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          ./OrcaSlicer_profile_validator -p ${{ github.workspace }}/resources/profiles -s -l 2 2>&1 | tee ${{ runner.temp }}/validate_slice.log
+          ./UnlayeredSlicer_profile_validator -p ${{ github.workspace }}/resources/profiles -s -l 2 2>&1 | tee ${{ runner.temp }}/validate_slice.log
           exit ${PIPESTATUS[0]}
       # All vendors' filament_id collisions were fixed (see scripts/filament_id_snapshot.json),
       # so the duplicate-filament-subtype check runs tree-wide.
@@ -75,7 +75,7 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          ./OrcaSlicer_profile_validator -p ${{ github.workspace }}/resources/profiles -l 2 -f 2>&1 | tee ${{ runner.temp }}/validate_filament_subtypes.log
+          ./UnlayeredSlicer_profile_validator -p ${{ github.workspace }}/resources/profiles -l 2 -f 2>&1 | tee ${{ runner.temp }}/validate_filament_subtypes.log
           exit ${PIPESTATUS[0]}
 
       - name: validate custom presets
@@ -87,7 +87,7 @@ jobs:
           output_dir="${{ runner.temp }}/custom-preset-validation"
           combined_log="${{ runner.temp }}/validate_custom.log"
           summary="${output_dir}/summary.md"
-          release_url="https://github.com/OrcaSlicer/OrcaSlicer-profile-validator/releases/download/fixture-archive"
+          release_url="https://github.com/Unlayered3D/Unlayered-Slicer-profile-validator/releases/download/fixture-archive"
 
           rm -rf "${fixtures_dir}" "${output_dir}"
           mkdir -p "${fixtures_dir}" "${output_dir}"
@@ -149,7 +149,7 @@ jobs:
             unzip -q "${fixture_zip}" -d "${profile_tree}"
 
             set +e
-            ./OrcaSlicer_profile_validator -p "${profile_tree}" -l 2 > "${log_path}" 2>&1
+            ./UnlayeredSlicer_profile_validator -p "${profile_tree}" -l 2 > "${log_path}" 2>&1
             result=$?
             set -e
 

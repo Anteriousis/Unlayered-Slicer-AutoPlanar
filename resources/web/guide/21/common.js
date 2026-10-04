@@ -76,9 +76,13 @@ function HandleModelList( pVal )
 
 	// ORCA ensure list correctly ordered
 	pModel = pModel.sort((a, b)=>(a["vendor"].localeCompare(b["vendor"])))
-	pModel = [ // move custom printers to top
+	// Unlayered: our own machines lead the list, ahead of the custom/generic printers. Everything
+	// else keeps the alphabetical order from the sort above. FilterModelList() walks pModel in this
+	// same order, so the search results stay ordered the same way.
+	pModel = [
+		...pModel.filter(i=>i.vendor === "Unlayered"),
 		...pModel.filter(i=>i.vendor === "Custom"),
-		...pModel.filter(i=>i.vendor !== "Custom")
+		...pModel.filter(i=>i.vendor !== "Unlayered" && i.vendor !== "Custom")
 	];
 	
 	let nTotal=pModel.length;
@@ -274,7 +278,7 @@ function CreateVendorBlock(vendorName)
 	if( alt == "Custom")
 		alt = "Custom Printer";
 	if( alt == "Other")
-		alt = "Orca colosseum";
+		alt = "Other Printers";
 	
 	return 	'<div class="OneVendorBlock" Vendor="' + vendorName + '">' +
 			'	<div class="BlockBanner">' +

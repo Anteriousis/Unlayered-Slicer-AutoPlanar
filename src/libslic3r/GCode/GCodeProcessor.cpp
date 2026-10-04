@@ -76,7 +76,10 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags = {
     " WIPE_TOWER_END",
     " PA_CHANGE:",
     "@PRINT_TIME_SEC@",
-    "@USED_FILAMENT_LENGTH@"
+    "@USED_FILAMENT_LENGTH@",
+    // UNLAYERED_MOD: unit tool axis in bed-frame G-code coordinates, "x,y,z". Emitted whenever the
+    // active chunk orientation changes so the preview can tilt extrusions and the toolhead.
+    " TOOL_AXIS:"
 };
 
 const std::vector<std::string> GCodeProcessor::Reserved_Tags_compatible = {
@@ -99,7 +102,10 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags_compatible = {
     " WIPE_TOWER_END",
     " PA_CHANGE:",
     "@PRINT_TIME_SEC@",
-    "@USED_FILAMENT_LENGTH@"
+    "@USED_FILAMENT_LENGTH@",
+    // UNLAYERED_MOD: unit tool axis in bed-frame G-code coordinates, "x,y,z". Emitted whenever the
+    // active chunk orientation changes so the preview can tilt extrusions and the toolhead.
+    " TOOL_AXIS:"
 };
 
 
@@ -701,6 +707,28 @@ template<typename T>
             return false;
         }
     }
+}
+
+// UNLAYERED_MOD — parse the payload of a ";TOOL_AXIS:" tag: three comma separated floats.
+// Returns false (and leaves `out` untouched) on anything malformed or degenerate.
+[[nodiscard]] static bool parse_tool_axis(const std::string_view sv, Vec3f &out)
+{
+    const size_t c1 = sv.find(',');
+    if (c1 == std::string_view::npos)
+        return false;
+    const size_t c2 = sv.find(',', c1 + 1);
+    if (c2 == std::string_view::npos)
+        return false;
+    float x, y, z;
+    if (! parse_number(sv.substr(0, c1), x) ||
+        ! parse_number(sv.substr(c1 + 1, c2 - c1 - 1), y) ||
+        ! parse_number(sv.substr(c2 + 1), z))
+        return false;
+    const Vec3f axis(x, y, z);
+    if (! axis.allFinite() || axis.squaredNorm() < 1e-8f)
+        return false;
+    out = axis.normalized();
+    return true;
 }
 
 // Helper class to modify and export gcode to file
@@ -2521,6 +2549,9 @@ void GCodeProcessorResult::reset() {
     lock();
 
     moves.clear();
+    // UNLAYERED_MOD: index 0 must always exist and always be straight up.
+    tool_axes.assign(1, Vec3f(0.0f, 0.0f, 1.0f));
+    virtual_5axis = false;
     lines_ends.clear();
     printable_area = Pointfs();
     //BBS: add bed exclude area
@@ -2915,6 +2946,10 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     m_flavor = config.gcode_flavor;
     m_printer_model = config.printer_model.value;
 
+    // UNLAYERED_MOD -- stamped into the result at finalize(): the preview's hotend marker must
+    // stay vertical for virtual-5-axis (3-axis) output. See GCodeProcessorResult::virtual_5axis.
+    m_virtual_5axis = config.enable_nonplanar.value && config.virtual_5axis.value;
+
     m_single_extruder_multi_material = config.single_extruder_multi_material;
 
     size_t filament_count = config.filament_diameter.values.size();
@@ -3046,6 +3081,8 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
         m_filament_maps = filament_maps->values;
         std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
     }
+    // UNLAYERED MOD
+    /*
 
     const ConfigOptionBool* spiral_vase = config.option<ConfigOptionBool>("spiral_mode");
     if (spiral_vase != nullptr) {
@@ -3055,8 +3092,8 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
 
     const ConfigOptionBool* has_scarf_joint_seam = config.option<ConfigOptionBool>("has_scarf_joint_seam");
     if (has_scarf_joint_seam != nullptr)
-        m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || has_scarf_joint_seam->value;
-
+        m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || has_scarf_joint_seam->value;*/
+    
     const ConfigOptionBool* manual_filament_change = config.option<ConfigOptionBool>("manual_filament_change");
     if (manual_filament_change != nullptr)
         m_manual_filament_change = manual_filament_change->value;
@@ -3070,6 +3107,22 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
 void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
 {
     m_parser.apply_config(config);
+
+    // UNLAYERED_MOD -- see the PrintConfig overload; this path serves externally loaded G-code,
+    // whose embedded config block carries the same options.
+    {
+        // axis_selection is the source of truth. virtual_5axis cannot be relied on here: opening a
+        // G-code FILE runs the config through handle_legacy_composite, which folds the legacy bool
+        // onto the enum and then ERASES it -- so this read would always see nullptr and draw the
+        // hotend marker tilted for a virtual (3-axis) job. The bool is still consulted as a
+        // fallback for any caller that never went through that migration.
+        const ConfigOptionBool* nonplanar = config.option<ConfigOptionBool>("enable_nonplanar");
+        const ConfigOption*     sel       = config.option("axis_selection");
+        const ConfigOptionBool* v5        = config.option<ConfigOptionBool>("virtual_5axis");
+        m_virtual_5axis = nonplanar != nullptr && nonplanar->value &&
+                          ((sel != nullptr && sel->getInt() == int(AxisSelection::Virtual)) ||
+                           (v5 != nullptr && v5->value));
+    }
 
     //BBS
     const ConfigOptionFloatsNullable* nozzle_volume = config.option<ConfigOptionFloatsNullable>("nozzle_volume");
@@ -3438,7 +3491,8 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
         m_first_layer_height = std::abs(initial_layer_print_height->value);
 
     const ConfigOptionFloat* printable_height = config.option<ConfigOptionFloat>("printable_height");
-    if (printable_height != nullptr)
+    //UNLAYERED MOD
+    /*
         m_result.printable_height = printable_height->value;
 
     const ConfigOptionBool* spiral_vase = config.option<ConfigOptionBool>("spiral_mode");
@@ -3449,7 +3503,7 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
 
     const ConfigOptionBool* has_scarf_joint_seam = config.option<ConfigOptionBool>("has_scarf_joint_seam");
     if (has_scarf_joint_seam != nullptr)
-        m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || has_scarf_joint_seam->value;
+        m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || has_scarf_joint_seam->value;*/
 
     const ConfigOptionEnumGeneric *bed_type = config.option<ConfigOptionEnumGeneric>("curr_bed_type");
     if (bed_type != nullptr)
@@ -3504,11 +3558,20 @@ void GCodeProcessor::reset()
 
     m_line_id = 0;
     m_last_line_id = 0;
+    // Declarative cut planes: a stale section id must not leak into the next file's moves.
+    m_cut_segment_id = -1;
+    // UNLAYERED_MOD: likewise a stale virtual-5-axis flag. apply_config() runs right after this
+    // in init_gcode_processor and sets the real value.
+    m_virtual_5axis = false;
     m_feedrate = 0.0f;
     m_width = 0.0f;
     m_height = 0.0f;
     m_forced_width = 0.0f;
     m_forced_height = 0.0f;
+    // UNLAYERED_MOD
+    m_tool_axis_id = 0;
+    m_has_tool_axis_tag = false;
+    m_last_bc_deg = { -90.0f, 0.0f };
     m_mm3_per_mm = 0.0f;
     m_travel_dist = 0.0f;
     m_fan_speed = 0.0f;
@@ -3569,8 +3632,9 @@ void GCodeProcessor::reset()
     m_last_default_color_id = 0;
 
     m_options_z_corrector.reset();
-
-    m_detect_layer_based_on_tag = false;
+    //UNLAYERED MOD
+    //m_detect_layer_based_on_tag = false;
+    m_detect_layer_based_on_tag = true;
 
     m_seams_count = 0;
     m_preheat_time = 0.f;
@@ -3695,6 +3759,8 @@ void GCodeProcessor::process_buffer(const std::string &buffer)
 void GCodeProcessor::finalize(bool post_process)
 {
     m_result.z_offset = m_z_offset;
+    // UNLAYERED_MOD: after the result was reset and refilled -- see apply_config.
+    m_result.virtual_5axis = m_virtual_5axis;
 
     // update width/height of wipe moves
     for (GCodeProcessorResult::MoveVertex& move : m_result.moves) {
@@ -4126,6 +4192,32 @@ bool GCodeProcessor::get_last_position_from_gcode(const std::string &gcode_str, 
     return is_z_changed;
 }
 
+// UNLAYERED_MOD — see the header.
+uint16_t GCodeProcessor::tool_axis_id(const Vec3f &axis)
+{
+    std::vector<Vec3f> &palette = m_result.tool_axes;
+    if (palette.empty())
+        palette.emplace_back(0.0f, 0.0f, 1.0f);
+    for (size_t i = 0; i < palette.size(); ++i)
+        if ((palette[i] - axis).squaredNorm() < 1e-8f)
+            return uint16_t(i);
+    // Degenerate only in the face of pathological input (a distinct axis per move). Clamping to the
+    // last slot keeps the palette bounded and the render correct for everything up to that point.
+    if (palette.size() >= std::numeric_limits<uint16_t>::max())
+        return uint16_t(palette.size() - 1);
+    palette.emplace_back(axis);
+    return uint16_t(palette.size() - 1);
+}
+
+// UNLAYERED_MOD — see the header.
+bool GCodeProcessor::tool_axis_is_vertical() const
+{
+    if (m_tool_axis_id == 0)
+        return true; // slot 0 is always +Z, so the common case costs nothing
+    return size_t(m_tool_axis_id) < m_result.tool_axes.size() ?
+        m_result.tool_axes[m_tool_axis_id].z() > 1.0f - 1e-6f : true;
+}
+
 void GCodeProcessor::process_tags(const std::string_view comment, bool producers_enabled)
 {
     // producers tags
@@ -4138,6 +4230,14 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         if (m_extrusion_role == erExternalPerimeter)
             m_seams_detector.activate(true);
         m_processing_start_custom_gcode = (m_extrusion_role == erCustom && m_g1_line_id == 0);
+        return;
+    }
+
+    // Declarative cut planes: which segment ("section") the following toolpaths belong to. The
+    // emitter only writes this for segmented objects, so on an ordinary print it never appears and
+    // the id stays -1.
+    if (boost::starts_with(comment, "SEGMENT_ID:")) {
+        m_cut_segment_id = get_object_label_id(comment);
         return;
     }
 
@@ -4265,6 +4365,17 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         if (boost::starts_with(comment, reserved_tag(ETags::Width))) {
             if (!parse_number(comment.substr(reserved_tag(ETags::Width).size()), m_forced_width))
                 BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Width (" << comment << ").";
+            return;
+        }
+        // UNLAYERED_MOD: multiplanar tool axis tag, "x,y,z" in bed-frame G-code coordinates.
+        if (boost::starts_with(comment, reserved_tag(ETags::Tool_Axis))) {
+            Vec3f axis;
+            if (parse_tool_axis(comment.substr(reserved_tag(ETags::Tool_Axis).size()), axis)) {
+                m_tool_axis_id       = this->tool_axis_id(axis);
+                m_has_tool_axis_tag  = true;
+            }
+            else
+                BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Tool_Axis (" << comment << ").";
             return;
         }
         // Orca: manual tool change tag
@@ -4859,6 +4970,24 @@ void GCodeProcessor::process_G0(const GCodeReader::GCodeLine& line)
 
 void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line, const std::optional<unsigned int>& remaining_internal_g1_lines)
 {
+    // UNLAYERED_MOD — fall back to the machine's B/C words when the file carries no ";TOOL_AXIS:"
+    // tag (e.g. G-code from another 5-axis slicer). This has to run before the move is processed: a
+    // pure "G1 B.. C.." rotation changes no position, so it produces no MoveVertex and would
+    // otherwise be invisible. GCodeReader drops unknown axis letters, so read them off the raw line
+    // with has_value(), which stops at the comment and needs no change to the Axis enum.
+    if (! m_has_tool_axis_tag) {
+        float b_deg = 0.f, c_deg = 0.f;
+        const bool has_b = line.has_value('B', b_deg);
+        const bool has_c = line.has_value('C', c_deg);
+        if (has_b || has_c) {
+            if (! has_b) b_deg = m_last_bc_deg[0];
+            if (! has_c) c_deg = m_last_bc_deg[1];
+            m_last_bc_deg = { b_deg, c_deg };
+            m_tool_axis_id = this->tool_axis_id(bc_to_tool_axis(double(b_deg) * M_PI / 180.0,
+                                                               double(c_deg) * M_PI / 180.0).cast<float>());
+        }
+    }
+
     std::array<std::optional<double>, 4> g1_axes = { std::nullopt, std::nullopt, std::nullopt, std::nullopt };
     if (line.has_x()) g1_axes[X] = (double)line.x();
     if (line.has_y()) g1_axes[Y] = (double)line.y();
@@ -4884,8 +5013,17 @@ void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4>& axes
         else if (delta_pos[E] < 0.0f)
             return (delta_pos[X] != 0.0f || delta_pos[Y] != 0.0f || delta_pos[Z] != 0.0f) ? EMoveType::Travel : EMoveType::Retract;
         else if (delta_pos[E] > 0.0f) {
-            if (delta_pos[X] == 0.0f && delta_pos[Y] == 0.0f)
-                return (delta_pos[Z] == 0.0f) ? EMoveType::Unretract : EMoveType::Travel;
+            if (delta_pos[X] == 0.0f && delta_pos[Y] == 0.0f) {
+                if (delta_pos[Z] == 0.0f)
+                    return EMoveType::Unretract;
+                // UNLAYERED_MOD — vanilla reads "extruding, but X and Y both unchanged" as a Z lift
+                // that oozed, which only holds when the tool axis is +Z. On a chunk tilted to 90 deg
+                // the layer plane contains the Z axis, so a segment running straight up or down is a
+                // genuine extrusion and has to render as one. Only exactly-vertical segments hit this:
+                // at any lesser tilt an in-plane segment still has an X or Y component, which is why
+                // the mis-render looks intermittent.
+                return this->tool_axis_is_vertical() ? EMoveType::Travel : EMoveType::Extrude;
+            }
             else if (delta_pos[X] != 0.0f || delta_pos[Y] != 0.0f)
                 return EMoveType::Extrude;
         }
@@ -5330,7 +5468,9 @@ void GCodeProcessor::process_VG1(const GCodeReader::GCodeLine& line)
             type = (delta_pos[X] != 0.0f || delta_pos[Y] != 0.0f || delta_pos[Z] != 0.0f) ? EMoveType::Travel : EMoveType::Retract;
         else if (delta_pos[E] > 0.0f) {
             if (delta_pos[X] == 0.0f && delta_pos[Y] == 0.0f)
-                type = (delta_pos[Z] == 0.0f) ? EMoveType::Unretract : EMoveType::Travel;
+                // UNLAYERED_MOD — see the matching comment in process_G1()'s move_type().
+                type = (delta_pos[Z] == 0.0f) ? EMoveType::Unretract :
+                       (this->tool_axis_is_vertical() ? EMoveType::Travel : EMoveType::Extrude);
             else if (delta_pos[X] != 0.0f || delta_pos[Y] != 0.0f)
                 type = EMoveType::Extrude;
         }
@@ -7061,7 +7201,9 @@ void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type, 
         std::max<unsigned int>(1, m_layer_id) - 1,
         internal_only,
         m_object_label_id,
-        m_print_z
+        m_print_z,
+        m_tool_axis_id,
+        m_cut_segment_id
     });
 
     if (type == EMoveType::Seam) {

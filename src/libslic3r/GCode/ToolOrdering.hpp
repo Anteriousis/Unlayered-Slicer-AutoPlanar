@@ -263,11 +263,15 @@ public:
     // (print->config().print_sequence == PrintSequence::ByObject is false).
     ToolOrdering(const Print& print, unsigned int first_extruder, bool prime_multi_material = false);
 
+    // For ByGroup: a subset of objects printed layer-interleaved within the group.
+    ToolOrdering(const std::vector<const PrintObject*>& objects, unsigned int first_extruder, bool prime_multi_material = false);
+
     void handle_dontcare_extruder(const std::vector<unsigned int>& first_layer_tool_order);
     void handle_dontcare_extruder(unsigned int first_extruder);
 
     void sort_and_build_data(const PrintObject &object, unsigned int first_extruder, bool prime_multi_material = false);
     void sort_and_build_data(const Print& print, unsigned int first_extruder, bool prime_multi_material = false);
+    void sort_and_build_data(const std::vector<const PrintObject*>& objects, unsigned int first_extruder, bool prime_multi_material = false);
 
     void    clear() {
         m_layer_tools.clear();

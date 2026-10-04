@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-project(OrcaSlicer-native)
+project(UnlayeredSlicer-native)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -109,52 +109,61 @@ if (SLIC3R_GUI)
 endif()
 
 if(ORCA_TOOLS)
-    # OrcaSlicer_profile_validator
+    # UnlayeredSlicer_profile_validator
     if(APPLE)
-        add_executable(OrcaSlicer_profile_validator MACOSX_BUNDLE dev-utils/OrcaSlicer_profile_validator.cpp)
-        set_target_properties(OrcaSlicer_profile_validator PROPERTIES
+        add_executable(UnlayeredSlicer_profile_validator MACOSX_BUNDLE dev-utils/UnlayeredSlicer_profile_validator.cpp)
+        set_target_properties(UnlayeredSlicer_profile_validator PROPERTIES
             MACOSX_BUNDLE TRUE
-            MACOSX_BUNDLE_BUNDLE_NAME "OrcaSlicer Profile Validator"
+            MACOSX_BUNDLE_BUNDLE_NAME "Unlayered Slicer Profile Validator"
             MACOSX_BUNDLE_BUNDLE_VERSION "${SLIC3R_VERSION}"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "${SLIC3R_VERSION}"
-            MACOSX_BUNDLE_IDENTIFIER "com.orcaslicer.OrcaSlicer.profile-validator"
-            MACOSX_BUNDLE_COPYRIGHT "© 2026 OrcaSlicer Pte Ltd All Rights Reserved"
-            MACOSX_BUNDLE_GUI_IDENTIFIER "com.orcaslicer.OrcaSlicer.profile-validator"
+            MACOSX_BUNDLE_IDENTIFIER "com.unlayered3d.UnlayeredSlicer.profile-validator"
+            MACOSX_BUNDLE_COPYRIGHT "© 2026 Unlayered 3D. All Rights Reserved"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "com.unlayered3d.UnlayeredSlicer.profile-validator"
         )
     else()
-        add_executable(OrcaSlicer_profile_validator dev-utils/OrcaSlicer_profile_validator.cpp)
+        add_executable(UnlayeredSlicer_profile_validator dev-utils/UnlayeredSlicer_profile_validator.cpp)
     endif()
-    target_link_libraries(OrcaSlicer_profile_validator libslic3r boost_headeronly libcurl OpenSSL::SSL OpenSSL::Crypto)
-    target_compile_definitions(OrcaSlicer_profile_validator PRIVATE -DBOOST_ALL_NO_LIB -DBOOST_USE_WINAPI_VERSION=0x602 -DBOOST_SYSTEM_USE_UTF8)
+    target_link_libraries(UnlayeredSlicer_profile_validator libslic3r boost_headeronly libcurl OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(UnlayeredSlicer_profile_validator PRIVATE -DBOOST_ALL_NO_LIB -DBOOST_USE_WINAPI_VERSION=0x602 -DBOOST_SYSTEM_USE_UTF8)
 endif()
 
 # Create a slic3r executable
 # Process manifests for various platforms.
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/msw/OrcaSlicer.rc.in ${CMAKE_CURRENT_BINARY_DIR}/OrcaSlicer.rc @ONLY)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/msw/OrcaSlicer.manifest.in ${CMAKE_CURRENT_BINARY_DIR}/OrcaSlicer.manifest @ONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/msw/UnlayeredSlicer.rc.in ${CMAKE_CURRENT_BINARY_DIR}/UnlayeredSlicer.rc @ONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/msw/UnlayeredSlicer.manifest.in ${CMAKE_CURRENT_BINARY_DIR}/UnlayeredSlicer.manifest @ONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/osx/Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
 if (WIN32)
-    add_library(OrcaSlicer SHARED OrcaSlicer.cpp OrcaSlicer.hpp)
+    add_library(UnlayeredSlicer SHARED UnlayeredSlicer.cpp UnlayeredSlicer.hpp)
 else ()
-    add_executable(OrcaSlicer OrcaSlicer.cpp OrcaSlicer.hpp)
+    add_executable(UnlayeredSlicer UnlayeredSlicer.cpp UnlayeredSlicer.hpp)
 endif ()
 
 if (MINGW)
-    target_link_options(OrcaSlicer PUBLIC "-Wl,-allow-multiple-definition")
-    set_target_properties(OrcaSlicer PROPERTIES PREFIX "")
+    target_link_options(UnlayeredSlicer PUBLIC "-Wl,-allow-multiple-definition")
+    set_target_properties(UnlayeredSlicer PROPERTIES PREFIX "")
 endif (MINGW)
+
+if (WIN32)
+    # Unlayered: the shared library the loader stub pulls in. Deliberately NOT "unlayered-slicer":
+    # that is the stub executable's OUTPUT_NAME, and matching it would make both targets emit
+    # unlayered-slicer.lib/.exp/.pdb into the same directory and clobber each other. This keeps the
+    # upstream exe/dll split (unlayered-slicer.exe + UnlayeredSlicer.dll) with Unlayered names.
+    # UnlayeredSlicer_app_msvc.cpp loads this file BY NAME -- the two must always change together.
+    set_target_properties(UnlayeredSlicer PROPERTIES OUTPUT_NAME "UnlayeredSlicer")
+endif ()
 
 # The GUI embeds the bundled shared libpython (libslic3r_gui -> pybind11::embed);
 # the dep recipe stamps it with an @rpath id / plain SONAME, so the executable
 # needs an rpath entry for each layout in the "Bundled Python/uv layout" map
 # further down. Dead entries are skipped by the loader.
-# OrcaSlicer_profile_validator links libslic3r only (no Python).
+# UnlayeredSlicer_profile_validator links libslic3r only (no Python).
 if (APPLE)
     # A linker flag rather than the BUILD_RPATH property because the release
     # flow uses the Xcode generator, which does not honor BUILD_RPATH.
-    target_link_options(OrcaSlicer PRIVATE "LINKER:-rpath,@executable_path/python/lib")
+    target_link_options(UnlayeredSlicer PRIVATE "LINKER:-rpath,@executable_path/python/lib")
 elseif (UNIX AND NOT WIN32)
-    set_target_properties(OrcaSlicer PROPERTIES
+    set_target_properties(UnlayeredSlicer PROPERTIES
         # Build tree + AppImage, which packages the build-tree binary.
         BUILD_RPATH "$ORIGIN/python/lib;$ORIGIN/../lib/python/lib"
         # Flatpak (cmake --install).
@@ -163,44 +172,44 @@ endif ()
 
 if (NOT WIN32 AND NOT APPLE)
     # Binary name on unix like systems (Linux, Unix)
-    set_target_properties(OrcaSlicer PROPERTIES OUTPUT_NAME "orca-slicer")
-    set(SLIC3R_APP_CMD "orca-slicer")
+    set_target_properties(UnlayeredSlicer PROPERTIES OUTPUT_NAME "unlayered-slicer")
+    set(SLIC3R_APP_CMD "unlayered-slicer")
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/unix/build_linux_image.sh.in ${CMAKE_CURRENT_BINARY_DIR}/build_linux_image.sh USE_SOURCE_PERMISSIONS @ONLY)
 endif ()
 
-target_link_libraries(OrcaSlicer libslic3r cereal::cereal)
-# target_include_directories(OrcaSlicer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/slic3r)
+target_link_libraries(UnlayeredSlicer libslic3r cereal::cereal)
+# target_include_directories(UnlayeredSlicer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/slic3r)
 if (APPLE)
 #    add_compile_options(-stdlib=libc++)
 #    add_definitions(-DBOOST_THREAD_DONT_USE_CHRONO -DBOOST_NO_CXX11_RVALUE_REFERENCES -DBOOST_THREAD_USES_MOVE)
     # -liconv: boost links to libiconv by default
-    target_link_libraries(OrcaSlicer "-liconv -framework IOKit" "-framework CoreFoundation" "-framework AVFoundation" "-framework AVKit" "-framework CoreMedia" "-framework VideoToolbox" -lc++)
+    target_link_libraries(UnlayeredSlicer "-liconv -framework IOKit" "-framework CoreFoundation" "-framework AVFoundation" "-framework AVKit" "-framework CoreMedia" "-framework VideoToolbox" -lc++)
 elseif (MSVC)
-    # Manifest is provided through OrcaSlicer.rc, don't generate your own.
+    # Manifest is provided through UnlayeredSlicer.rc, don't generate your own.
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /MANIFEST:NO")
 else ()
     # Boost on Raspberry-Pi does not link to pthreads explicitly.
-    target_link_libraries(OrcaSlicer ${CMAKE_DL_LIBS} -lstdc++ Threads::Threads pangoft2-1.0)
+    target_link_libraries(UnlayeredSlicer ${CMAKE_DL_LIBS} -lstdc++ Threads::Threads pangoft2-1.0)
 endif ()
 
 # Add the Slic3r GUI library, libcurl, OpenGL and GLU libraries.
 if (SLIC3R_GUI)
-#    target_link_libraries(OrcaSlicer ws2_32 uxtheme setupapi libslic3r_gui ${wxWidgets_LIBRARIES})
-target_link_libraries(OrcaSlicer libslic3r_gui)
+#    target_link_libraries(UnlayeredSlicer ws2_32 uxtheme setupapi libslic3r_gui ${wxWidgets_LIBRARIES})
+target_link_libraries(UnlayeredSlicer libslic3r_gui)
     if (MSVC)
         # Generate debug symbols even in release mode.
-        target_link_options(OrcaSlicer PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
-        target_link_libraries(OrcaSlicer ws2_32.lib user32.lib Setupapi.lib)
+        target_link_options(UnlayeredSlicer PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
+        target_link_libraries(UnlayeredSlicer ws2_32.lib user32.lib Setupapi.lib)
     elseif (MINGW)
-        target_link_libraries(OrcaSlicer ws2_32 uxtheme setupapi)
+        target_link_libraries(UnlayeredSlicer ws2_32 uxtheme setupapi)
     elseif (APPLE)
-        target_link_libraries(OrcaSlicer "-framework OpenGL")
+        target_link_libraries(UnlayeredSlicer "-framework OpenGL")
     else ()
-        target_link_libraries(OrcaSlicer -ldl)
+        target_link_libraries(UnlayeredSlicer -ldl)
     endif ()
     #if (WIN32)
     #    find_library(PSAPI_LIB NAMES Psapi)
-    #    target_link_libraries(OrcaSlicer ${PSAPI_LIB})
+    #    target_link_libraries(UnlayeredSlicer ${PSAPI_LIB})
     #endif ()
 endif ()
 
@@ -211,18 +220,18 @@ if (WIN32)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -municode")
     endif()
 
-    add_executable(OrcaSlicer_app_gui WIN32 OrcaSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/OrcaSlicer.rc)
+    add_executable(UnlayeredSlicer_app_gui WIN32 UnlayeredSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/UnlayeredSlicer.rc)
     # Generate debug symbols even in release mode.
     if(MSVC)
-        target_link_options(OrcaSlicer_app_gui PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
+        target_link_options(UnlayeredSlicer_app_gui PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
     endif()
-    target_compile_definitions(OrcaSlicer_app_gui PRIVATE "$<$<NOT:$<CONFIG:RelWithDebInfo>>:SLIC3R_WRAPPER_NOCONSOLE>")
-    add_dependencies(OrcaSlicer_app_gui OrcaSlicer)
-    set_target_properties(OrcaSlicer_app_gui PROPERTIES
-        OUTPUT_NAME "orca-slicer"
+    target_compile_definitions(UnlayeredSlicer_app_gui PRIVATE "$<$<NOT:$<CONFIG:RelWithDebInfo>>:SLIC3R_WRAPPER_NOCONSOLE>")
+    add_dependencies(UnlayeredSlicer_app_gui UnlayeredSlicer)
+    set_target_properties(UnlayeredSlicer_app_gui PROPERTIES
+        OUTPUT_NAME "unlayered-slicer"
         WIN32_EXECUTABLE "$<NOT:$<CONFIG:RelWithDebInfo>>"
     )
-    target_link_libraries(OrcaSlicer_app_gui PRIVATE boost_headeronly)
+    target_link_libraries(UnlayeredSlicer_app_gui PRIVATE boost_headeronly)
 endif ()
 
 # Link the resources dir to where Slic3r GUI expects it
@@ -244,20 +253,20 @@ set(output_dlls_RelWithDebInfo "")
 #   Windows:  <exe dir>/python            <resources>/tools/uv
 #   macOS:    Contents/MacOS/python       Contents/MacOS/tools/uv
 #   AppImage: $APPDIR/lib/python          $APPDIR/resources/tools/uv
-#   Flatpak:  /app/libpython (dep prefix) /app/share/OrcaSlicer/tools/uv
+#   Flatpak:  /app/libpython (dep prefix) /app/share/UnlayeredSlicer/tools/uv
 # Runtime lookup: PythonInterpreter::initialize() / bundled_uv_path().
-# libpython resolution: rpath on the OrcaSlicer target (above); the dep
+# libpython resolution: rpath on the UnlayeredSlicer target (above); the dep
 # recipe gives the bundled interpreter a self-relative rpath.
 # --------------------------------------------------------------------------
 if (WIN32)
     # This has to be a separate target due to the windows command line length limits
-    add_custom_target(COPY_DLLS ALL DEPENDS OrcaSlicer)
+    add_custom_target(COPY_DLLS ALL DEPENDS UnlayeredSlicer)
 
     if (CMAKE_CONFIGURATION_TYPES)
         foreach (CONF ${CMAKE_CONFIGURATION_TYPES})
             file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/${CONF}" WIN_CONF_OUTPUT_DIR)
             file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/${CONF}/resources" WIN_RESOURCES_SYMLINK)
-            add_custom_command(TARGET OrcaSlicer POST_BUILD
+            add_custom_command(TARGET UnlayeredSlicer POST_BUILD
                 COMMAND if exist "${WIN_CONF_OUTPUT_DIR}" "("
                         if not exist "${WIN_RESOURCES_SYMLINK}" "("
                             mklink /J "${WIN_RESOURCES_SYMLINK}" "${SLIC3R_RESOURCES_DIR_WIN}"
@@ -269,16 +278,16 @@ if (WIN32)
         endforeach ()
     else ()
         file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/resources" WIN_RESOURCES_SYMLINK)
-        add_custom_command(TARGET OrcaSlicer POST_BUILD
+        add_custom_command(TARGET UnlayeredSlicer POST_BUILD
             COMMAND if not exist "${WIN_RESOURCES_SYMLINK}" "(" mklink /J "${WIN_RESOURCES_SYMLINK}" "${SLIC3R_RESOURCES_DIR_WIN}" ")"
             COMMENT "Symlinking the resources directory into the build tree"
             VERBATIM
         )
     endif ()
     # copy libpython to the bin folder for Windows
-    add_custom_command(TARGET OrcaSlicer POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:OrcaSlicer>/python"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "$<TARGET_FILE_DIR:OrcaSlicer>/python"
+    add_custom_command(TARGET UnlayeredSlicer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:UnlayeredSlicer>/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "$<TARGET_FILE_DIR:UnlayeredSlicer>/python"
         COMMENT "Copying Python runtime into the build tree"
         VERBATIM)
 
@@ -286,21 +295,21 @@ if (WIN32)
         # Multi-config generators (Visual Studio, Ninja Multi-Config): copy per config.
         foreach (cfg ${CMAKE_CONFIGURATION_TYPES})
             if ("${cfg}" STREQUAL "Debug")
-                orcaslicer_copy_dlls(COPY_DLLS "Debug" "d" output_dlls_Debug)
+                unlayered_copy_dlls(COPY_DLLS "Debug" "d" output_dlls_Debug)
             elseif("${cfg}" STREQUAL "RelWithDebInfo")
-                orcaslicer_copy_dlls(COPY_DLLS "RelWithDebInfo" "" output_dlls_RelWithDebInfo)
+                unlayered_copy_dlls(COPY_DLLS "RelWithDebInfo" "" output_dlls_RelWithDebInfo)
             else()
-                orcaslicer_copy_dlls(COPY_DLLS "${cfg}" "" output_dlls_${cfg})
+                unlayered_copy_dlls(COPY_DLLS "${cfg}" "" output_dlls_${cfg})
             endif()
         endforeach()
     else()
         # Single-config generators (Ninja): use CMAKE_BUILD_TYPE.
         if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
-            orcaslicer_copy_dlls(COPY_DLLS "Debug" "d" output_dlls_Debug)
+            unlayered_copy_dlls(COPY_DLLS "Debug" "d" output_dlls_Debug)
         elseif("${CMAKE_BUILD_TYPE}" STREQUAL "RelWithDebInfo")
-            orcaslicer_copy_dlls(COPY_DLLS "RelWithDebInfo" "" output_dlls_RelWithDebInfo)
+            unlayered_copy_dlls(COPY_DLLS "RelWithDebInfo" "" output_dlls_RelWithDebInfo)
         else()
-            orcaslicer_copy_dlls(COPY_DLLS "Release" "" output_dlls_Release)
+            unlayered_copy_dlls(COPY_DLLS "Release" "" output_dlls_Release)
         endif()
     endif()
 
@@ -308,20 +317,13 @@ else ()
     if (NOT APPLE)
         set(output_sos_Release "")
         set(output_sos_Debug "")
-        add_custom_target(OrcaSlicerSosCopy ALL DEPENDS OrcaSlicer)
+        add_custom_target(UnlayeredSlicerSosCopy ALL DEPENDS UnlayeredSlicer)
         if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
-            orcaslicer_copy_sos(OrcaSlicerSosCopy "Debug" "d" output_sos_Debug)
+            unlayered_copy_sos(UnlayeredSlicerSosCopy "Debug" "d" output_sos_Debug)
         else()
-            orcaslicer_copy_sos(OrcaSlicerSosCopy "Release" "" output_sos_Release)
+            unlayered_copy_sos(UnlayeredSlicerSosCopy "Release" "" output_sos_Release)
         endif()
     endif()
-    if (APPLE AND NOT CMAKE_MACOSX_BUNDLE)
-        # On OSX, the name of the binary matches the name of the Application.
-        add_custom_command(TARGET OrcaSlicer POST_BUILD
-            COMMAND ln -sf OrcaSlicer orca-slicer
-            WORKING_DIRECTORY "$<TARGET_FILE_DIR:OrcaSlicer>"
-            VERBATIM)
-    endif ()
     if (XCODE)
         # Because of Debug/Release/etc. configurations (similar to MSVC) the slic3r binary is located in an extra level
         set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/resources")
@@ -329,33 +331,46 @@ else ()
         set(BIN_CONF_DIR "Debug")
     else ()
         set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/../resources")
-        set(BIN_DIR "$<TARGET_FILE_DIR:OrcaSlicer>")
+        set(BIN_DIR "$<TARGET_FILE_DIR:UnlayeredSlicer>")
     endif ()
     if (CMAKE_MACOSX_BUNDLE)
         if (CMAKE_CONFIGURATION_TYPES)
-            set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/OrcaSlicer.app/Contents/Resources")
-            set(BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/OrcaSlicer.app/Contents/MacOS")
+            set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/UnlayeredSlicer.app/Contents/Resources")
+            set(BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/UnlayeredSlicer.app/Contents/MacOS")
         else()
-            set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/OrcaSlicer.app/Contents/Resources")
-            set(BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/OrcaSlicer.app/Contents/MacOS")
+            set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/UnlayeredSlicer.app/Contents/Resources")
+            set(BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/UnlayeredSlicer.app/Contents/MacOS")
         endif()
         set(MACOSX_BUNDLE_ICON_FILE Icon.icns)
-        set(MACOSX_BUNDLE_BUNDLE_NAME "OrcaSlicer")
-        set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${SoftFever_VERSION})
-        set(MACOSX_BUNDLE_COPYRIGHT "Copyright(C) 2022-2024 Li Jiang All Rights Reserved")
+        set(MACOSX_BUNDLE_BUNDLE_NAME "${SLIC3R_APP_NAME}")
+        set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${UNLAYERED_VERSION})
+        set(MACOSX_BUNDLE_COPYRIGHT "© 2026 Unlayered 3D. All Rights Reserved")
+        # cmake/modules/MacOSXBundleInfo.plist.in used to HARDCODE CFBundleIdentifier, which
+        # meant the profile-validator .app shipped with the main app's identity even though
+        # it sets its own MACOSX_BUNDLE_GUI_IDENTIFIER (line 122). The template now expands
+        # the variable, so the main app has to supply it -- leaving it unset would emit an
+        # EMPTY CFBundleIdentifier and break the config dir, the deep-link handler and
+        # signing all at once. The value is byte-identical to the old hardcode.
+        set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.unlayered3d.UnlayeredSlicer")
+        # CFBundleVersion / CFBundleGetInfoString / CFBundleLongVersionString were never set
+        # for this target, so every shipped .app had them as empty strings (Finder -> Get Info
+        # showed a blank version). SLIC3R_VERSION matches what the profile validator uses.
+        set(MACOSX_BUNDLE_BUNDLE_VERSION "${SLIC3R_VERSION}")
+        set(MACOSX_BUNDLE_LONG_VERSION_STRING "${SLIC3R_BUILD_ID}")
+        set(MACOSX_BUNDLE_INFO_STRING "${SLIC3R_BUILD_ID}")
         if (XCODE)
             # Xcode's CodeSign phase fails on the bundled Python runtime's dotted
             # dirs (python3.12) under Contents/MacOS. Skip it for local dev builds
             # and let the linker ad-hoc sign; the shipped bundle is signed by the
-            # Ninja/CI packaging path (build_release_macos.sh, build_orca.yml).
-            set_target_properties(OrcaSlicer PROPERTIES XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO)
+            # Ninja/CI packaging path (build_release_macos.sh, build_slicer.yml).
+            set_target_properties(UnlayeredSlicer PROPERTIES XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO)
         endif()
     endif()
-    add_custom_command(TARGET OrcaSlicer POST_BUILD
+    add_custom_command(TARGET UnlayeredSlicer POST_BUILD
         COMMAND ln -sfn "${SLIC3R_RESOURCES_DIR}" "${BIN_RESOURCES_DIR}"
         COMMENT "Symlinking the resources directory into the build tree"
         VERBATIM)
-    add_custom_command(TARGET OrcaSlicer POST_BUILD
+    add_custom_command(TARGET UnlayeredSlicer POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf "${BIN_DIR}/python"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "${BIN_DIR}/python"
         COMMENT "Copying Python runtime into the build tree"
@@ -363,7 +378,7 @@ else ()
     # Stage uv next to the binary for the build-tree/.app flows, which never
     # run install() -- see the layout map above; lookup is bundled_uv_path().
     if(ORCA_BUNDLED_UV_EXECUTABLE AND EXISTS "${ORCA_BUNDLED_UV_EXECUTABLE}")
-        add_custom_command(TARGET OrcaSlicer POST_BUILD
+        add_custom_command(TARGET UnlayeredSlicer POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E make_directory "${BIN_DIR}/tools/uv"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORCA_BUNDLED_UV_EXECUTABLE}" "${BIN_DIR}/tools/uv/${ORCA_BUNDLED_UV_FILENAME}"
             COMMAND chmod +x "${BIN_DIR}/tools/uv/${ORCA_BUNDLED_UV_FILENAME}"
@@ -386,9 +401,9 @@ endif()
 message(STATUS "libslic3r-CMAKE_BUILD_TYPE: ${build_type}")
 message(STATUS "CMAKE_CURRENT_BINARY_DIR: ${CMAKE_CURRENT_BINARY_DIR}")
 if (WIN32)
-    install(TARGETS OrcaSlicer RUNTIME DESTINATION ".")
+    install(TARGETS UnlayeredSlicer RUNTIME DESTINATION ".")
     if (MSVC)
-        install(TARGETS OrcaSlicer_app_gui RUNTIME DESTINATION ".")
+        install(TARGETS UnlayeredSlicer_app_gui RUNTIME DESTINATION ".")
     endif ()
     install(FILES ${output_dlls_${build_type}} DESTINATION ".")
     install(DIRECTORY "${CMAKE_PREFIX_PATH}/libpython/" DESTINATION "python")
@@ -397,5 +412,5 @@ else ()
     else()
         install(FILES ${output_sos_${build_type}} DESTINATION "${CMAKE_INSTALL_PREFIX}")
     endif()
-    install(TARGETS OrcaSlicer RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS UnlayeredSlicer RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif ()

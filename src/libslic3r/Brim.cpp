@@ -110,6 +110,10 @@ static bool closest_point_on_matching_island(const ExPolygons &raw_outline, cons
 static ExPolygons get_print_object_bottom_layer_expolygons(const PrintObject &print_object)
 {
     ExPolygons ex_polygons;
+    // A PrintObject can legitimately have no layers -- a cut-plane segment whose clipped geometry
+    // is empty, for one -- and every caller here reads layers().front() unguarded.
+    if (print_object.layers().empty())
+        return ex_polygons;
     for (LayerRegion *region : print_object.layers().front()->regions())
         Slic3r::append(ex_polygons, closing_ex(region->slices.surfaces, float(SCALED_EPSILON)));
     return ex_polygons;
@@ -122,6 +126,10 @@ double getadhesionCoeff(const PrintObject* printObject)
 
     auto print = printObject->print();
     std::vector<size_t> extrudersFirstLayer;
+    // No first layer: no first-layer extruders to look up, so keep the neutral coefficient the
+    // loop below would leave in place anyway.
+    if (printObject->layers().empty())
+        return 1.;
     auto firstLayerRegions = printObject->layers().front()->regions();
     if (!firstLayerRegions.empty()) {
         for (const LayerRegion* regionPtr : firstLayerRegions) {
@@ -356,6 +364,8 @@ static ExPolygons make_brim_ears(const PrintObject* object)
     if (brim_ear_points.size() <= 0) {
         return mouse_ears_ex;
     }
+    if (object->layers().empty())
+        return mouse_ears_ex;
     //ORCA: Painted ears follow the EFC-adjusted outline when enabled, while
     // preserving their position along the selected outline segment.
     const bool use_efc_outline = use_brim_efc_outline(*object);
@@ -437,6 +447,22 @@ static ExPolygons outer_inner_brim_area(const Print& print,
         ++extruderNo;
         for (const auto& objectWithExtruder : objPrintVec) {
             const PrintObject* object = print.get_object(objectWithExtruder.first);
+            // No first layer, no brim to build from it (see get_print_object_bottom_layer_expolygons).
+            if (object->layers().empty())
+                continue;
+            // UNLAYERED_MOD -- no brim for an object sliced in a TILTED frame. A brim exists to pin
+            // the first layer to the build plate, and a tilted chunk's first layer is not on the
+            // plate: it rests on the chunk below it. The brim is built flat in plate coordinates and
+            // then run through the object's un-rotation on the way out (process_layer hands the brim
+            // the same post_trafo_inverse() it hands the extrusions), which tips it under the bed.
+            // Measured on a 20 mm cube with one 30-degree chunk: 1209 brim extrusions below Z0,
+            // reaching 8.6 mm under the plate, while the object's own walls never went below 0.144.
+            //
+            // Same identity test GCode::_extrude uses to decide whether a path needs un-rotating at
+            // all, so the two agree by construction. An untilted object -- an ordinary print, or the
+            // root chunk that really does sit on the plate -- is unaffected and still gets its brim.
+            if (! object->post_trafo_inverse().linear().isApprox(Matrix3d::Identity()))
+                continue;
             const BrimType     brim_type = object->config().brim_type.value;
             float              brim_offset = scale_(object->config().brim_object_gap.value);
             double             flowWidth = print.brim_flow().scaled_spacing() * SCALING_FACTOR;
@@ -881,6 +907,9 @@ void make_brim(const Print& print, PrintTryCancel try_cancel, Polygons& islands_
     for (const ObjectID printObjID : print.print_object_ids()) {
         BoundingBox bbx;
         PrintObject* object = const_cast<PrintObject*>(print.get_object(printObjID));
+        // Nothing sliced, nothing to bound: layers().front() below would read out of bounds.
+        if (object->layers().empty())
+            continue;
         //ORCA: Use EFC-compensated outline for brim bounding box when enabled.
         const ExPolygons brim_slices = use_brim_efc_outline(*object) ?
             get_print_object_bottom_layer_expolygons(*object) : object->layers().front()->lslices;

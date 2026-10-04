@@ -32,12 +32,19 @@ static double slope_from_normal(const Eigen::Vector3d& normal)
 
 static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionPath &path)
 {
+
+	    //BOOST_LOG_TRIVIAL(info) << "contour_extrusion_path: role=" << path.role();
+
     if (path.role() != erTopSolidInfill && path.role() != erIroning && path.role() != erExternalPerimeter && path.role() != erPerimeter) {
+            //BOOST_LOG_TRIVIAL(info) << "contour_extrusion_path: skipping role=" << path.role();
+
 		return false;
 	}
 	
 	Layer *layer = region->layer();
 	coordf_t mesh_slice_z = layer->slice_z + mesh.ground_level();
+    BOOST_LOG_TRIVIAL(info) << "contour_extrusion_path: mesh_slice_z=" << mesh_slice_z << " ground_level=" << mesh.ground_level();
+
 	coordf_t min_z = region->region().config().zaa_min_z;
 
 	const Points3 &points = path.polyline.points;
@@ -75,6 +82,8 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
 			coordf_t y = p.y();
 
 			sla::IndexedMesh::hit_result hit_up = mesh.query_ray_hit({x, y, mesh_slice_z}, {0.0, 0.0, 1.0});
+            //BOOST_LOG_TRIVIAL(info) << "contour_extrusion_path: hit=" << hit_up.is_hit() << " distance=" << hit_up.distance();
+
 
 			double d = hit_up.distance() - (layer->print_z - layer->slice_z);
 

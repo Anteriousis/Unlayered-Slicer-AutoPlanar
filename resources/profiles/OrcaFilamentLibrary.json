@@ -1029,6 +1029,14 @@
 			"sub_path": "filament/SUNLU/SUNLU PLA+ @base.json"
 		},
 		{
+			"name": "SUNLU PLA @base",
+			"sub_path": "filament/SUNLU/SUNLU PLA @base.json"
+		},
+		{
+			"name": "3DFuel Pro PCTG @base",
+			"sub_path": "filament/3DFuel/3DFuel Pro PCTG @base.json"
+		},
+		{
 			"name": "SUNLU Silk PLA+ @base",
 			"sub_path": "filament/SUNLU/SUNLU Silk PLA+ @base.json"
 		},
@@ -1919,6 +1927,14 @@
 		{
 			"name": "SUNLU PLA+ @System",
 			"sub_path": "filament/SUNLU/SUNLU PLA+ @System.json"
+		},
+		{
+			"name": "SUNLU PLA @System",
+			"sub_path": "filament/SUNLU/SUNLU PLA @System.json"
+		},
+		{
+			"name": "3DFuel Pro PCTG @System",
+			"sub_path": "filament/3DFuel/3DFuel Pro PCTG @System.json"
 		},
 		{
 			"name": "SUNLU Silk PLA+ @System",

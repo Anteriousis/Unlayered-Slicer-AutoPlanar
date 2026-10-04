@@ -106,6 +106,41 @@ size_t get_extruder_index(const GCodeConfig& config, unsigned int filament_id)
     return 0;
 }
 
+// UNLAYERED_MOD — see the header. Rb(Y) * Rc(Z), or Identity when non-planar printing is off.
+Transform3d layer_rotation_trafo(const PrintObjectConfig &object_config, bool nonplanar_enabled)
+{
+    Transform3d trafo = Transform3d::Identity();
+    if (! nonplanar_enabled)
+        return trafo;
+    const double b_angle = object_config.layer_rotation_b.value * PI / 180.0;
+    const double c_angle = object_config.layer_rotation_c.value * PI / 180.0;
+    trafo.linear() = (Eigen::AngleAxisd(b_angle, Vec3d::UnitY()) *
+                      Eigen::AngleAxisd(c_angle, Vec3d::UnitZ())).toRotationMatrix();
+    return trafo;
+}
+
+// UNLAYERED_MOD — see the header.
+void tool_axis_to_bc(const Vec3d &tool_axis, double &angle_b, double &angle_c)
+{
+    const Vec3d n = tool_axis.normalized();
+    const double n_xy = std::sqrt(n.x() * n.x() + n.y() * n.y());
+    if (n_xy < 1e-6) {
+        // Vertical: the azimuth is arbitrary, so report the home value.
+        angle_c = 0.0;
+        angle_b = (n.z() > 0.0) ? -0.5 * PI : 0.5 * PI;
+    } else {
+        angle_c = std::atan2(n.y(), n.x());
+        angle_b = std::atan2(-n.z(), n_xy);
+    }
+}
+
+// UNLAYERED_MOD — see the header.
+Vec3d bc_to_tool_axis(double angle_b, double angle_c)
+{
+    const double cos_b = std::cos(angle_b);
+    return Vec3d(cos_b * std::cos(angle_c), cos_b * std::sin(angle_c), -std::sin(angle_b));
+}
+
 
 // Orca: input shaping values types by flavor
 std::vector<std::string> get_shaper_type_values_for_flavor(GCodeFlavor flavor)
@@ -162,7 +197,8 @@ static t_config_enum_values s_keys_map_PrintHostType {
     { "simplyprint",    htSimplyPrint },
     { "elegoolink",     htElegooLink },
     { "3dprinteros",    ht3DPrinterOS },
-    { "moonraker",      htMoonraker }
+    { "moonraker",      htMoonraker },
+    { "unlayered",      htUnlayered }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrintHostType)
 
@@ -328,9 +364,19 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SurfaceFillOrder)
 //BBS
 static t_config_enum_values s_keys_map_PrintSequence {
     { "by layer",     int(PrintSequence::ByLayer) },
-    { "by object",    int(PrintSequence::ByObject) }
+    { "by object",    int(PrintSequence::ByObject) },
+    { "by group",     int(PrintSequence::ByGroup) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrintSequence)
+
+// Orca 5-axis: active rotary axis pair.
+static t_config_enum_values s_keys_map_AxisSelection {
+    { "ab",      int(AxisSelection::AB) },
+    { "bc",      int(AxisSelection::BC) },
+    { "ac",      int(AxisSelection::AC) },
+    { "virtual", int(AxisSelection::Virtual) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(AxisSelection)
 
 static t_config_enum_values s_keys_map_PrintOrder{
     { "default",     int(PrintOrder::Default) },
@@ -976,7 +1022,7 @@ void PrintConfigDef::init_common_params()
 
     def = this->add("use_3mf", coBool);
     def->label = L("Use 3MF instead of G-code");
-    def->tooltip = L("Enable this if the printer accepts a 3MF file as the print job. When enabled, Orca Slicer "
+    def->tooltip = L("Enable this if the printer accepts a 3MF file as the print job. When enabled, Unlayered Slicer "
                      "sends the sliced file as a .gcode.3mf, instead of a plain .gcode file.");
     def->mode = comAdvanced;
     def->cli = ConfigOptionDef::nocli;
@@ -994,7 +1040,7 @@ void PrintConfigDef::init_common_params()
 
     def = this->add("print_host", coString);
     def->label = L("Hostname, IP or URL");
-    def->tooltip = L("Orca Slicer can upload G-code files to a printer host. This field should contain "
+    def->tooltip = L("Unlayered Slicer can upload G-code files to a printer host. This field should contain "
         "the hostname, IP address or URL of the printer host instance. "
         "Print host behind HAProxy with basic auth enabled can be accessed by putting the user name and password into the URL "
         "in the following format: https://username:password@your-octopi-address/");
@@ -1011,7 +1057,7 @@ void PrintConfigDef::init_common_params()
 
     def = this->add("printhost_apikey", coString);
     def->label = L("API Key / Password");
-    def->tooltip = L("Orca Slicer can upload G-code files to a printer host. This field should contain "
+    def->tooltip = L("Unlayered Slicer can upload G-code files to a printer host. This field should contain "
         "the API Key or the password required for authentication.");
     def->mode = comAdvanced;
     def->cli = ConfigOptionDef::nocli;
@@ -2005,10 +2051,22 @@ void PrintConfigDef::init_fff_params()
     def->enum_keys_map = &ConfigOptionEnum<PrintSequence>::get_enum_values();
     def->enum_values.push_back("by layer");
     def->enum_values.push_back("by object");
+    def->enum_values.push_back("by group");
     def->enum_labels.push_back(L("By layer"));
     def->enum_labels.push_back(L("By object"));
+    def->enum_labels.push_back(L("By group"));
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
+
+    def = this->add("print_group", coInt);
+    def->label = L("Print group");
+    def->category = L("Others");
+    def->tooltip = L("Assign this object to a numbered group for the 'by group' print sequence. "
+                     "Objects sharing the same group number are printed together layer by layer; "
+                     "groups are printed sequentially. 0 means this object prints alone (like 'by object').");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("print_order", coEnum);
     def->label = L("Intra-layer order");
@@ -2587,7 +2645,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L(
         "This option sets the min point for the allowed bed mesh area. Due to the probe's XY offset, most printers are unable to probe the "
         "entire bed. To ensure the probe point does not go outside the bed area, the minimum and maximum points of the bed mesh should be "
-        "set appropriately. OrcaSlicer ensures that adaptive_bed_mesh_min/adaptive_bed_mesh_max values do not exceed these min/max "
+        "set appropriately. Unlayered Slicer ensures that adaptive_bed_mesh_min/adaptive_bed_mesh_max values do not exceed these min/max "
         "points. This information can usually be obtained from your printer manufacturer. The default setting is (-99999, -99999), which "
         "means there are no limits, thus allowing probing across the entire bed.");
     def->sidetext = L("mm");	// millimeters, CIS languages need translation
@@ -2599,7 +2657,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L(
         "This option sets the max point for the allowed bed mesh area. Due to the probe's XY offset, most printers are unable to probe the "
         "entire bed. To ensure the probe point does not go outside the bed area, the minimum and maximum points of the bed mesh should be "
-        "set appropriately. OrcaSlicer ensures that adaptive_bed_mesh_min/adaptive_bed_mesh_max values do not exceed these min/max "
+        "set appropriately. Unlayered Slicer ensures that adaptive_bed_mesh_min/adaptive_bed_mesh_max values do not exceed these min/max "
         "points. This information can usually be obtained from your printer manufacturer. The default setting is (99999, 99999), which "
         "means there are no limits, thus allowing probing across the entire bed.");
     def->sidetext = L("mm");	// millimeters, CIS languages need translation
@@ -3131,7 +3189,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Minimal purge on wipe tower");
     def->tooltip = L("After a tool change, the exact position of the newly loaded filament inside "
                      "the nozzle may not be known, and the filament pressure is likely not yet stable. "
-                     "Before purging the print head into an infill or a sacrificial object, Orca Slicer will always prime "
+                     "Before purging the print head into an infill or a sacrificial object, Unlayered Slicer will always prime "
                      "this amount of material into the wipe tower to produce successive infill or sacrificial object extrusions reliably.");
     def->sidetext = L(u8"mm³");	// cubic millimeters, CIS languages need translation
     def->min = 0;
@@ -4325,7 +4383,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Do not write the CONFIG_BLOCK (slicer configuration key/value pairs) into the G-code file. "
                    "This can help with printers whose firmware crashes when parsing these comment lines "
                    "(e.g. Anycubic go-klipper). Note: the G-code file will no longer contain slicer settings, "
-                   "so importing it back into OrcaSlicer will not restore the configuration.");
+                   "so importing it back into Unlayered Slicer will not restore the configuration.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -4582,7 +4640,7 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Strength");
     def->tooltip = L("Connect an infill line to an internal perimeter with a short segment of an additional perimeter. "
                      "If expressed as percentage (example: 15%) it is calculated over infill extrusion width. "
-                     "Orca Slicer tries to connect two close infill lines to a short perimeter segment. If no such perimeter segment "
+                     "Unlayered Slicer tries to connect two close infill lines to a short perimeter segment. If no such perimeter segment "
                      "shorter than infill_anchor_max is found, the infill line is connected to a perimeter segment at just one side "
                      "and the length of the perimeter segment taken is limited to this parameter, but no longer than anchor_length_max.\n"
                      "Set this parameter to zero to disable anchoring perimeters connected to a single infill line.");
@@ -4610,7 +4668,7 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Strength");
     def->tooltip = L("Connect an infill line to an internal perimeter with a short segment of an additional perimeter. "
                      "If expressed as percentage (example: 15%) it is calculated over infill extrusion width. "
-                     "Orca Slicer tries to connect two close infill lines to a short perimeter segment. If no such perimeter segment "
+                     "Unlayered Slicer tries to connect two close infill lines to a short perimeter segment. If no such perimeter segment "
                      "shorter than this parameter is found, the infill line is connected to a perimeter segment at just one side "
                      "and the length of the perimeter segment taken is limited to infill_anchor, but no longer than this parameter.\n"
                      "If set to 0, the old algorithm for infill connection will be used, it should create the same result as with 1000 & 0.");
@@ -4950,6 +5008,211 @@ void PrintConfigDef::init_fff_params()
         "set to Klipper.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
+
+    // ---- Orca non-planar printing settings ----
+    // NOTE: enable_nonplanar is intended to be the single SOURCE OF TRUTH for whether
+    // non-planar printing is active anywhere in the codebase. It is not yet wired into
+    // every consumer; for now it shows/hides the GUI non-planar section and is enabled by
+    // the 5-Axis Printer system profile. New non-planar behavior should branch on this.
+    def = this->add("enable_nonplanar", coBool);
+    def->label = L("Enable non-planar printing");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Master switch for non-planar printing. This is the single source of truth for "
+                     "whether non-planar printing is enabled. The other options in this section are "
+                     "hidden unless this is enabled.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // DERIVED from printer type == Virtual; see DynamicPrintConfig::normalize_fdm_1. It is NOT
+    // shown in the UI any more (the "Printer type" dropdown replaced the checkbox) and must NOT be
+    // deleted: shipped machine_start_gcode / machine_end_gcode templates reference {virtual_5axis}
+    // as a placeholder-parser variable (resources/profiles/Unlayered/machine/*.json), and the
+    // parser throws "Variable does not exist" on an unknown identifier. A user carrying a
+    // customised copy of such a template would get a hard slicing failure that no key-renaming
+    // migration can reach, because nothing rewrites custom G-code TEXT.
+    def = this->add("virtual_5axis", coBool);
+    def->label = L("Virtual 5-axis (derived)");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Derived from Printer type = Virtual. Kept so custom start/end G-code that "
+                     "branches on {virtual_5axis} keeps working. Do not set it by hand.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // Per-chunk usable build-volume dimensions (GUI visualization only). The visualizer draws, for
+    // each chunk, a translucent cylinder of `radius` spanning Z from `min_build_height` to
+    // `max_build_height`. See GLCanvas3D::_render_chunk_build_volumes.
+    def = this->add("radius", coFloat);
+    def->label = L("Radius");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Radius of a chunk's usable build-volume visualization cylinder.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(100.0));
+
+    def = this->add("max_build_height", coFloat);
+    def->label = L("Max build height");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Upper Z bound of a chunk's usable build-volume visualization cylinder.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(200.0));
+
+    def = this->add("min_build_height", coFloat);
+    def->label = L("Min build height");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Lower Z bound of a chunk's usable build-volume visualization cylinder.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    // Inter-chunk travel. Between two chunks the nozzle hops off along the tool axis it was
+    // printing with, rotates C to the next chunk (holding the machine X/Y axes still) while Z
+    // moves to the next chunk's lifted staging height, moves X/Y to that staging position while B
+    // tilts, and finally descends onto the first extrusion point. See the ByObject transition in
+    // GCode::_do_export.
+    def = this->add("nonplanar_departure_distance", coFloat);
+    def->label = L("Chunk departure distance");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("How far the nozzle backs off along the tool axis of the chunk it just "
+                     "finished, before climbing to the traverse height. This breaks away "
+                     "perpendicular to the surface just printed.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+
+    def = this->add("nonplanar_approach_distance", coFloat);
+    def->label = L("Chunk approach height");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Height above the next chunk's local bed plane of the lifted staging "
+                     "position (over the center of the chunk's footprint) that the inter-chunk "
+                     "transition moves to before descending onto the first extrusion point.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(5.0));
+
+    def = this->add("nonplanar_nozzle_to_b_axis", coFloat);
+    def->label = L("Nozzle tip to B axis distance");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Distance from the nozzle tip to the center of the B rotation axis. A B swing "
+                     "displaces the tip by this arm length; the inter-chunk transition uses it to "
+                     "pre-compensate the staging moves for that displacement.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(47.0));
+
+    // UNLAYERED_MOD -- hotend model for the post-slice collision check (multiplanar prints only).
+    def = this->add("nonplanar_hotend_cone_height", coFloat);
+    def->label = L("Hotend cone height");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("After slicing a multiplanar print, the hotend is modelled as a cone with its apex at the nozzle "
+                     "tip and this height along the tool axis; material printed earlier that falls inside the cone "
+                     "while a later chunk prints is reported as a collision.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(40.0));
+
+    def = this->add("nonplanar_hotend_cone_angle", coFloat);
+    def->label = L("Hotend cone angle");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Full opening angle of the hotend cone used by the collision check (90 = a 45\u00B0 half-angle). "
+                     "0 disables the check.");
+    def->sidetext = L("\u00B0");
+    def->min = 0;
+    def->max = 179;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(90.0));
+
+    // UNLAYERED_MOD -- Virtual-only safety limits. Both default to 0 = no limit, so no project that
+    // slices today starts failing. Enforced by refusing the slice, never by clamping: the authored
+    // build normal drives the cut geometry, the support bounds and the 3D scene, so silently
+    // reducing it would print something the viewport does not show.
+    def = this->add("nonplanar_virtual_max_angle", coFloat);
+    def->label = L("Max tilt angle");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Largest angle a build direction may make with vertical on a virtual 5-axis "
+                     "printer. The nozzle stays upright while a tilted chunk prints, so past a certain "
+                     "tilt the flat tip and the hotend cone can no longer reach the surface cleanly. "
+                     "Slicing is refused if any build direction exceeds it. 0 means no limit.");
+    def->sidetext = u8"\u00B0";	// degrees, don't need translation
+    def->min = 0;
+    def->max = 90;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("nonplanar_virtual_max_z", coFloat);
+    def->label = L("Max total height");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Highest Z the toolpath may reach on a virtual 5-axis printer, as written in the "
+                     "G-code. On a large tilted plane the head has to climb as it works outwards -- "
+                     "chunk transitions lift clear of everything printed so far -- until it can strike "
+                     "the gantry. Slicing is refused if any move would exceed this. 0 means no limit.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("axis_selection", coEnum);
+    def->label = L("Printer type");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Which pair of rotary axes the machine drives. The slicer drives two rotary axes "
+                     "at a time (5 total); A/B/C are the standard machining rotary axes about X/Y/Z "
+                     "respectively. "
+                     "\"Virtual\" targets an ordinary 3-axis printer: toolpaths are still generated as "
+                     "if for a 5-axis machine, but no rotary words are written. The nozzle stays upright, "
+                     "so tilted chunks are bounded by the max tilt angle and max total height below.");
+    def->enum_keys_map = &ConfigOptionEnum<AxisSelection>::get_enum_values();
+    // Order here must match the AxisSelection enum: the combobox index IS the enum integer.
+    def->enum_values.push_back("ab");
+    def->enum_values.push_back("bc");
+    def->enum_values.push_back("ac");
+    def->enum_values.push_back("virtual");
+    def->enum_labels.push_back(L("A/B"));
+    def->enum_labels.push_back(L("B/C"));
+    def->enum_labels.push_back(L("A/C"));
+    def->enum_labels.push_back(L("Virtual"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<AxisSelection>(AxisSelection::BC));
+
+    // Per-axis rotation limits (degrees). Stored only; not consumed by slicing yet.
+    auto add_axis_rotation_limit = [this](const std::string &opt, const std::string &label, double default_value) {
+        ConfigOptionDef* def = this->add(opt, coFloat);
+        def->label = label;   // already wrapped in L() at the call site (literal -> extractable for i18n)
+        def->category = L("Non-planar Printing");
+        def->tooltip = L("Rotation limit of this rotary axis, in degrees. Stored for the machine "
+                         "definition; not consumed by slicing yet.");
+        def->sidetext = L("°");
+        def->min = -360;
+        def->max = 360;
+        def->mode = comAdvanced;
+        def->set_default_value(new ConfigOptionFloat(default_value));
+    };
+    add_axis_rotation_limit("axis_a_rotation_min", L("Min"), -360);
+    add_axis_rotation_limit("axis_a_rotation_max", L("Max"),  360);
+    add_axis_rotation_limit("axis_b_rotation_min", L("Min"), -360);
+    add_axis_rotation_limit("axis_b_rotation_max", L("Max"),  360);
+    add_axis_rotation_limit("axis_c_rotation_min", L("Min"), -360);
+    add_axis_rotation_limit("axis_c_rotation_max", L("Max"),  360);
+
+    // Per-axis continuous rotation (axis rotates infinitely / firmware unwinds it).
+    auto add_axis_continuous = [this](const std::string &opt) {
+        ConfigOptionDef* def = this->add(opt, coBool);
+        def->label = L("Continuous");
+        def->category = L("Non-planar Printing");
+        def->tooltip = L("This rotary axis can rotate infinitely, or the firmware is responsible for "
+                         "unwinding it, so its rotation limits do not apply.");
+        def->mode = comAdvanced;
+        def->set_default_value(new ConfigOptionBool(false));
+    };
+    add_axis_continuous("axis_a_continuous");
+    add_axis_continuous("axis_b_continuous");
+    add_axis_continuous("axis_c_continuous");
 
     def = this->add("machine_pause_gcode", coString);
     def->label = L("Pause G-code");
@@ -5384,9 +5647,14 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("host_type", coEnum);
     def->label = L("Host Type");
-    def->tooltip = L("Orca Slicer can upload G-code files to a printer host. This field must contain "
-                   "the kind of the host.");
+    def->tooltip = L("Unlayered Slicer can upload G-code files to a printer host. This field must contain "
+                   "the kind of the host.\n\n"
+                   "Choose Unlayered for a Duet board running Unlayered firmware: it speaks the same "
+                   "protocol as Duet and adds in-app firmware updates. Plain Duet leaves the board's "
+                   "firmware alone.");
     def->enum_keys_map = &ConfigOptionEnum<PrintHostType>::get_enum_values();
+    // The order here must match the declaration order of PrintHostType -- see the note on that
+    // enum. New entries go on the END of both lists.
     def->enum_values.push_back("prusalink");
     def->enum_values.push_back("prusaconnect");
     def->enum_values.push_back("octoprint");
@@ -5403,6 +5671,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("elegoolink");
     def->enum_values.push_back("3dprinteros");
     def->enum_values.push_back("moonraker");
+    def->enum_values.push_back("unlayered");
     def->enum_labels.push_back("PrusaLink");
     def->enum_labels.push_back("PrusaConnect");
     def->enum_labels.push_back("Octo/Klipper");
@@ -5419,6 +5688,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back("Elegoo Link");
     def->enum_labels.push_back("3DPrinterOS");
     def->enum_labels.push_back("Moonraker (Klipper)");
+    def->enum_labels.push_back("Unlayered");
     def->mode = comAdvanced;
     def->cli = ConfigOptionDef::nocli;
     def->set_default_value(new ConfigOptionEnum<PrintHostType>(htOctoPrint));
@@ -5600,7 +5870,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("If you want to process the output G-code through custom scripts, "
                    "just list their absolute paths here. Separate multiple scripts with a semicolon. "
                    "Scripts will be passed the absolute path to the G-code file as the first argument, "
-                   "and they can access the Orca Slicer config settings by reading environment variables.");
+                   "and they can access the Unlayered Slicer config settings by reading environment variables.");
     def->gui_flags = "serialized";
     def->multiline = true;
     def->full_width = true;
@@ -6349,6 +6619,28 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Per object"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<SkirtType>(stCombined));
+
+    def = this->add("layer_rotation_b", coFloat);
+    // def->gui_type = ConfigOptionDef::GUIType::f_enum_open;
+    def->label    = L("Layer Rotation B");
+    def->sidetext = u8"°"; // degrees, don't need translation
+    def->min      = -180;
+    def->max      = 180;
+    def->mode     = comAdvanced;
+    def->category = L("Others");
+    def->tooltip  = L("The rotation (in degrees) around the Y axis.");
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("layer_rotation_c", coFloat);
+    // def->gui_type = ConfigOptionDef::GUIType::f_enum_open;
+    def->label    = L("Layer Rotation C");
+    def->sidetext = u8"°"; // degrees, don't need translation
+    def->min      = -180;
+    def->max      = 180;
+    def->mode     = comAdvanced;
+    def->category = L("Others");
+    def->tooltip  = L("The rotation (in degrees) around the Z axis.");
+    def->set_default_value(new ConfigOptionFloat(0));
     
     def = this->add("skirt_loops", coInt);
     def->label = L("Skirt loops");
@@ -6534,8 +6826,8 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("preheat_time", coFloat);
     def->label = L("Preheat time");
-    def->tooltip = L("To reduce the waiting time after tool change, Orca can preheat the next tool while the current tool is still in use. "
-                     "This setting specifies the time in seconds to preheat the next tool. Orca will insert a M104 command to preheat the tool in advance.");
+    def->tooltip = L("To reduce the waiting time after tool change, Unlayered Slicer can preheat the next tool while the current tool is still in use. "
+                     "This setting specifies the time in seconds to preheat the next tool. Unlayered Slicer will insert a M104 command to preheat the tool in advance.");
     def->sidetext = L_CONTEXT("s", "second");	// seconds, CIS languages need translation
     def->min = 0;
     def->max = 120;
@@ -6623,7 +6915,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Tool change on wipe tower");
     def->tooltip = L("Force the toolhead to travel to the wipe tower before issuing the tool change command (Tx). "
                      "Only relevant for multi-extruder (multi-toolhead) printers using a Type 2 wipe tower. "
-                     "By default Orca skips the travel on multi-toolhead machines because the firmware handles the head swap, "
+                     "By default Unlayered Slicer skips the travel on multi-toolhead machines because the firmware handles the head swap, "
                      "which can result in the Tx command being issued above the printed part. "
                      "Enable this option if you want the tool change to always be issued above the wipe tower instead.");
     def->mode = comAdvanced;
@@ -6803,6 +7095,17 @@ void PrintConfigDef::init_fff_params()
 #endif
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.2));
+
+    def = this->add("test_input", coFloat);
+    // def->gui_type = ConfigOptionDef::GUIType::f_enum_open;
+    def->label    = L("Test Input");
+    def->sidetext = u8"°"; // degrees, don't need translation
+    def->min      = -180;
+    def->max      = 180;
+    def->mode     = comAdvanced;
+    def->category = L("Support");
+    def->tooltip  = L("Test input amount");
+    def->set_default_value(new ConfigOptionFloat(0));
 
     def = this->add("support_bottom_z_distance", coFloat);
     def->label = L("Bottom Z distance");
@@ -9216,6 +9519,22 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
 // Don't convert single options here, implement such conversion in PrintConfigDef::handle_legacy() instead.
 void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config)
 {
+    // UNLAYERED_MOD -- the "Virtual 5-axis" checkbox became the fourth value of the "Printer type"
+    // dropdown. Anything written before that carries virtual_5axis = 1 with axis_selection still at
+    // its default, so fold the old bool onto the new enum. This runs on every load path Config.cpp
+    // uses -- .json presets, the 3mf project config, .ini, and both G-code readers -- so one branch
+    // covers every format.
+    if (config.has("virtual_5axis")) {
+        if (config.opt_bool("virtual_5axis"))
+            config.set_key_value("axis_selection", new ConfigOptionEnum<AxisSelection>(AxisSelection::Virtual));
+        // Drop the legacy key once it has been read. Nothing writes it back now that the
+        // checkbox is gone, so leaving a stale true in a saved preset would re-run this
+        // migration on every load and silently undo a later change of the dropdown -- the
+        // setting would not stick. The preset then falls back to the (false) default, and
+        // normalize_fdm_1() recreates the key with the derived value before slicing.
+        config.erase("virtual_5axis");
+    }
+
     if (config.has("thumbnails")) {
         std::string extention;
         if (config.has("thumbnails_format")) {
@@ -9586,6 +9905,27 @@ void DynamicPrintConfig::normalize_fdm(int used_filaments)
         }
         */
     }
+
+    // UNLAYERED_MOD -- same derivation as normalize_fdm_1(). Needed separately because the CLI
+    // applies --key=value overrides straight onto the config and calls THIS function
+    // (UnlayeredSlicer.cpp), never handle_legacy_composite -- so a script still passing
+    // --virtual_5axis=1 would otherwise be silently ignored and then reset to 0, emitting rotary
+    // B/C words into what the operator expects to be 3-axis G-code.
+    if (this->has("virtual_5axis") && this->opt_bool("virtual_5axis"))
+        this->set_key_value("axis_selection", new ConfigOptionEnum<AxisSelection>(AxisSelection::Virtual));
+    if (this->has("axis_selection"))
+        if (auto *v5 = this->option<ConfigOptionBool>("virtual_5axis", true); v5 != nullptr)
+            v5->value = this->option("axis_selection")->getInt() == int(AxisSelection::Virtual);
+
+    // UNLAYERED_MOD -- arc fitting is incompatible with non-planar printing. G2/G3 describe an arc
+    // in the XY plane at a single Z, so an arc fitted across a tilted chunk's toolpath silently
+    // discards the Z variation that makes the path non-planar. Forced off here rather than at the
+    // consumers because enable_arc_fitting drives path GENERATION (Layer, LayerRegion,
+    // PerimeterGenerator) as well as emission (GCode, GCodeWriter) -- one clamp in the config is
+    // the only way all of them agree, and it lands in the exported config so the G-code records it.
+    if (this->has("enable_nonplanar") && this->opt_bool("enable_nonplanar"))
+        if (auto *af = this->option<ConfigOptionBool>("enable_arc_fitting", true); af != nullptr)
+            af->value = false;
 }
 
 //BBS:divide normalize_fdm to 2 steps and call them one by one in Print::Apply
@@ -9656,6 +9996,27 @@ void DynamicPrintConfig::normalize_fdm_1()
     if (auto *opt_gcode_resolution = this->opt<ConfigOptionFloat>("resolution", false); opt_gcode_resolution)
         // Resolution will be above 1um.
         opt_gcode_resolution->value = std::max(opt_gcode_resolution->value, 0.001);
+
+    // UNLAYERED_MOD -- virtual_5axis is now DERIVED from the "Printer type" dropdown. It stays in
+    // the config because shipped machine_start_gcode/machine_end_gcode templates reference
+    // {virtual_5axis} through the placeholder parser, which throws on an unknown identifier.
+    // Done here because Print::apply() calls normalize_fdm_1() unconditionally, before the full
+    // config is handed to the placeholder parser and before Print caches its typed config -- so
+    // headless CLI slicing gets the same value the GUI does. A GUI-only sync would miss the CLI.
+    // ConfigOptionBool does NOT override setInt() -- the base throws BadOptionTypeException
+    // ("Calling ConfigOption::setInt on a non-int ConfigOption"), so this has to assign the
+    // typed value. ConfigOptionEnum<T> does override getInt(), so reading the dropdown is fine.
+    if (this->has("axis_selection"))
+        if (auto *v5 = this->option<ConfigOptionBool>("virtual_5axis", true); v5 != nullptr)
+            v5->value = this->option("axis_selection")->getInt() == int(AxisSelection::Virtual);
+
+    // UNLAYERED_MOD -- see the same clamp in normalize_fdm(). Duplicated for the same reason the
+    // virtual_5axis derivation above is: Print::apply() calls normalize_fdm_1() while the CLI path
+    // calls normalize_fdm(), so a clamp in only one of them leaves the other emitting G2/G3 arcs
+    // across non-planar toolpaths.
+    if (this->has("enable_nonplanar") && this->opt_bool("enable_nonplanar"))
+        if (auto *af = this->option<ConfigOptionBool>("enable_arc_fitting", true); af != nullptr)
+            af->value = false;
 
     return;
 }
@@ -11969,6 +12330,15 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def->tooltip = L("Export the objects as multiple STLs to directory.");
     def->set_default_value(new ConfigOptionString("stl_path"));
 
+    // UNLAYERED_MOD — headless access to the automated-multiplanar skeleton pipeline.
+    def = this->add("export_skeleton", coString);
+    def->label = L("Export skeleton");
+    def->tooltip = L("Run the multiplanar skeleton pipeline on each object and write "
+                     "<name>_skeleton.obj (viewable) and <name>_skeleton.json (checkable) "
+                     "to the given directory.");
+    def->cli_params = "directory";
+    def->set_default_value(new ConfigOptionString("skeleton_path"));
+
     /*def = this->add("export_gcode", coBool);
     def->label = L("Export G-code");
     def->tooltip = L("Slice the model and export toolpaths as G-code.");
@@ -12190,14 +12560,27 @@ CLIMiscConfigDef::CLIMiscConfigDef()
 {
     ConfigOptionDef* def;
 
+    // UNLAYERED_MOD — one string rather than a config option per knob, so the whole
+    // SkeletonParams set is reachable from the CLI without churning PrintConfig.
+    def = this->add("skeleton_params", coString);
+    def->label = L("Skeleton parameters");
+    def->tooltip = L("Semicolon-separated key=value overrides for --export-skeleton, e.g. "
+                     "\"tunnel_fill=on;resample=3;prune_leaves=2\". Keys: method, quality_speed, "
+                     "min_edge_factor, voxel_resolution, resample, smooth_iterations, smooth_alpha, "
+                     "collapse_junctions, collapse_to_spine, prune_leaves, tangent_w, "
+                     "correct_convergence, tunnel_fill (off|threshold|on), tunnel_min_aspect, "
+                     "tunnel_station, bed_snap_band.");
+    def->cli_params = "\"key=value;...\"";
+    def->set_default_value(new ConfigOptionString(""));
+
     /*def = this->add("ignore_nonexistent_config", coBool);
     def->label = L("Ignore non-existent config files");
     def->tooltip = L("Do not fail if a file supplied to --load does not exist.");
 
     def = this->add("config_compatibility", coEnum);
     def->label = L("Forward-compatibility rule when loading configurations from config files and project files (3MF, AMF).");
-    def->tooltip = L("This version of OrcaSlicer may not understand configurations produced by the newest OrcaSlicer versions. "
-                     "For example, newer OrcaSlicer may extend the list of supported firmware flavors. One may decide to "
+    def->tooltip = L("This version of Unlayered Slicer may not understand configurations produced by the newest Unlayered Slicer versions. "
+                     "For example, newer Unlayered Slicer may extend the list of supported firmware flavors. One may decide to "
                      "bail out or to substitute an unknown value with a default silently or verbosely.");
     def->enum_keys_map = &ConfigOptionEnum<ForwardCompatibilitySubstitutionRule>::get_enum_values();
     def->enum_values.push_back("disable");
@@ -12272,8 +12655,8 @@ CLIMiscConfigDef::CLIMiscConfigDef()
 
     def = this->add("single_instance", coBool);
     def->label = L("Single instance mode");
-    def->tooltip = L("If enabled, the command line arguments are sent to an existing instance of GUI OrcaSlicer, "
-                     "or an existing OrcaSlicer window is activated. "
+    def->tooltip = L("If enabled, the command line arguments are sent to an existing instance of GUI Unlayered Slicer, "
+                     "or an existing Unlayered Slicer window is activated. "
                      "Overrides the \"single_instance\" configuration value from application preferences.");*/
 
 /*
@@ -12423,12 +12806,12 @@ ReadWriteSlicingStatesConfigDef::ReadWriteSlicingStatesConfigDef()
     def = this->add("position", coFloats);
     def->label = L("Position");
     def->tooltip = L("Position of the extruder at the beginning of the custom G-code block. If the custom G-code travels somewhere else, "
-                     "it should write to this variable so OrcaSlicer knows where it travels from when it gets control back.");
+                     "it should write to this variable so Unlayered Slicer knows where it travels from when it gets control back.");
 
     def = this->add("e_retracted", coFloats);
     def->label = L("Retraction");
     def->tooltip = L("Retraction state at the beginning of the custom G-code block. If the custom G-code moves the extruder axis, "
-                     "it should write to this variable so OrcaSlicer de-retracts correctly when it gets control back.");
+                     "it should write to this variable so Unlayered Slicer de-retracts correctly when it gets control back.");
 
     def = this->add("e_restart_extra", coFloats);
     def->label = L("Extra de-retraction");

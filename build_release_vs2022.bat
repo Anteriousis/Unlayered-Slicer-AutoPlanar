@@ -1,4 +1,4 @@
-@REM OrcaSlicer build script for Windows
+@REM Unlayered Slicer build script for Windows
 @echo off
 set WP=%CD%
 
@@ -46,8 +46,6 @@ setlocal DISABLEDELAYEDEXPANSION
 cd deps
 mkdir %build_dir%
 cd %build_dir%
-set "SIG_FLAG="
-if defined ORCA_UPDATER_SIG_KEY set "SIG_FLAG=-DORCA_UPDATER_SIG_KEY=%ORCA_UPDATER_SIG_KEY%"
 
 if "%1"=="slicer" (
     GOTO :slicer
@@ -64,7 +62,7 @@ cmake --build . --config %build_type% --target deps -- -m
 if "%1"=="deps" exit /b 0
 
 :slicer
-echo "building Orca Slicer..."
+echo "building Unlayered Slicer..."
 cd %WP%
 mkdir %build_dir%
 cd %build_dir%

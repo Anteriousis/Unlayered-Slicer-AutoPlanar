@@ -30,7 +30,7 @@ import orca
 import json
 
 _DEFAULTS = {
-    "stamp_text": "processed by the OrcaSlicer G-code Stamp plugin",
+    "stamp_text": "processed by the Unlayered Slicer G-code Stamp plugin",
 }
 
 

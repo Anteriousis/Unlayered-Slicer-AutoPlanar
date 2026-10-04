@@ -16,7 +16,7 @@ shift 2  # Remove first two arguments, leaving only vendor names
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOURCES_DIR="$SCRIPT_DIR/../resources/profiles"
 ORIGINAL_DIR="$(pwd)"
-OUTPUT_FILE="orcaslicer-profiles_ota_${VERSION}.${NUMBER}.zip"
+OUTPUT_FILE="unlayered-slicer-profiles_ota_${VERSION}.${NUMBER}.zip"
 TEMP_DIR="/tmp/orca_profiles_$$"  # Use PID to make temp dir unique
 
 # Check if resources directory exists

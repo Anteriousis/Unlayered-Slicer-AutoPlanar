@@ -1510,26 +1510,29 @@ bool GLToolbar::generate_icons_texture()
     }
 
     std::vector<std::pair<int, bool>> states;
-    //1: white only, 2: gray only, 0 : normal
+    //1: white only, 2: gray only, 3: hover plate, 4: pressed plate, 0 : as authored
     //true/false: apply background or not
+    // A toggled-on item (layers editing, the view toolbars) has to differ from a merely
+    // enabled one by more than the accent path inside its SVG -- the grayscale palette flattens
+    // that path onto the Normal grey. See the ramp in GLTexture::load_from_svg_files_as_sprites_array.
     if (m_type == Normal) {
         states.push_back({ 1, false }); // Normal
-        states.push_back({ 0, false }); // Pressed
+        states.push_back({ 4, false }); // Pressed
         states.push_back({ 2, false }); // Disabled
-        states.push_back({ 0, false }); // Hover
-        states.push_back({ 0, false }); // HoverPressed
+        states.push_back({ 3, false }); // Hover
+        states.push_back({ 4, false }); // HoverPressed
         states.push_back({ 2, false }); // HoverDisabled
-        states.push_back({ 0, false }); // HighlightedShown
+        states.push_back({ 3, false }); // HighlightedShown
         states.push_back({ 2, false }); // HighlightedHidden
     }
     else {
         states.push_back({ 1, false }); // Normal
-        states.push_back({ 0, true });  // Pressed
+        states.push_back({ 4, false }); // Pressed
         states.push_back({ 2, false }); // Disabled
-        states.push_back({ 0, false }); // Hover
-        states.push_back({ 1, true });  // HoverPressed
+        states.push_back({ 3, false }); // Hover
+        states.push_back({ 4, false }); // HoverPressed
         states.push_back({ 1, false }); // HoverDisabled
-        states.push_back({ 0, false }); // HighlightedShown
+        states.push_back({ 3, false }); // HighlightedShown
         states.push_back({ 1, false }); // HighlightedHidden
     }
 

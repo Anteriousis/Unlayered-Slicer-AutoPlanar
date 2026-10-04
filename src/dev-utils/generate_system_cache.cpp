@@ -14,7 +14,7 @@ namespace po = boost::program_options;
 
 int main(int argc, char* argv[])
 {
-    po::options_description desc("OrcaSlicer System Cache Generator\nUsage");
+    po::options_description desc("Unlayered Slicer System Cache Generator\nUsage");
     // clang-format off
     desc.add_options()
         ("help,h", "Show help")

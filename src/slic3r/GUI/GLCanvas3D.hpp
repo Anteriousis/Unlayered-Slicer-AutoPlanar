@@ -568,6 +568,13 @@ private:
     BackgroundSlicingProcess *m_process;
     bool m_requires_check_outside_state{ false };
 
+    // Cut chunk previews of the Prepare view, keyed by (object id, instance index). See
+    // _update_cut_chunk_previews(). The prompt flags drive the one-time offer to switch the
+    // colouring off once a plate uses a second filament.
+    std::map<std::pair<ObjectID, int>, std::shared_ptr<GLVolume::CutChunkPreview>> m_cut_chunk_previews;
+    bool m_cut_chunk_prompt_check_pending{ false };
+    bool m_cut_chunk_prompt_shown{ false };
+
     std::array<unsigned int, 2> m_old_size{ 0, 0 };
 
     bool m_is_touchpad_navigation{ false };
@@ -735,6 +742,10 @@ public:
     std::array<unsigned int, 2> m_ssao_texture_size{ { 0, 0 } };
     GLModel m_plate_shadow_mask;
     std::string m_plate_shadow_mask_key;
+    // Cached, world-space mesh of the usable build volume: a single cylinder on the rotary axis.
+    // Rebuilt only when its dimensions or the plate center change (keyed by m_..._key).
+    GLModel m_chunk_build_volumes;
+    std::string m_chunk_build_volumes_key;
     // Depth-based shadow map used to cast object shadows onto other objects and themselves.
     unsigned int m_shadow_map_fbo{ 0 };
     unsigned int m_shadow_map_texture_id{ 0 };
@@ -1010,6 +1021,8 @@ public:
     void ensure_on_bed(unsigned int object_idx, bool allow_negative_z);
 
     std::vector<double> get_gcode_layers_zs() const { return m_gcode_viewer.get_layers_zs(); }
+    // UNLAYERED_MOD
+    std::vector<bool> get_gcode_layers_planar() const { return m_gcode_viewer.get_layers_planar(); }
     std::vector<float> get_gcode_layers_times() const { return m_gcode_viewer.get_layers_times(); }
     const std::vector<float>& get_gcode_layers_times_cache() const { return m_gcode_layers_times_cache; }
     void reset_gcode_layers_times_cache() { m_gcode_layers_times_cache.clear(); }
@@ -1264,6 +1277,10 @@ private:
     void _render_ssao_pass(unsigned int width, unsigned int height);
     void _render_background();
     void _render_bed(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_axes);
+    // Draws the usable build volume as a translucent cylinder on the rotary axis, sized by the
+    // radius / max_build_height / min_build_height printer settings. Shown when at least one chunk
+    // (a ModelObject carrying a layer_rotation_b override) is present. Visualization only.
+    void _render_chunk_build_volumes(const Transform3d& view_matrix, const Transform3d& projection_matrix);
     // Build the light-space depth shadow map (consumed by gouraud/phong for object & self shadows)
     // and cast it onto the build plate. Realistic view only.
     void _render_shadows(const Transform3d& view_matrix, const Transform3d& projection_matrix);
@@ -1271,6 +1288,12 @@ private:
     void _render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true);
     //BBS: add outline drawing logic
     void _render_objects(GLVolumeCollection::ERenderType type, bool with_outline = true);
+    // Keep the per-instance cut chunk models in step with the model and hand them to the
+    // model-part volumes; clears them when the colouring is off or this is not the Prepare view.
+    void _update_cut_chunk_previews();
+    // Offer (once per session, unless "don't ask again") to turn cut chunk colours off when the
+    // current plate uses more than one filament, since the colouring hides filament colours.
+    void _maybe_prompt_cut_chunk_colors();
     void _render_wireframe_overlay();
     //BBS: GUI refactor: add canvas size as parameters
     void _render_gcode(int canvas_width, int canvas_height);

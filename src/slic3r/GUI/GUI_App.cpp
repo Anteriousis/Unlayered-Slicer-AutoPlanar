@@ -69,8 +69,6 @@
 #include <wx/fontutil.h>
 #include <wx/glcanvas.h>
 #include <wx/utils.h>
-#include <openssl/hmac.h>
-#include <openssl/evp.h>
 
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
@@ -88,10 +86,10 @@
 #include "GUI_Utils.hpp"
 #include "3DScene.hpp"
 #include "MainFrame.hpp"
+#include "WebAppPanel.hpp"
 #include "Plater.hpp"
 #include "GLCanvas3D.hpp"
 #include "EncodedFilament.hpp"
-#include "GeneratedConfig.hpp"
 
 #include "DeviceCore/DevManager.h"
 
@@ -101,7 +99,7 @@
 #include "../Utils/wxInspectorPlugins/Registration.hpp"
 #include "../Utils/MacDarkMode.hpp"
 #include "../Utils/Http.hpp"
-#include "../Utils/InstanceID.hpp"
+#include "../Utils/AppUpdater.hpp"
 #include "../Utils/UndoRedo.hpp"
 #include "slic3r/Config/Snapshot.hpp"
 #include "Preferences.hpp"
@@ -274,7 +272,7 @@ bool is_associate_files(std::wstring extend)
     wchar_t app_path[MAX_PATH];
     ::GetModuleFileNameW(nullptr, app_path, sizeof(app_path));
 
-    std::wstring prog_id             = L" Orca.Slicer.1";
+    std::wstring prog_id             = L" Unlayered.Slicer.1";
     std::wstring reg_base            = L"Software\\Classes";
     std::wstring reg_extension       = reg_base + L"\\." + extend;
 
@@ -297,7 +295,7 @@ class SplashScreen : public wxSplashScreen
 {
 public:
     SplashScreen(wxPoint pos = wxDefaultPosition)
-        // No wxSPLASH_TIMEOUT — the splash is closed explicitly once MainFrame
+        // No wxSPLASH_TIMEOUT � the splash is closed explicitly once MainFrame
         // is shown. The previous 1500 ms auto-timeout closed the splash long
         // before init finished, leaving the user staring at a frozen blank
         // screen during the slow load_presets / new MainFrame phases.
@@ -336,6 +334,15 @@ public:
         bool dark_mode = m_fg_color != wxColour("#6B6A6A");
         wxSize sz  = m_window->GetClientSize();
         BitmapCache bmp_cache;
+        // NOTE: both logo assets BAKE m_bg_color in. The mark is an interlaced "un" whose
+        // crossings are carved by two knockout strokes painted in the background colour --
+        // nanosvg supports no <mask>, so a real transparent knockout is not available. The
+        // light asset paints them #FFFFFF and the dark one #2D2D31, which is what
+        // darkModeColorFor("#FFFFFF") resolves to. If m_bg_color above ever changes, the
+        // knockouts in resources/images/splash_logo{,_dark}.svg have to change with it or
+        // they reappear as visible slashes across the mark. (load_svg is called WITHOUT its
+        // dark_mode flag on purpose: the dark tier is baked into the _dark twin, so no
+        // runtime replace table is involved.)
         m_logo_bmp = *bmp_cache.load_svg(dark_mode ? "splash_logo_dark" : "splash_logo", sz.GetWidth(), sz.GetHeight());
 
         m_window->Bind(wxEVT_PAINT, &SplashScreen::OnPaint, this);
@@ -453,7 +460,7 @@ static void migrate_flatpak_legacy_datadir(const boost::filesystem::path &data_d
     std::cerr << "Migrating Flatpak data dir: " << data_dir_path << std::endl;
 
     std::string legacy_data_dir_str = data_dir_path.string();
-    boost::replace_first(legacy_data_dir_str, "com.orcaslicer.OrcaSlicer", "io.github.softfever.OrcaSlicer");
+    boost::replace_first(legacy_data_dir_str, "com.unlayered3d.UnlayeredSlicer", "io.github.softfever.OrcaSlicer");
     const fs::path legacy_data_dir(legacy_data_dir_str);
 
     std::cerr << "Legacy Flatpak data dir: " << legacy_data_dir << std::endl;
@@ -735,7 +742,7 @@ static void generic_exception_handle()
         // and terminate the app so it is at least certain to happen now.
         BOOST_LOG_TRIVIAL(error) << boost::format("std::bad_alloc exception: %1%") % ex.what();
         flush_logs();
-        wxString errmsg = wxString::Format(_L("OrcaSlicer will terminate because of running out of memory. "
+        wxString errmsg = wxString::Format(_L("Unlayered Slicer will terminate because of running out of memory. "
                                               "It may be a bug. It will be appreciated if you report the issue to our team."));
         wxMessageBox(errmsg + "\n\n" + wxString(ex.what()), _L("Fatal error"), wxOK | wxICON_ERROR);
 
@@ -744,7 +751,7 @@ static void generic_exception_handle()
      } catch (const boost::io::bad_format_string& ex) {
      	BOOST_LOG_TRIVIAL(error) << boost::format("Uncaught exception: %1%") % ex.what();
         	flush_logs();
-        wxString errmsg = _L("OrcaSlicer will terminate because of a localization error. "
+        wxString errmsg = _L("Unlayered Slicer will terminate because of a localization error. "
                              "It will be appreciated if you report the specific scenario this issue happened.");
         wxMessageBox(errmsg + "\n\n" + wxString(ex.what()), _L("Critical error"), wxOK | wxICON_ERROR);
         std::terminate();
@@ -752,7 +759,7 @@ static void generic_exception_handle()
     } catch (const std::exception& ex) {
         BOOST_LOG_TRIVIAL(error) << boost::format("Uncaught exception: %1%") % ex.what();
         flush_logs();
-        wxLogError(format_wxstr(_L("OrcaSlicer got an unhandled exception: %1%"), ex.what()));
+        wxLogError(format_wxstr(_L("Unlayered Slicer got an unhandled exception: %1%"), ex.what()));
         throw;
     }
 //#endif
@@ -953,9 +960,9 @@ void GUI_App::post_init()
     hms_query = new HMSQuery();
 
     m_show_gcode_window = app_config->get_bool("show_gcode_window");
-    if (m_networking_need_update) {
-        show_network_plugin_download_dialog(false);
-    }
+    // Unlayered: a prompt offering to install the Bambu network plug-in used to appear here on
+    // startup. installed_networking is false and no longer settable, so m_networking_need_update can
+    // never become true - but the prompt is removed rather than left unreachable.
 
     // Start preset sync after project opened, otherwise we could have preset change during project opening which could cause crash 
     if (app_config->get("sync_user_preset") == "true") {
@@ -979,14 +986,14 @@ void GUI_App::post_init()
         CallAfter([this] {
             bool cw_showed = this->config_wizard_startup();
 
-            if (!app_config->get_stealth_mode()) {
-                std::string http_url = get_http_url(app_config->get_country_code());
-                std::string language = GUI::into_u8(current_language_code());
-                std::string network_ver = Slic3r::NetworkAgent::get_version();
-                bool        sys_preset  = app_config->get("sync_system_preset") == "true";
-                this->preset_updater->sync(http_url, language, network_ver, sys_preset ? preset_bundle : nullptr);
-            }
+            // Unlayered: the preset_updater->sync() call that used to be here fetched vendor
+            // profiles from OrcaSlicer and the network plug-in plus printer configs from Bambu.
+            // Both are gone; profiles ship with the application.
 
+            // Deliberately NOT inside a stealth-mode guard. Stealth mode disables the cloud
+            // features; the application update check is the one outbound request it keeps, because
+            // an installation that cannot learn about its own security fixes is worse than one that
+            // asks a static file for a version number. Do not move this into the guard.
             this->check_new_version_sf();
             const auto cloud_provider = get_printer_cloud_provider();
             if (is_user_login(cloud_provider) && !app_config->get_stealth_mode()) {
@@ -996,32 +1003,8 @@ void GUI_App::post_init()
         });
     }
 
-    // Orca: notify users upgrading from a pre-2.4.0 version that profile syncing
-    // moved from Bambu Cloud to Orca Cloud.
-    if (is_editor() && m_last_config_version && m_last_config_version->valid()
-        && *m_last_config_version < Semver(2, 4, 0)) {
-        CallAfter([] {
-            const wxString wiki_url = "https://www.orcaslicer.com/wiki/user_profiles/user_profiles.html#profiles-missing-after-updating-from-bambu-cloud";
-            MessageDialog dlg(nullptr,
-                _L("Since version 2.4.0, OrcaSlicer syncs user profiles through Orca Cloud instead of Bambu Cloud.\n\n"
-                   "To migrate your existing profiles, log in to Orca Cloud and they will be transferred automatically. "
-                   "To learn more about how OrcaSlicer stores and syncs your profiles, or to migrate your presets manually, check out our wiki.\n\n"
-                   "If you did not use Bambu Cloud to sync profiles, this change does not affect you and you can safely ignore this message."),
-                _L("Profile syncing change"),
-                wxOK,
-                "",
-                _L("Learn more"),
-                [wiki_url](const wxString &) { wxLaunchDefaultBrowser(wiki_url); });
-            // Hack: the "Learn more" link renders the message in a wxHtmlWindow whose
-            // height is underestimated for multi-paragraph text, leaving a scrollbar.
-            // The html sits in a proportion-1 sizer chain, so grow the dialog (never
-            // shrink it below its content width) to give the text enough room.
-            const wxSize sz = dlg.GetSize();
-            dlg.SetSize(std::max(sz.x, dlg.FromDIP(280)), std::max(sz.y, dlg.FromDIP(200)));
-            dlg.CenterOnParent();
-            dlg.ShowModal();
-        });
-    }
+    // Unlayered: upstream shows a "profile syncing moved to Orca Cloud" notice here on the first
+    // launch after an upgrade. There is no cloud in this build, so there is nothing to announce.
 
     if(!m_networking_need_update && m_agent) {
         m_agent->set_on_ssdp_msg_fn(
@@ -1110,7 +1093,7 @@ GUI_App::GUI_App()
     , m_downloader(std::make_unique<Downloader>())
 	, m_other_instance_message_handler(std::make_unique<OtherInstanceMessageHandler>())
 {
-	//app config initializes early becasuse it is used in instance checking in OrcaSlicer.cpp
+	//app config initializes early becasuse it is used in instance checking in UnlayeredSlicer.cpp
     this->init_app_config();
     this->init_download_path();
     // Note: the WebView2 runtime check (init_webview_runtime) used to run here, but
@@ -1149,6 +1132,10 @@ void GUI_App::shutdown()
 }
 
 
+// Unlayered: this is the Bambu resource service. Nothing calls it at startup any more - the preset
+// updater's sync() is gone and so is the privacy-policy check. It survives because it is also the
+// download source for the Virtual Camera Tools that MediaPlayCtrl offers to install, which is part
+// of the Bambu device UI and out of scope here. Reachable only from an explicit user action.
 std::string GUI_App::get_http_url(std::string country_code, std::string path)
 {
     std::string url;
@@ -1243,6 +1230,14 @@ static std::string decode(std::string const& extra, std::string const& path = {}
 
 int GUI_App::download_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
 {
+    // Unlayered: the Bambu network plugin is not part of this product and must never be fetched.
+    // Refusing by package name here makes that structural rather than a property of every call
+    // site staying correct. UpgradeNetworkJob treats result < 0 as a clean "Download failed".
+    if (name == "plugins") {
+        BOOST_LOG_TRIVIAL(info) << "[download_plugin] refused: the network plugin is not used in this build";
+        return -1;
+    }
+
     int result = 0;
     json j;
     std::string err_msg;
@@ -1417,6 +1412,13 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
 
 int GUI_App::install_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
 {
+    // Unlayered: see download_plugin(). This is also the function that would set
+    // installed_networking=true further down, which re-enables the cloud/HMS paths.
+    if (name == "plugins") {
+        BOOST_LOG_TRIVIAL(info) << "[install_plugin] refused: the network plugin is not used in this build";
+        return -1;
+    }
+
     bool cancel = false;
     std::string target_file_path = (fs::temp_directory_path() / package_name).string();
 
@@ -2437,13 +2439,16 @@ static boost::optional<Semver> parse_semver_from_ini(std::string path)
     std::stringstream buffer;
     buffer << stream.rdbuf();
     std::string body = buffer.str();
-    size_t start = body.find("OrcaSlicer ");
+    std::string key = std::string(SLIC3R_APP_NAME) + " ";
+    size_t start = body.find(key);
     if (start == std::string::npos) {
-        start = body.find("OrcaSlicer ");
+        // Config written by upstream OrcaSlicer before the fork.
+        key = "OrcaSlicer ";
+        start = body.find(key);
         if (start == std::string::npos)
             return boost::none;
     }
-    body = body.substr(start + 12);
+    body = body.substr(start + key.size());
     size_t end = body.find_first_of(" \n");
     if (end < body.size())
         body.resize(end);
@@ -2478,7 +2483,7 @@ void GUI_App::init_webview_runtime()
     }
 
     BOOST_LOG_TRIVIAL(warning) << "WebView2 runtime not found; prompting user to install.";
-    int nRet = wxMessageBox(_L("Orca Slicer requires the Microsoft WebView2 Runtime to operate certain features.\nClick Yes to install it now."),
+    int nRet = wxMessageBox(_L("Unlayered Slicer requires the Microsoft WebView2 Runtime to operate certain features.\nClick Yes to install it now."),
                             _L("WebView2 Runtime"), wxYES_NO);
     if (nRet != wxYES) {
         BOOST_LOG_TRIVIAL(warning) << "User declined WebView2 runtime installation.";
@@ -2500,7 +2505,7 @@ void GUI_App::init_webview_runtime()
         BOOST_LOG_TRIVIAL(error) << "WebView2 runtime installation failed or still not detected.";
         wxMessageBox(_L("The Microsoft WebView2 Runtime could not be installed.\n"
                         "Some features, including the setup wizard, may appear blank until it is installed.\n"
-                        "Please install it manually from https://developer.microsoft.com/microsoft-edge/webview2/ and restart Orca Slicer."),
+                        "Please install it manually from https://developer.microsoft.com/microsoft-edge/webview2/ and restart Unlayered Slicer."),
                      _L("WebView2 Runtime"), wxOK | wxICON_WARNING);
     }
 }
@@ -2582,7 +2587,7 @@ void GUI_App::init_app_config()
     set_log_path_and_level(log_filename, 3);
 #endif
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("gui mode, Current OrcaSlicer Version %1% build %2%") % SoftFever_VERSION % build_commit_label;
+    BOOST_LOG_TRIVIAL(info) << boost::format("gui mode, Current Unlayered Slicer Version %1% build %2%") % UNLAYERED_VERSION % build_commit_label;
 
     //BBS: remove GCodeViewer as seperate APP logic
 	if (!app_config)
@@ -2897,7 +2902,7 @@ bool GUI_App::on_init_inner()
     wxLog::SetActiveTarget(new wxBoostLog());
 
 #ifdef __APPLE__
-    // Override wxWidgets' kAEGetURL handler so orcaslicer:// deep links keep
+    // Override wxWidgets' kAEGetURL handler so unlayeredslicer:// deep links keep
     // working after the wxWidgets 3.3.2 upgrade on macOS (#13119).
     register_mac_deep_link_handler();
 #endif
@@ -3026,7 +3031,7 @@ bool GUI_App::on_init_inner()
             RichMessageDialog
                 dlg(nullptr,
                     wxString::Format(_L("%s\nDo you want to continue?"), msg),
-                    "OrcaSlicer", wxICON_QUESTION | wxYES_NO);
+                    SLIC3R_APP_NAME, wxICON_QUESTION | wxYES_NO);
             dlg.ShowCheckBox(_L("Remember my choice"));
             if (dlg.ShowModal() != wxID_YES) return false;
 
@@ -3104,9 +3109,9 @@ bool GUI_App::on_init_inner()
     //     }
     // }
 
-    //Orca: write OrcaSlicer version
-    if(app_config->get("version") != SoftFever_VERSION) {
-        app_config->set("version", SoftFever_VERSION);
+    //Orca: write the slicer version
+    if(app_config->get("version") != UNLAYERED_VERSION) {
+        app_config->set("version", UNLAYERED_VERSION);
     }
 
     // Orca: use wxWeakRef to provent wild pointer.
@@ -3149,7 +3154,7 @@ bool GUI_App::on_init_inner()
             associate_files(L"step");
             associate_files(L"stp");
         }
-        associate_url(L"orcaslicer");
+        associate_url(L"unlayeredslicer");
 
         if (app_config->get("associate_gcode") == "true")
             associate_files(L"gcode");
@@ -3163,7 +3168,7 @@ bool GUI_App::on_init_inner()
                /* wxString tips = wxString::Format(_L("Click to download new version in default browser: %s"), version_info.version_str);
                 DownloadDialog dialog(this->mainframe,
                     tips,
-                    _L("New version of Orca Slicer"),
+                    _L("New version of Unlayered Slicer"),
                     false,
                     wxCENTER | wxICON_INFORMATION);
 
@@ -3173,11 +3178,19 @@ bool GUI_App::on_init_inner()
                 bool skip_this_version = false;
                 if (!skip_version_str.empty()) {
                     BOOST_LOG_TRIVIAL(info) << "new version = " << version_info.version_str << ", skip version = " << skip_version_str;
-                    if (version_info.version_str <= skip_version_str) {
-                        skip_this_version = true;
+                    // Compared as versions, not as strings. std::string ordering puts "0.0.10"
+                    // before "0.0.9", so skipping 0.0.9 used to swallow every 0.0.10+ release too.
+                    const auto skipped = Semver::parse(skip_version_str);
+                    const auto offered = Semver::parse(version_info.version_str);
+                    if (skipped && offered) {
+                        skip_this_version = *offered <= *skipped;
+                        if (!skip_this_version)
+                            app_config->set("skip_version", "");
                     } else {
+                        // An unparseable value cannot be reasoned about; drop it rather than let it
+                        // suppress updates forever.
+                        BOOST_LOG_TRIVIAL(warning) << "updater: discarding an unparseable skip_version";
                         app_config->set("skip_version", "");
-                        skip_this_version = false;
                     }
                 }
                 if (!skip_this_version
@@ -3185,18 +3198,24 @@ bool GUI_App::on_init_inner()
                     UpdateVersionDialog dialog(this->mainframe);
                     wxString            extmsg = wxString::FromUTF8(version_info.description);
                     dialog.update_version_info(extmsg, version_info.version_str);
-                    //dialog.update_version_info(version_info.description);
+                    // Decides what the confirm button does: install in place when the manifest
+                    // advertised an installer for this platform, open the download page otherwise.
+                    dialog.set_install_mode(version_info.has_asset());
                     if (evt.GetInt() != 0) {
                         dialog.m_button_skip_version->Hide();
                     }
                     switch (dialog.ShowModal())
                     {
                     case wxID_YES:
-                        // Store builds get updates from the Microsoft Store, not the GitHub release page.
-                        if (is_running_in_msix())
-                            open_ms_store_product_page();
+                        if (version_info.has_asset())
+                            this->start_app_update();
                         else
                             wxLaunchDefaultBrowser(version_info.url);
+                        break;
+                    case wxID_OPEN:
+                        // The "open the download page" link, which is always a browser escape hatch
+                        // whichever mode the button is in.
+                        wxLaunchDefaultBrowser(version_info.url);
                         break;
                     case wxID_NO:
                         break;
@@ -3214,7 +3233,7 @@ bool GUI_App::on_init_inner()
                 wxString tips = wxString::Format(_L("Click to download new version in default browser: %s"), version_str);
                 DownloadDialog dialog(this->mainframe,
                     tips,
-                    _L("OrcaSlicer needs an update"),
+                    _L("Unlayered Slicer needs an update"),
                     false,
                     wxCENTER | wxICON_INFORMATION);
                 dialog.SetExtendedMessage(description_text);
@@ -3442,7 +3461,7 @@ bool GUI_App::on_init_inner()
 //#if BBL_HAS_FIRST_PAGE
     //BBS: set tp3DEditor firstly
     /*plater_->canvas3D()->enable_render(false);
-    mainframe->select_tab(size_t(MainFrame::tp3DEditor));
+    mainframe->select_tab(MainFrame::tp3DEditor);
     scrn->SetText(_L("Loading Opengl resourses..."));
     plater_->select_view_3D("3D");
     //BBS init the opengl resource here
@@ -3530,7 +3549,7 @@ bool GUI_App::on_init_inner()
         m_config_corrupted = false;
         show_error(nullptr,
                    _u8L(
-                       "The OrcaSlicer configuration file may be corrupted and cannot be parsed.\nOrcaSlicer has attempted to recreate the "
+                       "The Unlayered Slicer configuration file may be corrupted and cannot be parsed.\nUnlayered Slicer has attempted to recreate the "
                        "configuration file.\nPlease note, application settings will be lost, but printer profiles will not be affected."));
     }
     return true;
@@ -3889,30 +3908,7 @@ bool GUI_App::on_init_network(bool try_backup)
             m_user_manager = new Slic3r::UserManager();
     }
 
-    // A version pinned to something other than the latest series is a deliberate choice, so it
-    // is exempt from the upgrade prompt the same way the legacy pin already is - otherwise the
-    // dialog reappears on every launch for as long as the pin is held.
-    const std::string pinned_version = app_config->get_network_plugin_version();
-    const bool pinned_to_older_series = !pinned_version.empty() &&
-        network_plugin_series(pinned_version) != network_plugin_series(get_latest_network_version());
-
-    if (should_load_networking_plugin && m_networking_compatible && !pinned_to_older_series) {
-        app_config->clear_remind_network_update_later();
-
-        if (has_network_update_available()) {
-            std::string latest = get_latest_network_version();
-
-            bool should_prompt = !app_config->is_network_update_prompt_disabled()
-                && !app_config->is_network_version_skipped(latest)
-                && !app_config->should_remind_network_update_later();
-
-            if (should_prompt) {
-                CallAfter([this]() {
-                    show_network_plugin_download_dialog(true);
-                });
-            }
-        }
-    }
+    // Unlayered: a prompt offering to update the Bambu network plug-in used to be here.
 
     return true;
 }
@@ -4285,7 +4281,7 @@ void GUI_App::UpdateDarkUI(wxWindow* window, bool highlited/* = false*/, bool ju
         auto orig_col = window->GetBackgroundColour();
         auto bg_col = StateColor::darkModeColorFor(orig_col);
         // there are cases where the background color of an item is bright, specifically:
-        // * the background color of a button: #009688  -- 73
+        // * the background color of a button: #767676  -- 73
         if (bg_col != orig_col) {
             window->SetBackgroundColour(bg_col);
         }
@@ -5257,9 +5253,6 @@ std::string GUI_App::handle_web_request(std::string cmd)
                     }
                 }
             }
-            else if (command_str.compare("begin_network_plugin_download") == 0) {
-                CallAfter([] { wxGetApp().ShowDownNetPluginDlg(); });
-            }
             else if (command_str.compare("get_web_shortcut") == 0) {
                 if (root.get_child_optional("key_event") != boost::none) {
                     pt::ptree key_event_node = root.get_child("key_event");
@@ -5452,7 +5445,7 @@ void GUI_App::on_http_error(wxCommandEvent &evt)
 
     // Version limit
     if (code == HttpErrorVersionLimited) {
-        MessageDialog msg_dlg(nullptr, _L("The version of Orca Slicer is too low and needs to be updated to the latest version before it can be used normally."), "", wxAPPLY | wxOK);
+        MessageDialog msg_dlg(nullptr, _L("The version of Unlayered Slicer is too low and needs to be updated to the latest version before it can be used normally."), "", wxAPPLY | wxOK);
         if (msg_dlg.ShowModal() == wxOK) {
         }
     }
@@ -5727,69 +5720,6 @@ void GUI_App::check_update(bool show_tips, int by_user)
     }
 }
 
-void GUI_App::check_new_version(bool show_tips, int by_user)
-{
-    return; // orca: not used, see check_new_version_sf
-    std::string platform = "windows";
-
-#ifdef __WINDOWS__
-    platform = "windows";
-#endif
-#ifdef __APPLE__
-    platform = "macos";
-#endif
-#ifdef __LINUX__
-    platform = "linux";
-#endif
-    std::string query_params = (boost::format("?name=slicer&version=%1%&guide_version=%2%")
-        % VersionInfo::convert_full_version(SLIC3R_VERSION)
-        % VersionInfo::convert_full_version("0.0.0.1")
-        ).str();
-
-    std::string url = get_http_url(app_config->get_country_code()) + query_params;
-    Slic3r::Http http = Slic3r::Http::get(url);
-
-    http.header("accept", "application/json")
-        .timeout_connect(TIMEOUT_CONNECT)
-        .timeout_max(TIMEOUT_RESPONSE)
-        .on_complete([this, show_tips, by_user](std::string body, unsigned) {
-        try {
-            json j = json::parse(body);
-            if (j.contains("message")) {
-                if (j["message"].get<std::string>() == "success") {
-                    if (j.contains("software")) {
-                        if (j["software"].empty() && show_tips) {
-                            this->no_new_version();
-                        }
-                        else {
-                            if (j["software"].contains("url")
-                                && j["software"].contains("version")
-                                && j["software"].contains("description")) {
-                                version_info.url = j["software"]["url"].get<std::string>();
-                                version_info.version_str = j["software"]["version"].get<std::string>();
-                                version_info.description = j["software"]["description"].get<std::string>();
-                            }
-                            if (j["software"].contains("force_update")) {
-                                version_info.force_upgrade = j["software"]["force_update"].get<bool>();
-                            }
-                            CallAfter([this, show_tips, by_user](){
-                                this->check_update(show_tips, by_user);
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        catch (...) {
-            ;
-        }
-            })
-        .on_error([this](std::string body, std::string error, unsigned int status) {
-            handle_http_error(status, body);
-            BOOST_LOG_TRIVIAL(error) << "check new version error" << body;
-    }).perform();
-}
-
 //parse the string, if it doesn't contain a valid version string, return invalid version.
 Semver get_version(const std::string& str, const std::regex& regexp) {
     std::smatch match;
@@ -5806,270 +5736,72 @@ Semver get_version(const std::string& str, const std::regex& regexp) {
 namespace
 {
 
-struct UpdaterQuery
+// Unlayered: the update check used to sign every request with an HMAC key and carry a persistent
+// installation UUID, the OS description and the CPU architecture. All of that is gone. The check is
+// now a plain GET of a static JSON file, with no query string and nothing identifying the machine.
+
+// Identifies the build to the update host, so its access log can be filtered. Matches the token
+// used by FirmwareBundle and AppUpdater.
+std::string updater_user_agent() { return std::string("UnlayeredSlicer/") + UNLAYERED_VERSION; }
+
+// The version grammar accepted in a manifest tag_name. Matched in full, not searched: the tag has
+// to be a version and nothing else, so "release-0.0.4-final" is rejected rather than silently read
+// as 0.0.4. Dots are allowed inside the prerelease and build identifiers - the vendored semver
+// parses and orders "0.0.4-beta.1" correctly, so rejecting it would discard a legitimate tag with
+// no diagnostic anywhere.
+const std::regex& version_tag_matcher()
 {
-    std::string iid;
-    std::string version;
-    std::string os;
-    std::string arch;
-    std::string os_info;
+    static const std::regex matcher(R"([0-9]+\.[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?(\+[A-Za-z0-9.]+)?)");
+    return matcher;
+}
+
+// One release from the manifest. Replaces the six parallel best_* locals this function used to
+// carry, which had to be assigned in lockstep and would have grown to ten with the asset fields.
+struct Candidate
+{
+    Semver                      version{0, 0, 0};
+    bool                        valid{false};
+    std::string                 url;
+    std::string                 notes;
+    std::vector<AppUpdateAsset> assets;
 };
-
-std::string detect_updater_os_info()
-{
-    wxString description = wxPlatformInfo::Get().GetOperatingSystemDescription();
-#if defined(__LINUX__) || defined(__linux__)
-    wxLinuxDistributionInfo distro = wxGetLinuxDistributionInfo();
-    if (!distro.Id.empty()) {
-        wxString normalized = distro.Id;
-        if (!distro.Release.empty())
-            normalized << " " << distro.Release;
-        normalized.Trim(true);
-        normalized.Trim(false);
-        if (!normalized.empty())
-            description = normalized;
-    }
-#endif
-    if (description.empty())
-        description = wxGetOsDescription();
-
-    //Orca: workaround: wxGetOsVersion can't recognize Windows 11
-    // For Windows, use actual version numbers to properly detect Windows 11
-    // Windows 11 starts at build 22000
-#if defined(_WIN32)
-    int major = 0, minor = 0, micro = 0;
-    wxGetOsVersion(&major, &minor, &micro);
-    if (micro >= 22000) {
-        // replace Windows 10 with Windows 11
-        description.Replace("Windows 10", "Windows 11");
-    }
-#endif
-    std::string os_info = description.ToStdString();
-    boost::replace_all(os_info, "\r", " ");
-    boost::replace_all(os_info, "\n", " ");
-    boost::algorithm::trim(os_info);
-    if (os_info.size() > 120)
-        os_info.resize(120);
-    boost::algorithm::to_lower(os_info);
-    return os_info;
-}
-
-std::string detect_updater_version()
-{
-    return SoftFever_VERSION;
-}
-
-std::string detect_updater_iid(AppConfig* config)
-{
-    if (config == nullptr)
-        return {};
-    return instance_id::ensure(*config);
-}
-
-std::string encode_uri_component(const std::string& value)
-{
-    static constexpr const char* hex = "0123456789ABCDEF";
-    std::string out;
-    out.reserve(value.size());
-    for (unsigned char ch : value) {
-        if ((ch >= 'A' && ch <= 'Z') ||
-            (ch >= 'a' && ch <= 'z') ||
-            (ch >= '0' && ch <= '9') ||
-            ch == '-' || ch == '_' || ch == '.' || ch == '~' ||
-            ch == '!' || ch == '*' || ch == '(' || ch == ')' || ch == '\'') {
-            out.push_back(static_cast<char>(ch));
-        } else {
-            out.push_back('%');
-            out.push_back(hex[(ch >> 4) & 0xF]);
-            out.push_back(hex[ch & 0xF]);
-        }
-    }
-    return out;
-}
-
-std::string build_updater_query(const UpdaterQuery& query)
-{
-    std::vector<std::pair<std::string, std::string>> params;
-
-    auto add_param = [&params](const char* key, const std::string& value) {
-        if (!value.empty())
-            params.emplace_back(key, encode_uri_component(value));
-    };
-
-    add_param("iid", query.iid);
-    add_param("v", query.version);
-    add_param("os", query.os);
-    add_param("arch", query.arch);
-    add_param("os_info", query.os_info);
-
-    std::sort(params.begin(), params.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.first < rhs.first;
-    });
-
-    if (params.empty())
-        return {};
-
-    std::string encoded;
-    for (size_t idx = 0; idx < params.size(); ++idx) {
-        if (idx > 0)
-            encoded.push_back('&');
-        encoded += params[idx].first;
-        encoded.push_back('=');
-        encoded += params[idx].second;
-    }
-    return encoded;
-}
-
-std::string base64url_encode(const unsigned char* data, std::size_t length)
-{
-    std::string encoded;
-    encoded.resize(boost::beast::detail::base64::encoded_size(length));
-    encoded.resize(boost::beast::detail::base64::encode(encoded.data(), data, length));
-    std::replace(encoded.begin(), encoded.end(), '+', '-');
-    std::replace(encoded.begin(), encoded.end(), '/', '_');
-    while (!encoded.empty() && encoded.back() == '=')
-        encoded.pop_back();
-    return encoded;
-}
-
-std::optional<std::vector<unsigned char>> load_signature_key()
-{
-#if ORCA_UPDATER_SIG_KEY_AVAILABLE
-    std::string key = ORCA_UPDATER_SIG_KEY_B64;
-    boost::algorithm::trim(key);
-    if (key.empty())
-        return std::nullopt;
-
-    key.erase(std::remove_if(key.begin(), key.end(), [](unsigned char ch) { return std::isspace(ch); }), key.end());
-    std::replace(key.begin(), key.end(), '-', '+');
-    std::replace(key.begin(), key.end(), '_', '/');
-    while (key.size() % 4 != 0)
-        key.push_back('=');
-
-    std::string decoded;
-    decoded.resize(boost::beast::detail::base64::decoded_size(key.size()));
-    auto decode_result = boost::beast::detail::base64::decode(decoded.data(), key.data(), key.size());
-    if (!decode_result.second)
-        return std::nullopt;
-    decoded.resize(decode_result.first);
-
-    return std::vector<unsigned char>(decoded.begin(), decoded.end());
-#else
-    return std::nullopt;
-#endif
-}
-
-const std::optional<std::vector<unsigned char>>& get_signature_key()
-{
-    static std::optional<std::vector<unsigned char>> cached;
-    static bool loaded = false;
-    if (!loaded) {
-        cached = load_signature_key();
-        loaded = true;
-    }
-    return cached;
-}
-
-std::string extract_path_from_url(const std::string& url)
-{
-    if (url.empty())
-        return "/latest";
-
-    std::string path;
-    const auto scheme_pos = url.find("://");
-    if (scheme_pos != std::string::npos) {
-        const auto path_pos = url.find('/', scheme_pos + 3);
-        if (path_pos != std::string::npos)
-            path = url.substr(path_pos);
-        else
-            path = "/";
-    } else {
-        path = url;
-    }
-
-    const auto fragment_pos = path.find('#');
-    if (fragment_pos != std::string::npos)
-        path = path.substr(0, fragment_pos);
-
-    const auto query_pos = path.find('?');
-    if (query_pos != std::string::npos)
-        path = path.substr(0, query_pos);
-
-    if (path.empty())
-        path = "/";
-    return path;
-}
-
-void maybe_attach_updater_signature(Http& http, const std::string& canonical_query, const std::string& request_url)
-{
-    if (canonical_query.empty())
-        return;
-
-    const auto& key = get_signature_key();
-    if (!key || key->empty())
-        return;
-
-    const auto now   = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
-    const std::string timestamp = std::to_string(now.time_since_epoch().count());
-    const std::string path      = extract_path_from_url(request_url);
-
-    std::string string_to_sign = "GET\n";
-    string_to_sign += path;
-    string_to_sign += "\n";
-    string_to_sign += canonical_query;
-    string_to_sign += "\n";
-    string_to_sign += timestamp;
-
-    unsigned int digest_length = 0;
-    unsigned char digest[EVP_MAX_MD_SIZE] = {};
-    if (HMAC(EVP_sha256(), key->data(), static_cast<int>(key->size()),
-             reinterpret_cast<const unsigned char*>(string_to_sign.data()),
-             string_to_sign.size(), digest, &digest_length) == nullptr || digest_length == 0)
-        return;
-
-    const std::string signature = base64url_encode(digest, digest_length);
-    http.header("X-Orca-Ts", timestamp);
-    http.header("X-Orca-Sig", "v1:" + signature);
-}
 
 } // namespace
 
-void GUI_App::check_new_version_sf(bool show_tips, int by_user)
+void GUI_App::check_new_version_sf(int by_user)
 {
-    AppConfig* app_config = wxGetApp().app_config;
-    bool       check_stable_only = app_config->get_bool("check_stable_update_only");
-    auto version_check_url = app_config->version_check_url();
+    AppConfig*        app_config        = wxGetApp().app_config;
+    const bool        check_stable_only = app_config->get_bool("check_stable_update_only");
+    const std::string url               = app_config->version_check_url();
 
-    UpdaterQuery query{
-        detect_updater_iid(app_config),
-        detect_updater_version(),
-        platform_os_type(),
-        platform_architecture(),
-        detect_updater_os_info()
-    };
+    const Semver current_version = get_version(UNLAYERED_VERSION, version_tag_matcher());
 
-    const std::string query_string = build_updater_query(query);
-    if (!query_string.empty()) {
-        const bool has_query = version_check_url.find('?') != std::string::npos;
-        if (!has_query)
-            version_check_url.push_back('?');
-        else if (!version_check_url.empty() && version_check_url.back() != '&' && version_check_url.back() != '?')
-            version_check_url.push_back('&');
-        version_check_url += query_string;
+    // A -dev build is by definition ahead of the release it is named after, and the vendored semver
+    // sorts "dev" below every other prerelease, so 0.0.3-dev < 0.0.3. Left alone, every developer
+    // build would be offered the release it is working past, on every launch. The manual check still
+    // runs, so the feature stays testable.
+    if (by_user == 0 && current_version.valid() && current_version.prerelease() != nullptr &&
+        std::string(current_version.prerelease()) == "dev") {
+        BOOST_LOG_TRIVIAL(info) << "updater: skipping the automatic check on a -dev build";
+        return;
     }
 
-    auto http = Http::get(version_check_url);
-    maybe_attach_updater_signature(http, query_string, version_check_url);
+    BOOST_LOG_TRIVIAL(info) << "updater: checking " << url;
 
-    http.header("accept", "application/vnd.github.v3+json")
+    auto http = Http::get(url);
+    http.header("Accept", "application/json")
+        .header("User-Agent", updater_user_agent())
         .timeout_connect(5)
-        .timeout_max(10)
-        .on_error([&](std::string body, std::string error, unsigned http_status) {
+        .timeout_max(15)
+        // The manifest is a few KB. Http would otherwise buffer up to its 1 GiB default, so a
+        // misconfigured host serving something large fails cleanly instead of eating memory.
+        .size_limit(256 * 1024)
+        .on_error([](std::string body, std::string error, unsigned http_status) {
           (void)body;
           BOOST_LOG_TRIVIAL(error) << format("Error getting: `%1%`: HTTP %2%, %3%", "check_new_version_sf", http_status,
                                              error);
         })
-        .on_complete([this, by_user, check_stable_only](std::string body, unsigned http_status) {
+        .on_complete([this, by_user, check_stable_only, current_version](std::string body, unsigned http_status) {
           if (http_status != 200)
             return;
           try {
@@ -6084,16 +5816,8 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
             std::stringstream           json_stream(body);
             boost::property_tree::read_json(json_stream, root);
 
-            std::regex matcher("[0-9]+\\.[0-9]+(\\.[0-9]+)*(-[A-Za-z0-9]+)?(\\+[A-Za-z0-9]+)?");
-            Semver    current_version = get_version(SoftFever_VERSION, matcher);
-            Semver    best_pre(0, 0, 0);
-            Semver    best_release(0, 0, 0);
-            bool      best_pre_valid = false;
-            bool      best_release_valid = false;
-            std::string best_pre_url;
-            std::string best_release_url;
-            std::string best_release_content;
-            std::string best_pre_content;
+            Candidate best_pre;
+            Candidate best_release;
 
             auto consider_release = [&](const boost::property_tree::ptree& node) {
                 auto tag_opt = node.get_optional<std::string>("tag_name");
@@ -6104,29 +5828,40 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
                 if (!tag.empty() && tag.front() == 'v')
                     tag.erase(0, 1);
 
-                Semver tag_version = get_version(tag, matcher);
-                if (!tag_version.valid())
+                Semver tag_version = get_version(tag, version_tag_matcher());
+                if (!tag_version.valid()) {
+                    // Loud on purpose. Without this, a typo in a published tag produces an
+                    // application that reports "up to date" forever with no evidence anywhere.
+                    BOOST_LOG_TRIVIAL(warning)
+                        << "updater: ignoring a release whose tag_name is not a version: " << *tag_opt;
                     return;
+                }
 
-                const bool is_prerelease = node.get_optional<bool>("prerelease").get_value_or(false);
-                const std::string html_url = node.get_optional<std::string>("html_url").get_value_or(std::string());
-                const std::string body_copy = node.get_optional<std::string>("body").get_value_or(std::string());
+                Candidate candidate;
+                candidate.version = tag_version;
+                candidate.valid   = true;
+                candidate.url     = node.get_optional<std::string>("html_url").get_value_or(std::string());
+                candidate.notes   = node.get_optional<std::string>("body").get_value_or(std::string());
 
-                if (is_prerelease) {
-                    if (!best_pre_valid || best_pre < tag_version) {
-                        best_pre        = tag_version;
-                        best_pre_url    = html_url;
-                        best_pre_content = body_copy;
-                        best_pre_valid  = true;
-                    }
-                } else {
-                    if (!best_release_valid || best_release < tag_version) {
-                        best_release         = tag_version;
-                        best_release_url     = html_url;
-                        best_release_content = body_copy;
-                        best_release_valid   = true;
+                if (auto assets = node.get_child_optional("assets")) {
+                    for (const auto& kv : *assets) {
+                        AppUpdateAsset asset;
+                        asset.name   = kv.second.get<std::string>("name", "");
+                        asset.url    = kv.second.get<std::string>("browser_download_url", "");
+                        asset.sha256 = boost::algorithm::to_lower_copy(kv.second.get<std::string>("sha256", ""));
+                        asset.size   = kv.second.get<uint64_t>("size", 0);
+                        // An entry with no name or no URL is not downloadable. Dropping it here means
+                        // an absent, empty or unusable asset list all arrive as "no in-app install",
+                        // with no special cases downstream.
+                        if (!asset.name.empty() && !asset.url.empty())
+                            candidate.assets.push_back(std::move(asset));
                     }
                 }
+
+                const bool is_prerelease = node.get_optional<bool>("prerelease").get_value_or(false);
+                Candidate& slot          = is_prerelease ? best_pre : best_release;
+                if (!slot.valid || slot.version < candidate.version)
+                    slot = std::move(candidate);
             };
 
             if (root.get_optional<std::string>("tag_name")) {
@@ -6136,47 +5871,162 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
                     consider_release(child.second);
             }
 
-            if (!best_release_valid && !best_pre_valid) {
+            if (!best_release.valid && !best_pre.valid) {
                 if (by_user != 0)
                     this->no_new_version();
                 return;
             }
 
-            if (best_pre_valid && best_release_valid && best_pre < best_release) {
-                best_pre        = best_release;
-                best_pre_url    = best_release_url;
-                best_pre_content = best_release_content;
-                best_pre_valid  = true;
-            }
+            // A stable release newer than the newest prerelease is the better prerelease too, so the
+            // "include prereleases" branch never offers something older than the stable channel.
+            if (best_pre.valid && best_release.valid && best_pre.version < best_release.version)
+                best_pre = best_release;
 
-            const bool        prefer_release = check_stable_only || !best_pre_valid;
-            const Semver&     chosen_version = prefer_release ? best_release : best_pre;
-            const bool        chosen_valid   = prefer_release ? best_release_valid : best_pre_valid;
+            const bool       prefer_release = check_stable_only || !best_pre.valid;
+            const Candidate& chosen         = prefer_release ? best_release : best_pre;
 
-            if (!chosen_valid) {
+            if (!chosen.valid) {
                 if (by_user != 0)
                     this->no_new_version();
                 return;
             }
 
-            if (current_version.valid() && chosen_version <= current_version) {
+            if (current_version.valid() && chosen.version <= current_version) {
                 if (by_user != 0)
                     this->no_new_version();
                 return;
             }
 
-            version_info.url           = prefer_release ? best_release_url : best_pre_url;
-            version_info.version_str   = prefer_release ? best_release.to_string_sf() : best_pre.to_string_sf();
-            version_info.description   = prefer_release ? best_release_content : best_pre_content;
+            version_info.url           = chosen.url.empty() ? UNLAYERED_DOWNLOAD_PAGE_URL : chosen.url;
+            version_info.version_str   = chosen.version.to_string_sf();
+            version_info.description   = chosen.notes;
             version_info.force_upgrade = false;
 
+            // Reset unconditionally: a manifest that has dropped its assets must not leave a stale
+            // download queued from an earlier check.
+            version_info.clear_asset();
+            if (auto asset = select_platform_asset(chosen.assets)) {
+                version_info.asset_name   = asset->name;
+                version_info.asset_url    = asset->url;
+                version_info.asset_sha256 = asset->sha256;
+                version_info.asset_size   = asset->size;
+                BOOST_LOG_TRIVIAL(info) << "updater: " << version_info.version_str
+                                        << " can be installed in place from " << asset->name;
+            } else if (!chosen.assets.empty()) {
+                // The tripwire for artifact naming drift in CI: if the published installer stops
+                // matching select_platform_asset(), the application quietly reverts to browser mode
+                // and this is the only place that says so.
+                BOOST_LOG_TRIVIAL(info) << "updater: " << version_info.version_str << " has "
+                                        << chosen.assets.size()
+                                        << " asset(s) but none are installable on this platform; the "
+                                           "dialog will offer the download page instead";
+            }
+
             wxCommandEvent* evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
-            evt->SetString((prefer_release ? best_release : best_pre).to_string());
+            evt->SetString(chosen.version.to_string());
+            // Tells the handler this was a manual check, so it overrides a skipped version and hides
+            // the "Skip this Version" button. This was missing, which silenced Help > Check for
+            // Updates permanently once any version had been skipped.
+            evt->SetInt(by_user);
             GUI::wxGetApp().QueueEvent(evt);
-          } catch (...) {}
+          } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "updater: could not parse the update manifest: " << e.what();
+          } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "updater: could not parse the update manifest";
+          }
         });
 
     http.perform();
+}
+
+void GUI_App::start_app_update()
+{
+    if (!version_info.has_asset()) {
+        // Should be unreachable: the caller checks has_asset() to pick this branch.
+        wxLaunchDefaultBrowser(version_info.url);
+        return;
+    }
+
+    const AppUpdateAsset asset{version_info.asset_name, version_info.asset_url, version_info.asset_sha256,
+                               version_info.asset_size};
+    const wxString       version = from_u8(version_info.version_str);
+
+    // The download runs on this thread with a modal progress dialog rather than on a worker: the
+    // application is about to be shut down and replaced, so there is nothing useful to do in
+    // parallel, and ProgressDialog::Update() pumps the event loop often enough - curl calls
+    // on_progress many times a second - to keep the window responsive and the Cancel button live.
+    ProgressDialog progress(wxString::Format(_L("Updating %s"), SLIC3R_APP_FULL_NAME),
+                            wxString::Format(_L("Downloading version %s"), version), 100, mainframe,
+                            wxPD_AUTO_HIDE | wxPD_APP_MODAL | wxPD_CAN_ABORT);
+
+    boost::filesystem::path installer;
+    std::string             error;
+
+    const bool downloaded = download_installer(
+        asset, installer,
+        [&progress, &version](uint64_t done, uint64_t total) {
+            const int  pct = total > 0 ? int((done * 100ull) / total) : 0;
+            const auto mb  = [](uint64_t b) { return double(b) / (1024.0 * 1024.0); };
+            const wxString msg = total > 0 ? wxString::Format(_L("Downloading version %s: %.1f of %.1f MB"),
+                                                              version, mb(done), mb(total))
+                                           : wxString::Format(_L("Downloading version %s: %.1f MB"), version, mb(done));
+            // Returns false once the user presses Cancel, which cancels the transfer.
+            return progress.Update(std::min(pct, 99), msg);
+        },
+        error);
+
+    if (!downloaded) {
+        if (error == "Cancelled") {
+            BOOST_LOG_TRIVIAL(info) << "updater: download cancelled by the user";
+            return;
+        }
+        BOOST_LOG_TRIVIAL(error) << "updater: download failed: " << error;
+        // Never a dead end: a checksum mismatch or a 403 still leaves the download page reachable.
+        MessageDialog dlg(mainframe,
+                          wxString::Format(_L("The update could not be downloaded.\n\n%s\n\nOpen the download "
+                                              "page in your browser instead?"),
+                                           from_u8(error)),
+                          wxString::Format(_L("Updating %s"), SLIC3R_APP_FULL_NAME),
+                          wxYES_NO | wxYES_DEFAULT | wxICON_WARNING);
+        if (dlg.ShowModal() == wxID_YES)
+            wxLaunchDefaultBrowser(version_info.url);
+        return;
+    }
+
+    progress.Update(100, _L("Download complete"));
+    progress.Hide();
+
+    // Ask before closing. The installer uninstalls the running copy before installing the new one,
+    // so the application cannot stay up through it.
+    MessageDialog confirm(mainframe,
+                          wxString::Format(_L("Version %s has been downloaded.\n\n%s will close so the "
+                                              "installer can replace it. You will be asked to save any "
+                                              "unsaved changes first.\n\nInstall now?"),
+                                           version, SLIC3R_APP_FULL_NAME),
+                          wxString::Format(_L("Updating %s"), SLIC3R_APP_FULL_NAME),
+                          wxYES_NO | wxYES_DEFAULT | wxICON_INFORMATION);
+    if (confirm.ShowModal() != wxID_YES) {
+        // Nothing is lost - the installer stays in the temp directory and can be run by hand.
+        BOOST_LOG_TRIVIAL(info) << "updater: install declined; installer left at " << installer.string();
+        return;
+    }
+
+    // Launched before the window is closed, so a failure can still be reported in a running
+    // application with a valid parent window.
+    if (!launch_installer(installer, error)) {
+        MessageDialog dlg(mainframe, wxString::Format(_L("Could not start the installer.\n\n%s"), from_u8(error)),
+                          wxString::Format(_L("Updating %s"), SLIC3R_APP_FULL_NAME), wxOK | wxICON_ERROR);
+        dlg.ShowModal();
+        return;   // still running, still usable
+    }
+
+    // Close(false), not Close(true). Close(true) makes the event un-vetoable, which makes MainFrame
+    // skip both the save-project prompt and the unsaved-preset check - it would silently discard the
+    // user's work. Close(false) runs those prompts and honours a Cancel. If the user does cancel,
+    // the installer is already on screen but harmless: NSIS will report a locked file rather than
+    // corrupt anything. That is a strictly better failure mode than data loss, so do not "fix" this
+    // by switching to Close(true).
+    CallAfter([this] { mainframe->Close(false); });
 }
 
 // return true if handled
@@ -6202,7 +6052,7 @@ bool GUI_App::process_network_msg(std::string dev_id, std::string msg)
         else if (msg == "update_studio") {
             BOOST_LOG_TRIVIAL(info) << "process_network_msg, update_studio";
             if (!m_show_error_msgdlg) {
-                MessageDialog msg_dlg(nullptr, _L("Please try updating OrcaSlicer and then try again."), "", wxAPPLY | wxOK);
+                MessageDialog msg_dlg(nullptr, _L("Please try updating Unlayered Slicer and then try again."), "", wxAPPLY | wxOK);
                 m_show_error_msgdlg = true;
                 msg_dlg.ShowModal();
                 m_show_error_msgdlg = false;
@@ -6212,7 +6062,7 @@ bool GUI_App::process_network_msg(std::string dev_id, std::string msg)
         else if (msg == "update_fixed_studio") {
             BOOST_LOG_TRIVIAL(info) << "process_network_msg, update_fixed_studio";
             if (!m_show_error_msgdlg) {
-                MessageDialog msg_dlg(nullptr, _L("Please try updating OrcaSlicer and then try again."), "", wxAPPLY | wxOK);
+                MessageDialog msg_dlg(nullptr, _L("Please try updating Unlayered Slicer and then try again."), "", wxAPPLY | wxOK);
                 m_show_error_msgdlg = true;
                 msg_dlg.ShowModal();
                 m_show_error_msgdlg = false;
@@ -6222,7 +6072,7 @@ bool GUI_App::process_network_msg(std::string dev_id, std::string msg)
         else if (msg == "cert_expired") {
             BOOST_LOG_TRIVIAL(info) << "process_network_msg, cert_expired";
             if (!m_show_error_msgdlg) {
-                MessageDialog msg_dlg(nullptr, _L("The certificate has expired. Please check the time settings or update OrcaSlicer and try again."), "", wxAPPLY | wxOK);
+                MessageDialog msg_dlg(nullptr, _L("The certificate has expired. Please check the time settings or update Unlayered Slicer and try again."), "", wxAPPLY | wxOK);
                 m_show_error_msgdlg = true;
                 msg_dlg.ShowModal();
                 m_show_error_msgdlg = false;
@@ -6242,7 +6092,7 @@ bool GUI_App::process_network_msg(std::string dev_id, std::string msg)
         else if (msg == "update_firmware_studio") {
             BOOST_LOG_TRIVIAL(info) << "process_network_msg, firmware internal error";
             if (!m_show_error_msgdlg) {
-                MessageDialog msg_dlg(nullptr, _L("Internal error. Please try upgrading the firmware and OrcaSlicer version. If the issue persists, contact support."), "", wxAPPLY | wxOK);
+                MessageDialog msg_dlg(nullptr, _L("Internal error. Please try upgrading the firmware and Unlayered Slicer version. If the issue persists, contact support."), "", wxAPPLY | wxOK);
                 m_show_error_msgdlg = true;
                 msg_dlg.ShowModal();
                 m_show_error_msgdlg = false;
@@ -6257,12 +6107,12 @@ bool GUI_App::process_network_msg(std::string dev_id, std::string msg)
                 m_unsigned_plugin_warning_shown = true;
                 MessageDialog
                     msg_dlg(nullptr,
-                            _L("To use OrcaSlicer with Bambu Lab printers, you need to enable LAN mode and Developer mode on your printer.\n\n"
+                            _L("To use Unlayered Slicer with Bambu Lab printers, you need to enable LAN mode and Developer mode on your printer.\n\n"
                                "Please go to your printer's settings and:\n"
                                "1. Turn on LAN mode\n"
                                "2. Enable Developer mode\n\n"
                                "Developer mode allows the printer to work exclusively through local network access, "
-                               "enabling full functionality with OrcaSlicer."),
+                               "enabling full functionality with Unlayered Slicer."),
                             _L("Network Plug-in Restriction"), wxAPPLY | wxOK);
                 m_show_error_msgdlg = true;
                 msg_dlg.ShowModal();
@@ -6382,57 +6232,12 @@ void GUI_App::on_check_privacy_update(wxCommandEvent& evt)
 
 void GUI_App::check_privacy_version(int online_login, const std::string& provider)
 {
-    if (app_config->get_stealth_mode()) {
-        request_user_handle(online_login);
-        return;
-    }
-
-    std::string query_params = "?policy/privacy=00.00.00.00";
-    std::string url = get_http_url(app_config->get_country_code()) + query_params;
-    Slic3r::Http http = Slic3r::Http::get(url);
-
-    http.header("accept", "application/json")
-        .timeout_connect(TIMEOUT_CONNECT)
-        .timeout_max(TIMEOUT_RESPONSE)
-        .on_complete([this, online_login, provider](std::string body, unsigned) {
-            try {
-                json j = json::parse(body);
-                if (j.contains("message")) {
-                    if (j["message"].get<std::string>() == "success") {
-                        if (j.contains("resources")) {
-                            for (auto it = j["resources"].begin(); it != j["resources"].end(); it++) {
-                                if (it->contains("type")) {
-                                    if ((*it)["type"] == std::string("policy/privacy")
-                                        && it->contains("version")
-                                        && it->contains("description")
-                                        && it->contains("url")
-                                        && it->contains("force_update")) {
-                                        privacy_version_info.version_str = (*it)["version"].get<std::string>();
-                                        privacy_version_info.description = (*it)["description"].get<std::string>();
-                                        privacy_version_info.url = (*it)["url"].get<std::string>();
-                                        privacy_version_info.force_upgrade = (*it)["force_update"].get<bool>();
-                                        break;
-                                    }
-                                }
-                            }
-                            CallAfter([this, online_login, provider]() {
-                                auto evt = new wxCommandEvent(EVT_CHECK_PRIVACY_VER);
-                                evt->SetInt(online_login);
-                                evt->SetString(wxString::FromUTF8(provider));
-                                wxQueueEvent(this, evt);
-                            });
-                        }
-                    }
-                }
-            }
-            catch (...) {
-                request_user_handle(online_login, provider);
-            }
-        })
-        .on_error([this, online_login, provider](std::string body, std::string error, unsigned int status) {
-            request_user_handle(online_login, provider);
-            BOOST_LOG_TRIVIAL(error) << "check privacy version error" << body;
-    }).perform();
+    // Unlayered: this used to GET api.bambulab.com for a privacy-policy version and, when one was
+    // newer than the stored privacy_version, block sign-in behind an acceptance dialog. There is no
+    // Bambu account here and no policy to fetch, so it does what the stealth-mode branch always did:
+    // carry straight on to the caller's continuation. Kept rather than deleted because on_user_login
+    // calls it and expects the handover.
+    request_user_handle(online_login, provider);
 }
 
 void GUI_App::no_new_version()
@@ -6446,7 +6251,7 @@ std::string GUI_App::format_display_version()
 {
     if (!version_display.empty()) return version_display;
 
-    version_display = SoftFever_VERSION;
+    version_display = UNLAYERED_VERSION;
     return version_display;
 }
 
@@ -7881,7 +7686,7 @@ int GUI_App::GetSingleChoiceIndex(const wxString& message,
 // select language from the list of installed languages
 bool GUI_App::select_language()
 {
-	wxArrayString translations = wxTranslations::Get()->GetAvailableTranslations(SLIC3R_APP_KEY);
+	wxArrayString translations = wxTranslations::Get()->GetAvailableTranslations(SLIC3R_APP_CATALOG);
     std::vector<const wxLanguageInfo*> language_infos;
     language_infos.emplace_back(wxLocale::GetLanguageInfo(wxLANGUAGE_ENGLISH));
     for (size_t i = 0; i < translations.GetCount(); ++ i) {
@@ -7933,7 +7738,7 @@ bool GUI_App::select_language()
             // Which language to save as the selected dictionary language?
             // 1) Hopefully the language set to wxTranslations by this->load_language(), but that API is weird and we don't want to rely on its
             //    stability in the future:
-            //    wxTranslations::Get()->GetBestTranslation(SLIC3R_APP_KEY, wxLANGUAGE_ENGLISH);
+            //    wxTranslations::Get()->GetBestTranslation(SLIC3R_APP_CATALOG, wxLANGUAGE_ENGLISH);
             // 2) Current locale language may not match the dictionary name, see GH issue #3901
             //    m_wxLocale->GetCanonicalName()
             // 3) new_language_info->CanonicalName is a safe bet. It points to a valid dictionary name.
@@ -7956,7 +7761,7 @@ bool GUI_App::load_language(wxString language, bool initial)
     	// Get the active language from PrusaSlicer.ini, or empty string if the key does not exist.
         language = app_config->get("language");
         if (! language.empty())
-        	BOOST_LOG_TRIVIAL(info) << boost::format("language provided by OrcaSlicer.conf: %1%") % language;
+        	BOOST_LOG_TRIVIAL(info) << boost::format("language provided by the app config: %1%") % language;
         else {
             // Get the system language.
             const wxLanguage lang_system = wxLanguage(wxLocale::GetSystemLanguage());
@@ -7985,7 +7790,7 @@ bool GUI_App::load_language(wxString language, bool initial)
                     // There seems to be a support for that on Windows and OSX, while on Linuxes the code just returns wxLocale::GetSystemLanguage().
                     // The last parameter gets added to the list of detected dictionaries. This is a workaround
                     // for not having the English dictionary. Let's hope wxWidgets of various versions process this call the same way.
-                    wxString best_language = wxTranslations::Get()->GetBestTranslation(SLIC3R_APP_KEY, wxLANGUAGE_ENGLISH);
+                    wxString best_language = wxTranslations::Get()->GetBestTranslation(SLIC3R_APP_CATALOG, wxLANGUAGE_ENGLISH);
                     if (!best_language.IsEmpty()) {
                         m_language_info_best = wxLocale::FindLanguageInfo(best_language);
                         BOOST_LOG_TRIVIAL(info) << boost::format("Best translation language detected (may be different from user locales): %1%") %
@@ -8013,7 +7818,7 @@ bool GUI_App::load_language(wxString language, bool initial)
 	}
 
 	if (language_info != nullptr && language_info->LayoutDirection == wxLayout_RightToLeft) {
-    	BOOST_LOG_TRIVIAL(trace) << boost::format("The following language code requires right to left layout, which is not supported by OrcaSlicer: %1%") % language_info->CanonicalName.ToUTF8().data();
+    	BOOST_LOG_TRIVIAL(trace) << boost::format("The following language code requires right to left layout, which is not supported by Unlayered Slicer: %1%") % language_info->CanonicalName.ToUTF8().data();
 		language_info = nullptr;
 	}
 
@@ -8132,14 +7937,14 @@ bool GUI_App::load_language(wxString language, bool initial)
 
     if (!wxLocale::IsAvailable(locale_language_info->Language)) {
     	// Loading the language dictionary failed.
-	    wxString message = wxString::Format(_L("Switching Orca Slicer to language %s failed."), requested_language_code);
+	    wxString message = wxString::Format(_L("Switching Unlayered Slicer to language %s failed."), requested_language_code);
 #if !defined(_WIN32) && !defined(__APPLE__)
         // likely some linux system
         message += _L("\nYou may need to reconfigure the missing locales, likely by running the \"locale-gen\" and \"dpkg-reconfigure locales\" commands.\n");
 #endif
         if (initial)
         	message + "\n\nApplication will close.";
-        wxMessageBox(message, _L("Orca Slicer - Switching language failed"), wxOK | wxICON_ERROR);
+        wxMessageBox(message, _L("Unlayered Slicer - Switching language failed"), wxOK | wxICON_ERROR);
         if (initial)
 			std::exit(EXIT_FAILURE);
 		else
@@ -8154,7 +7959,7 @@ bool GUI_App::load_language(wxString language, bool initial)
     // Override language at the active wxTranslations class (which is stored in the active m_wxLocale)
     // to load possibly different dictionary, for example, load Czech dictionary for Slovak language.
     wxTranslations::Get()->SetLanguage(language_dict);
-    m_wxLocale->AddCatalog(SLIC3R_APP_KEY);
+    m_wxLocale->AddCatalog(SLIC3R_APP_CATALOG);
     m_active_language_code = requested_language_code;
     m_imgui->set_language(into_u8(requested_language_code));
 
@@ -8256,6 +8061,10 @@ void GUI_App::update_mode()
         mainframe->m_param_dialog->panel()->update_mode();
     if (mainframe->m_printer_view)
         mainframe->m_printer_view->update_mode();
+    if (mainframe->m_web_app_view)
+        mainframe->m_web_app_view->update_mode();
+    if (mainframe->m_agent_view)
+        mainframe->m_agent_view->update_mode();
     mainframe->m_webview->update_mode();
 
 #ifdef _MSW_DARK_MODE
@@ -8277,6 +8086,10 @@ void GUI_App::update_internal_development() {
     mainframe->m_webview->update_mode();
     if (mainframe->m_printer_view)
         mainframe->m_printer_view->update_mode();
+    if (mainframe->m_web_app_view)
+        mainframe->m_web_app_view->update_mode();
+    if (mainframe->m_agent_view)
+        mainframe->m_agent_view->update_mode();
 }
 
 void GUI_App::show_ip_address_enter_dialog(wxString title)
@@ -8630,7 +8443,7 @@ void GUI_App::open_preferences(size_t open_on_tab, const std::string& highlight_
                     associate_files(L"step");
                     associate_files(L"stp");
                 }
-                associate_url(L"orcaslicer");
+                associate_url(L"unlayeredslicer");
             }
             else {
                 if (app_config->get("associate_gcode") == "true")
@@ -9106,7 +8919,7 @@ void GUI_App::OSXStoreOpenFiles(const wxArrayString &fileNames)
         if (is_gcode_file(into_u8(filename)))
             ++ num_gcodes;
     if (fileNames.size() == num_gcodes) {
-        // Opening PrusaSlicer by drag & dropping a G-Code onto OrcaSlicer icon in Finder,
+        // Opening PrusaSlicer by drag & dropping a G-Code onto the Unlayered Slicer icon in Finder,
         // just G-codes were passed. Switch to G-code viewer mode.
         m_app_mode = EAppMode::GCodeViewer;
         unlock_lockfile(get_instance_hash_string() + ".lock", data_dir() + "/cache/");
@@ -9831,8 +9644,8 @@ void GUI_App::associate_files(std::wstring extend)
     ::GetModuleFileNameW(nullptr, app_path, sizeof(app_path));
 
     std::wstring prog_path = L"\"" + std::wstring(app_path) + L"\"";
-    std::wstring prog_id = L" Orca.Slicer.1";
-    std::wstring prog_desc = L"OrcaSlicer";
+    std::wstring prog_id = L" Unlayered.Slicer.1";
+    std::wstring prog_desc = L"Unlayered Slicer";
     std::wstring prog_command = prog_path + L" \"%1\"";
     std::wstring reg_base = L"Software\\Classes";
     std::wstring reg_extension = reg_base + L"\\." + extend;
@@ -9858,8 +9671,8 @@ void GUI_App::disassociate_files(std::wstring extend)
     ::GetModuleFileNameW(nullptr, app_path, sizeof(app_path));
 
     std::wstring prog_path = L"\"" + std::wstring(app_path) + L"\"";
-    std::wstring prog_id = L" Orca.Slicer.1";
-    std::wstring prog_desc = L"OrcaSlicer";
+    std::wstring prog_id = L" Unlayered.Slicer.1";
+    std::wstring prog_desc = L"Unlayered Slicer";
     std::wstring prog_command = prog_path + L" \"%1\"";
     std::wstring reg_base = L"Software\\Classes";
     std::wstring reg_extension = reg_base + L"\\." + extend;
@@ -9977,6 +9790,38 @@ bool is_soluble_filament(int extruder_id)
 
     return support_option->get_at(0);
 };
+
+// UNLAYERED_MOD — see the header.
+bool nonplanar_printing_enabled()
+{
+    const PresetBundle* bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return false;
+    const ConfigOptionBool* opt = bundle->printers.get_edited_preset().config.option<ConfigOptionBool>("enable_nonplanar");
+    return opt != nullptr && opt->value;
+}
+
+bool virtual_5axis_enabled()
+{
+    const PresetBundle* bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return false;
+    const DynamicPrintConfig& cfg = bundle->printers.get_edited_preset().config;
+    const ConfigOptionBool* np = cfg.option<ConfigOptionBool>("enable_nonplanar");
+    if (np == nullptr || ! np->value)
+        return false;
+    const auto* sel = cfg.option<ConfigOptionEnum<AxisSelection>>("axis_selection");
+    return sel != nullptr && sel->value == AxisSelection::Virtual;
+}
+
+double virtual_max_tilt_deg()
+{
+    if (! virtual_5axis_enabled())
+        return 0.;
+    const auto* opt = wxGetApp().preset_bundle->printers.get_edited_preset().config
+                          .option<ConfigOptionFloat>("nonplanar_virtual_max_angle");
+    return opt == nullptr ? 0. : std::max(0., opt->value);
+}
 
 bool has_filaments(const std::vector<string>& model_filaments) {
     auto &filament_presets = Slic3r::GUI::wxGetApp().preset_bundle->filament_presets;

@@ -60,11 +60,12 @@ using json = nlohmann::json;
 namespace Slic3r {
 
 namespace {
-constexpr const char* ORCA_DEFAULT_API_URL   = "api.orcaslicer.com";
-constexpr const char* ORCA_DEFAULT_AUTH_URL  = "https://auth.orcaslicer.com";
-constexpr const char* ORCA_DEFAULT_CLOUD_URL = "https://cloud.orcaslicer.com";
-// Orca: This is a public key with no secret, used to identify the client application to the backend.
-constexpr const char* ORCA_DEFAULT_PUB_KEY = "sb_publishable_lvVe_whOi80SU9BPSxM1kA_tbt9AbR_";
+constexpr const char* ORCA_DEFAULT_API_URL = "";
+constexpr const char* ORCA_DEFAULT_AUTH_URL = "";
+constexpr const char* ORCA_DEFAULT_CLOUD_URL = "";
+// Unlayered: was OrcaSlicer's publishable client key. Blanked - it identifies their application,
+// not ours, and the cloud service is removed.
+constexpr const char* ORCA_DEFAULT_PUB_KEY = "";
 
 constexpr const char* ORCA_HEALTH_PATH = "/api/v1/health";
 constexpr const char* ORCA_SYNC_PULL_PATH = "/api/v1/sync/pull";
@@ -90,7 +91,7 @@ constexpr const char* CONFIG_ORCA_AUTH_URL  = "orca_auth_url";
 constexpr const char* CONFIG_ORCA_CLOUD_URL = "orca_cloud_url";
 constexpr const char* CONFIG_ORCA_PUB_KEY   = "orca_pub_key";
 
-constexpr const char* SECRET_STORE_SERVICE = "OrcaSlicer/Auth";
+constexpr const char* SECRET_STORE_SERVICE = "UnlayeredSlicer/Auth";
 constexpr const char* SECRET_STORE_USER    = "orca_refresh_token";
 constexpr std::chrono::seconds TOKEN_REFRESH_SKEW{900}; // 15 minutes
 
@@ -636,28 +637,9 @@ static bool parse_stored_secret(const std::string& secret, std::string& out_refr
 
 int OrcaCloudServiceAgent::start()
 {
-    regenerate_pkce();
-
-    // Attempt silent sign-in from stored refresh token
-    std::string stored_secret;
-    if (load_user_secret(stored_secret) && !stored_secret.empty()) {
-        // Backward compatibility: if secret it a json, then read it as use session,
-        // which allows us to refresh it in a background thread to speed up the app startup;
-        // otherwise it's a plain refresh token, then we force a sync refresh
-        std::string refresh_token;
-        SessionInfo stored_session;
-        if (parse_stored_secret(stored_secret, refresh_token, stored_session)) {
-            if (stored_session.logged_in) {
-                // We have a previously saved user session, use it. Skip re-persisting: the secret was
-                // just loaded from disk, so writing the identical bytes back is wasted startup I/O.
-                set_user_session(stored_session.access_token, stored_session.user_id, stored_session.user_name,
-                                 stored_session.user_nickname, stored_session.user_avatar, stored_session.refresh_token,
-                                 /*persist=*/false);
-            }
-            refresh_now(refresh_token, "refresh token", stored_session.logged_in);
-        }
-    }
-
+    // Unlayered: this used to attempt a silent sign-in from a refresh token left in the OS
+    // credential store, which made it the only outbound request no user action triggered. The
+    // cloud service is removed, so there is nothing to sign in to.
     return BAMBU_NETWORK_SUCCESS;
 }
 
@@ -2080,6 +2062,13 @@ bool OrcaCloudServiceAgent::resolve_unauthorized(HttpResult& res,
 
 int OrcaCloudServiceAgent::http_get(const std::string& path, std::string* response_body, unsigned int* http_code)
 {
+    // Unlayered: the Orca cloud service is removed. Every request this class could make left the
+    // machine for api.orcaslicer.com / auth.orcaslicer.com, so it is cut here at the transport
+    // rather than at each of the dozen call sites - there is no code path that can emit one.
+    if (response_body) response_body->clear();
+    if (http_code) *http_code = 0;
+    return BAMBU_NETWORK_ERR_INVALID_RESULT;
+
     std::string url = api_base_url + path;
     BOOST_LOG_TRIVIAL(trace) << "OrcaCloudServiceAgent: GET " << url;
 
@@ -2140,6 +2129,13 @@ int OrcaCloudServiceAgent::http_get(const std::string& path, std::string* respon
 
 int OrcaCloudServiceAgent::http_post(const std::string& path, const std::string& body, std::string* response_body, unsigned int* http_code)
 {
+    // Unlayered: the Orca cloud service is removed. Every request this class could make left the
+    // machine for api.orcaslicer.com / auth.orcaslicer.com, so it is cut here at the transport
+    // rather than at each of the dozen call sites - there is no code path that can emit one.
+    if (response_body) response_body->clear();
+    if (http_code) *http_code = 0;
+    return BAMBU_NETWORK_ERR_INVALID_RESULT;
+
     std::string url = api_base_url + path;
     BOOST_LOG_TRIVIAL(trace) << "OrcaCloudServiceAgent: POST " << url;
 
@@ -2205,6 +2201,13 @@ int OrcaCloudServiceAgent::http_post(const std::string& path, const std::string&
 
 int OrcaCloudServiceAgent::http_put(const std::string& path, const std::string& body, std::string* response_body, unsigned int* http_code)
 {
+    // Unlayered: the Orca cloud service is removed. Every request this class could make left the
+    // machine for api.orcaslicer.com / auth.orcaslicer.com, so it is cut here at the transport
+    // rather than at each of the dozen call sites - there is no code path that can emit one.
+    if (response_body) response_body->clear();
+    if (http_code) *http_code = 0;
+    return BAMBU_NETWORK_ERR_INVALID_RESULT;
+
     std::string url = api_base_url + path;
     BOOST_LOG_TRIVIAL(trace) << "OrcaCloudServiceAgent: PUT " << url;
 
@@ -2267,6 +2270,13 @@ int OrcaCloudServiceAgent::http_put(const std::string& path, const std::string& 
 
 int OrcaCloudServiceAgent::http_delete(const std::string& path, std::string* response_body, unsigned int* http_code)
 {
+    // Unlayered: the Orca cloud service is removed. Every request this class could make left the
+    // machine for api.orcaslicer.com / auth.orcaslicer.com, so it is cut here at the transport
+    // rather than at each of the dozen call sites - there is no code path that can emit one.
+    if (response_body) response_body->clear();
+    if (http_code) *http_code = 0;
+    return BAMBU_NETWORK_ERR_INVALID_RESULT;
+
     std::string url = api_base_url + path;
     BOOST_LOG_TRIVIAL(trace) << "OrcaCloudServiceAgent: DELETE " << url;
 
@@ -2329,6 +2339,11 @@ bool OrcaCloudServiceAgent::http_post_token(const std::string& body,
                                             unsigned int* http_code,
                                             const std::string& custom_url)
 {
+    // Unlayered: the Orca cloud service is removed - see http_get().
+    if (response_body) response_body->clear();
+    if (http_code) *http_code = 0;
+    return false;
+
     std::map<std::string, std::string> headers_copy;
     std::string url;
     {
@@ -2409,6 +2424,11 @@ bool OrcaCloudServiceAgent::http_post_auth(const std::string& path,
                                            std::string* response_body,
                                            unsigned int* http_code)
 {
+    // Unlayered: the Orca cloud service is removed - see http_get().
+    if (response_body) response_body->clear();
+    if (http_code) *http_code = 0;
+    return false;
+
     std::string url = auth_base_url + path + "?scope=local";
     std::string token;
     std::map<std::string, std::string> headers_copy;

@@ -134,9 +134,9 @@ enum ConfigMenuIDs {
     ConfigMenuCnt,
 };
 
-enum OrcaSlicerMenuIDs {
-  OrcaSlicerMenuAbout,
-  OrcaSlicerMenuPreferences,
+enum UnlayeredSlicerMenuIDs {
+  UnlayeredSlicerMenuAbout,
+  UnlayeredSlicerMenuPreferences,
 };
 
 enum CameraMenuIDs {
@@ -168,6 +168,24 @@ public:
     std::string url;
     bool        force_upgrade{ false };
     int      ver_items[VERSION_LEN];  // AA.BB.CC.DD
+
+    // Unlayered: the installer the update manifest advertised for this platform, if any. An empty
+    // asset_url means there is nothing to install in place and the update dialog offers to open
+    // `url` in a browser instead. Always reassigned on every check via clear_asset(), so a manifest
+    // that stops advertising assets cannot leave a stale download queued.
+    std::string asset_name;
+    std::string asset_url;
+    std::string asset_sha256;   // lowercase hex; empty means the manifest declared none
+    uint64_t    asset_size{ 0 }; // bytes; 0 means the manifest declared none
+
+    bool has_asset() const { return !asset_url.empty(); }
+    void clear_asset() {
+        asset_name.clear();
+        asset_url.clear();
+        asset_sha256.clear();
+        asset_size = 0;
+    }
+
     VersionInfo() {
         for (int i = 0; i < VERSION_LEN; i++) {
             ver_items[i] = 0;
@@ -377,7 +395,7 @@ public:
     bool is_editor() const { return m_app_mode == EAppMode::Editor; }
     bool is_gcode_viewer() const { return m_app_mode == EAppMode::GCodeViewer; }
     bool is_recreating_gui() const { return m_is_recreating_gui; }
-    std::string logo_name() const { return is_editor() ? "OrcaSlicer" : "OrcaSlicer-gcodeviewer"; }
+    std::string logo_name() const { return is_editor() ? "UnlayeredSlicer" : "UnlayeredSlicer-gcodeviewer"; }
 
     bool is_closing() const { return m_is_closing.load(std::memory_order_acquire); }
     void set_closing(bool closing) { m_is_closing.store(closing, std::memory_order_release); }
@@ -391,6 +409,9 @@ public:
 
     bool show_plate_gridlines() const { return app_config->get_bool("show_plate_gridlines"); }
     void toggle_show_plate_gridlines() const { app_config->set_bool("show_plate_gridlines", !show_plate_gridlines()); }
+
+    bool show_cut_chunk_colors() const { return app_config->get_bool("show_cut_chunk_colors"); }
+    void toggle_show_cut_chunk_colors() const { app_config->set_bool("show_cut_chunk_colors", !show_cut_chunk_colors()); }
 
     bool show_canvas_zoom_button() const { return app_config->get_bool("show_canvas_zoom_button"); }
     void toggle_canvas_zoom_button() const { app_config->set_bool("show_canvas_zoom_button", !show_canvas_zoom_button()); }
@@ -524,7 +545,11 @@ public:
 
     void            check_update(bool show_tips, int by_user);
     void            check_new_version(bool show_tips = false, int by_user = 0);
-    void            check_new_version_sf(bool show_tips = false, int by_user = 0);
+    // by_user != 0 means the user asked via Help > Check for Updates, which overrides a skipped
+    // version, reports "up to date" instead of staying silent, and runs on -dev builds.
+    void            check_new_version_sf(int by_user = 0);
+    // Downloads and runs the installer the last check found, then closes the application.
+    void            start_app_update();
     bool            process_network_msg(std::string dev_id, std::string msg);
     void            request_new_version(int by_user);
     void            enter_force_upgrade();
@@ -833,6 +858,17 @@ bool is_support_filament(int extruder_id, bool strict_check = true);
 bool is_soluble_filament(int extruder_id);
 // check if the filament for model is in the list
 bool has_filaments(const std::vector<string>& model_filaments);
+// UNLAYERED_MOD — `enable_nonplanar` on the selected printer preset: the canonical answer to
+// "does this machine do multiplanar printing?". Slicing honours the same flag when it decides
+// whether layer_rotation_b/c apply (see layer_rotation_trafo() in PrintConfig.cpp), so GUI that
+// authors or visualizes chunk rotations must gate on this too. Safe before the bundle is loaded.
+bool nonplanar_printing_enabled();
+// UNLAYERED_MOD -- "Virtual" is a value of the printer-type dropdown (axis_selection). Live UI must
+// ask THAT, not the derived virtual_5axis bool, which normalize_fdm_1() only recomputes at slice
+// time and would therefore lag a dropdown change until the next slice.
+bool   virtual_5axis_enabled();
+// The virtual-mode tilt cap in degrees, or 0 when there is none.
+double virtual_max_tilt_deg();
 } // namespace GUI
 } // Slic3r
 

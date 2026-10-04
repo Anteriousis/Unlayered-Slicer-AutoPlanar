@@ -66,8 +66,8 @@ void ThermalPreconditioningDialog::create_ui()
     m_ok_button->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
     m_ok_button->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNTEXT));
 #else
-    m_ok_button->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#B6F34F")));
-    m_ok_button->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#000000")));
+    m_ok_button->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#767676")));
+    m_ok_button->SetForegroundColour(wxColour("#FFFFFF"));
     m_ok_button->SetMinSize(wxSize(FromDIP(80), FromDIP(32)));
     m_ok_button->SetMaxSize(wxSize(FromDIP(80), FromDIP(32)));
 #endif

@@ -39,6 +39,7 @@
 #include <boost/log/trivial.hpp>
 #include <boost/regex.hpp>
 #include <boost/nowide/fstream.hpp>
+#include <cstdlib>
 
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
@@ -47,6 +48,7 @@
 #include "nlohmann/json.hpp"
 
 #include "GCode/ConflictChecker.hpp"
+#include "GCode/HotendCollisionCheck.hpp"
 #include "ParameterUtils.hpp"
 
 #include <codecvt>
@@ -111,6 +113,15 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
     // Cache the plenty of parameters, which influence the G-code generator only,
     // or they are only notes not influencing the generated G-code.
     static std::unordered_set<std::string> steps_gcode = {
+        // UNLAYERED_MOD — these only change what the emitter writes, not the slices:
+        // virtual_5axis suppresses the B/C words, the rest tune the inter-chunk transition moves.
+        "virtual_5axis",
+        "nonplanar_departure_distance",
+        "nonplanar_approach_distance",
+        "nonplanar_nozzle_to_b_axis",
+        // the two virtual-mode limits are checked at validate/export time; neither moves a slice
+        "nonplanar_virtual_max_angle",
+        "nonplanar_virtual_max_z",
         //BBS
         "additional_cooling_fan_speed",
         "reduce_crossing_wall",
@@ -310,7 +321,12 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             // Spiral Vase forces different kind of slicing than the normal model:
             // In Spiral Vase mode, holes are closed and only the largest area contour is kept at each layer.
             // Therefore toggling the Spiral Vase on / off requires complete reslicing.
-            || opt_key == "spiral_mode") {
+            || opt_key == "spiral_mode"
+            // UNLAYERED_MOD — the non-planar master switch gates layer_rotation_b/c, i.e. it changes
+            // each object's slicing frame (see layer_rotation_trafo() / PrintObject::slice()). It has
+            // to invalidate posSlice: the generic fallback below only calls invalidate_all_steps(),
+            // which touches Print-level steps and leaves every PrintObject's slices stale.
+            || opt_key == "enable_nonplanar") {
             osteps.emplace_back(posSlice);
         } else if (
                opt_key == "print_sequence"
@@ -721,6 +737,10 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                 }
 
                 // if output needed, collect indices (inside convex_hulls_other) of intersecting hulls
+                // UNLAYERED_MOD: legacy chunks and cut-plane segments overlap in XY by design, so the
+                // object-vs-object hull test is skipped only for a non-planar machine; every other
+                // printer keeps upstream's sequential-print collision check.
+                if (! print.config().enable_nonplanar.value)
                 for (size_t i = 0; i < convex_hulls_other.size(); ++i) {
                     if (! intersection(convex_hulls_other[i], convex_hull).empty()) {
                         bool has_exception = false;
@@ -942,7 +962,7 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                 too_tall_instances[inst] = std::make_pair(print_instance_with_bounding_box[k].hull_polygon, unscaled<double>(height));
         }
 
-        if (too_tall_instances.size() > 0) {
+        if (! print.config().enable_nonplanar.value && too_tall_instances.size() > 0) { // UNLAYERED_MOD: see above
             //return {, inst->model_instance->get_object()};
             for (auto& iter: too_tall_instances) {
                 if (single_object_exception.string.empty()) {
@@ -1378,13 +1398,55 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         }
     }
 
-    if (m_config.print_sequence == PrintSequence::ByObject && (m_objects.size() > 1 || m_objects[0]->instances().size() > 1)) {
+    // Declarative cut planes: differently-oriented segments interleave within one group, which
+    // only the By-Group sequencing understands. ByLayer would try to print co-located segments
+    // simultaneously; ByObject cannot interleave them by layer.
+    if (m_config.print_sequence != PrintSequence::ByGroup)
+        for (const PrintObject *object : m_objects)
+            if (object->is_segment()) {
+                StringObjectException ret;
+                ret.string  = L("Cut planes and per-part build directions require the \"By group\" print sequence.");
+                ret.opt_key = "print_sequence";
+                return ret;
+            }
+
+    // UNLAYERED_MOD -- virtual 5-axis tilt limit. The nozzle stays upright while a tilted chunk
+    // prints, so past a certain tilt the flat tip and the cone above it cannot reach the surface.
+    // This is the single enforcement point: a build direction can be authored by typing B, by
+    // dragging the plane, or by the chunk gizmo, and the latter two cannot be clamped without
+    // storing a plane the viewport never showed. Refused, never clamped: the
+    // build normal drives the cut geometry and the 3D scene, so reducing it here would print
+    // something the viewport never showed.
+    if (m_config.enable_nonplanar.value && m_config.virtual_5axis.value &&
+        m_config.nonplanar_virtual_max_angle.value > 0.) {
+        const double limit = m_config.nonplanar_virtual_max_angle.value;
+        for (const PrintObject *object : m_objects) {
+            double b_deg = 0., c_deg = 0.;
+            object->effective_layer_rotation_bc(b_deg, c_deg);
+            // B is the tilt away from vertical; C only spins that tilt about Z.
+            const double tilt = std::abs(b_deg);
+            if (tilt > limit + EPSILON) {
+                StringObjectException ret;
+                ret.string  = Slic3r::format(_u8L("A build direction is tilted %1% degrees from vertical, but this "
+                                                  "virtual 5-axis printer allows at most %2% degrees. Reduce the cut "
+                                                  "plane angle, or raise \"Max tilt angle\" in the printer settings."),
+                                             (boost::format("%.1f") % tilt).str(),
+                                             (boost::format("%.1f") % limit).str());
+                ret.opt_key = "nonplanar_virtual_max_angle";
+                ret.object  = const_cast<ModelObject *>(object->model_object());
+                return ret;
+            }
+        }
+    }
+
+    if ((m_config.print_sequence == PrintSequence::ByObject || m_config.print_sequence == PrintSequence::ByGroup) &&
+        (m_objects.size() > 1 || m_objects[0]->instances().size() > 1)) {
         if (m_config.timelapse_type == TimelapseType::tlSmooth)
-            return {L("Smooth mode of timelapse is not supported when \"by object\" sequence is enabled.")};
+            return {L("Smooth mode of timelapse is not supported when \"by object\" or \"by group\" sequence is enabled.")};
 
         if (m_config.enable_wrapping_detection) {
             StringObjectException clumping_detection_setting_err;
-            clumping_detection_setting_err.string = L("Clumping detection is not supported when \"by object\" sequence is enabled.");
+            clumping_detection_setting_err.string = L("Clumping detection is not supported when \"by object\" or \"by group\" sequence is enabled.");
             clumping_detection_setting_err.opt_key = "enable_wrapping_detection";
             return clumping_detection_setting_err;
         }
@@ -1465,8 +1527,10 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     for (size_t print_object_idx = 0; print_object_idx < m_objects.size(); ++ print_object_idx) {
         const PrintObject &print_object = *m_objects[print_object_idx];
         //FIXME It is quite expensive to generate object layers just to get the print height!
-        if (auto layers = generate_object_layers(print_object.slicing_parameters(), layer_height_profile(print_object_idx), print_object.config().precise_z_height.value);
+        if (auto layers = generate_object_layers(print_object.slicing_parameters(), layer_height_profile(print_object_idx),
+                                                 print_object.config().precise_z_height.value);
             !layers.empty()) {
+
 
             Vec3d test =this->shrinkage_compensation();
             const double shrinkage_compensation_z = this->shrinkage_compensation().z();
@@ -1932,7 +1996,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                        if (!warning_key.empty()) {
                             motion_warning.string = L(
                                 "The jerk setting exceeds the printer's maximum jerk (machine_max_jerk_x/machine_max_jerk_y).\n"
-                                "Orca will automatically cap the jerk speed to ensure it doesn't surpass the printer's capabilities.\n"
+                                "Unlayered Slicer will automatically cap the jerk speed to ensure it doesn't surpass the printer's capabilities.\n"
                                 "You can adjust the maximum jerk setting in your printer's configuration to get higher speeds.");
                             motion_warning.opt_key = warning_key;
                        }
@@ -1944,7 +2008,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 const bool support_max_junction_deviation = ( m_config.gcode_flavor == gcfMarlinFirmware);
                 if (warning_key.empty() && m_default_object_config.default_junction_deviation.get_at(extruder_id) > max_junction_deviation && support_max_junction_deviation) {
                     motion_warning.string  = L( "Junction deviation setting exceeds the printer's maximum value (machine_max_junction_deviation).\n"
-                                          "Orca will automatically cap the junction deviation to ensure it doesn't surpass the printer's capabilities.\n"
+                                          "Unlayered Slicer will automatically cap the junction deviation to ensure it doesn't surpass the printer's capabilities.\n"
                                           "You can adjust the machine_max_junction_deviation value in your printer's configuration to get higher limits.");
                     motion_warning.opt_key = "default_junction_deviation";
                 }
@@ -2085,8 +2149,15 @@ BoundingBox Print::total_bounding_box() const
     BoundingBox bb = this->bounding_box();
 
     // we need to offset the objects bounding box by at least half the perimeters extrusion width
-    Flow perimeter_flow = m_objects.front()->get_layer(0)->get_region(0)->flow(frPerimeter);
-    double extra = perimeter_flow.width/2;
+    // UNLAYERED_MOD: a declarative cut plane may legally leave a segment with zero layers (thin
+    // sliver), so the first object is not guaranteed to have a layer 0 to sample a representative
+    // flow from. Pick the first object that actually has one.
+    double extra = 0.;
+    for (const PrintObject *object : m_objects)
+        if (object->layer_count() > 0 && ! object->get_layer(0)->regions().empty()) {
+            extra = object->get_layer(0)->get_region(0)->flow(frPerimeter).width / 2;
+            break;
+        }
 
     // consider support material
     if (this->has_support_material()) {
@@ -2273,6 +2344,8 @@ std::map<ObjectID, unsigned int> getObjectExtruderMap(const Print& print) {
         // BBS
         if (object->object_first_layer_wall_extruders.empty()){
             unsigned int objectFirstLayerFirstExtruder = print.config().filament_diameter.size();
+            if (object->layers().empty())
+                continue;
             auto firstLayerRegions = object->layers().front()->regions();
             if (!firstLayerRegions.empty()) {
                 for (const LayerRegion* regionPtr : firstLayerRegions) {
@@ -2288,6 +2361,381 @@ std::map<ObjectID, unsigned int> getObjectExtruderMap(const Print& print) {
         }
     }
     return objectExtruderMap;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Declarative cut planes: the segment support cascade.
+//
+// A segment is sliced in its own frame, where its base plane is the ground. Its support therefore
+// terminates on that plane -- but the plane is a cut face of its PARENT, and wherever the parent
+// has no material under the contact the load has nowhere to go. The cascade closes that gap: each
+// segment is generated child-first, and whatever its support could not carry to its own floor is
+// projected onto the parent as forced overhang ("demand"), in the parent's frame.
+//
+// This replaces the world-frame cut-group cascade on haryr/support-generation. The differences
+// that matter: the partition is a TREE (a parent can receive from several children, so demand
+// accumulates rather than being assigned), the child->parent map is a single composition of the
+// authoritative frames instead of a four-matrix world round-trip, and floor/ceiling roles come
+// from the descriptor's clips rather than being re-derived from config planes.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// Exact matrix identity, deliberately NOT isApprox(). PrintApply expands a ModelObject into one
+// PrintObject per DISTINCT transform using exact comparison (transform3d_equal), so two
+// numerically-close-but-distinct transforms are different families there. Matching them
+// approximately here would merge two families, put duplicate segment indices in one, and let
+// segment_parent_of() return a parent from the wrong transform.
+bool same_trafo(const Transform3d &lhs, const Transform3d &rhs)
+{
+    const double *l = lhs.data();
+    const double *r = rhs.data();
+    for (size_t i = 0; i < 16; ++ i, ++ l, ++ r)
+        if (*l != *r)
+            return false;
+    return true;
+}
+
+// Everything at the bottom of `child` that its parent may have to hold up. Sampled over a window
+// of 2 layer heights above the lowest layer rather than the single lowest layer: the exact-lowest
+// layer is routinely empty for one category or another, and trusting it alone silently drops
+// demand.
+Polygons segment_support_footprint(const PrintObject *child)
+{
+    Polygons     out;        // full-width contributions
+    Polygons     tree_base;  // tree pads, eroded before handoff (see below)
+    const double lh = std::max(0.01, child->config().layer_height.value);
+
+    const ConstSupportLayerPtrsAdaptor support_layers = child->support_layers();
+    if (! support_layers.empty()) {
+        coordf_t z_lo = support_layers.front()->print_z;
+        for (const SupportLayer *sl : support_layers)
+            z_lo = std::min(z_lo, sl->print_z);
+        const coordf_t z_threshold = z_lo + coordf_t(2. * lh);
+        for (const SupportLayer *sl : support_layers)
+            if (sl->print_z <= z_threshold) {
+                // Normal/grid support records its footprint in support_islands; classic tree
+                // leaves that empty and uses base_areas. Take both so either style cascades.
+                append(out,       to_polygons(sl->support_islands));
+                append(tree_base, to_polygons(sl->base_areas));
+            }
+    }
+
+    // A tree roots in a wide base pad. Handing the full pad down makes the parent mirror it as a
+    // blocky column that visibly holds nothing, so slim it to its load-bearing cores by a branch
+    // radius and let the parent's own tree regrow a slim column.
+    if (! tree_base.empty()) {
+        const bool    organic = child->config().support_style.value == smsTreeOrganic;
+        const double  dia_mm  = organic ? child->config().tree_support_branch_diameter_organic.value
+                                        : child->config().tree_support_branch_diameter.value;
+        const coord_t r       = scale_(std::max(0.2, 0.5 * dia_mm));
+        append(out, offset(union_(tree_base), - double(r)));
+    }
+
+    // The body cross-section, same window. This is what makes a child needing NO support of its
+    // own still propagate: its overhang past the parent is not a slicing overhang in any frame.
+    if (child->layer_count() > 0) {
+        const coordf_t z_lo = child->get_layer(0)->print_z;
+        for (size_t i = 0; i < child->layer_count(); ++ i) {
+            const Layer *layer = child->get_layer(int(i));
+            if (layer->print_z > z_lo + coordf_t(2. * lh))
+                break;              // layers are sorted by print_z
+            append(out, to_polygons(layer->lslices));
+        }
+    }
+
+    return union_(out);
+}
+
+// Fallback when the shared plane is horizontal or near-vertical in the parent's frame: drop the
+// footprint straight onto every parent layer at or below it, minus the parent's own material.
+void seed_single_layer(const PrintObject *parent, const Polygons &footprint_xy, double z_mm,
+                       std::vector<Polygons> &out)
+{
+    if (footprint_xy.empty() || parent->layer_count() == 0)
+        return;
+    // Descend from the shared plane, carrying what is still unsupported and CARVING it against the
+    // parent's material on the way -- the same accumulate-and-carve rule the tilted path uses.
+    // Testing each layer independently instead (as the original did) lets load caught by a shelf
+    // reappear wherever the parent narrows again lower down, asking for support beneath material
+    // that is already carrying it.
+    Polygons column = footprint_xy;
+    for (int i = int(parent->layer_count()) - 1; i >= 0; -- i) {
+        const Layer *layer = parent->get_layer(i);
+        if (layer->print_z > z_mm + EPSILON)
+            continue;                       // above the shared plane: nothing lands here
+        column = diff(column, to_polygons(layer->lslices));
+        if (column.empty())
+            break;                          // fully caught by the parent
+        out[size_t(i)] = column;
+    }
+}
+
+// The child's base plane, expressed in the PARENT's slice frame as z = a*x + b*y + d.
+// Taken from the descriptor's own Floor clip rather than reconstructed from the columns of the
+// child->parent matrix: the clip is exact and object-local, so this is both simpler and
+// numerically better. Returns false if the segment has no usable base-plane clip.
+bool base_plane_in_parent_frame(const PrintObject *child, const PrintObject *parent,
+                                double &a, double &b, double &d)
+{
+    if (! child->is_segment() || child->is_root_segment())
+        return false;
+    const CutSegmentClip *base = nullptr;
+    for (const CutSegmentClip &clip : child->segment()->clips)
+        if (clip.plane_index == child->segment()->base_plane && clip.role == CutClipRole::Floor)
+            base = &clip;
+    if (base == nullptr || base->normal.squaredNorm() < EPSILON)
+        return false;
+
+    const Transform3d &to_parent = parent->object_to_slice();
+    Vec3d              n         = to_parent.linear().inverse().transpose() * base->normal;
+    if (n.norm() < EPSILON)
+        return false;
+    n.normalize();
+    const Vec3d  on_plane = to_parent * (base->normal * (base->offset / base->normal.squaredNorm()));
+    const double D        = n.dot(on_plane);
+    if (std::abs(n.z()) < 1e-9)
+        return false;               // near-vertical in the parent frame; caller seeds instead
+    a = - n.x() / n.z();
+    b = - n.y() / n.z();
+    d = D / n.z();
+    return true;
+}
+
+// Project `footprint_child` (the child's slice frame) onto the parent's layers, keeping only what
+// genuinely overhangs. Walks top->bottom accumulating a column: a patch landing on solid parent
+// material is dropped and never enters the column; what survives descends to the parent's floor,
+// carved by the parent's material on the way. That tightness is what stops the old blocky
+// over-support columns.
+std::vector<Polygons> distribute_demand(const Polygons &footprint_child, const Transform3d &M,
+                                        const PrintObject *parent, const PrintObject *child)
+{
+    std::vector<Polygons> out(parent->layer_count());
+    if (footprint_child.empty() || parent->layer_count() == 0)
+        return out;
+
+    // The footprint polygons are flat 2D, so transforming them directly would treat them as lying at
+    // child-frame z = 0. That is right only when the child RESTS on its base plane. A floating
+    // segment's material starts a gap ABOVE the plane, and the load is handed over at the plane, so
+    // the polygons have to be projected down onto it first -- otherwise the relative transform's
+    // third column times the omitted height shifts the whole footprint sideways in the parent.
+    // Folding the projection into the matrix keeps the 2D transform below exact.
+    const double base_plane_z = child->is_root_segment() ? 0. : - child->segment()->base_plane_distance_below_material;
+    Transform3d  M_projected  = M;
+    M_projected.translate(Vec3d(0., 0., base_plane_z));
+
+    // Polygon::transform applies the matrix to RAW SCALED coordinates, so the translation has to
+    // be pre-divided by SCALING_FACTOR while the linear part is left alone. The z of the result is
+    // dropped; we keep the XY shadow.
+    Transform3d M_scaled = M_projected;
+    M_scaled.translation() = M_projected.translation() * (1. / SCALING_FACTOR);
+    Polygons footprint_xy;
+    footprint_xy.reserve(footprint_child.size());
+    for (const Polygon &p : footprint_child)
+        footprint_xy.emplace_back(p.transform(M_scaled));
+    footprint_xy = union_(footprint_xy);
+    if (footprint_xy.empty())
+        return out;
+
+    double a = 0., b = 0., d = 0.;
+    if (! base_plane_in_parent_frame(child, parent, a, b, d)) {
+        // No usable plane: fall back to the image of the child's own origin as a nominal height.
+        seed_single_layer(parent, footprint_xy, M.translation().z(), out);
+        return out;
+    }
+    const double gnorm = std::hypot(a, b);
+    if (gnorm < 1e-6) {                       // shared plane horizontal in the parent's frame
+        seed_single_layer(parent, footprint_xy, d, out);
+        return out;
+    }
+
+    // Rotate so the plane gradient aligns with +X: then z = gnorm * x_mm + d, and each parent
+    // layer's z band is an axis-aligned x strip.
+    const double ang = std::atan2(b, a);
+    Polygons     rot = footprint_xy;
+    for (Polygon &p : rot)
+        p.rotate(- ang);
+    const BoundingBox bb      = get_extents(rot);
+    const int         nlayers = int(parent->layer_count());
+
+    Polygons column;   // accumulated overhang, parent frame, unrotated
+    for (int i = nlayers - 1; i >= 0; -- i) {
+        const Layer   *layer = parent->get_layer(i);
+        const Polygons lmat  = to_polygons(layer->lslices);
+        const coord_t  x_lo  = scale_((layer->print_z - d) / gnorm);
+        const coord_t  x_hi  = (i + 1 < nlayers) ? scale_((parent->get_layer(i + 1)->print_z - d) / gnorm)
+                                                 : bb.max.x();
+        const coord_t  xa    = std::max(x_lo, bb.min.x());
+        const coord_t  xb    = std::min(x_hi, bb.max.x());
+        if (xb > xa) {
+            Polygon strip;
+            strip.points = { Point(xa, bb.min.y()), Point(xb, bb.min.y()),
+                             Point(xb, bb.max.y()), Point(xa, bb.max.y()) };
+            Polygons band = intersection(rot, Polygons{ strip });
+            for (Polygon &p : band)
+                p.rotate(ang);
+            Polygons overhang = diff(band, lmat);   // drop whatever rests on parent material
+            if (! overhang.empty())
+                append(column, overhang);
+        }
+        if (column.empty())
+            continue;
+        // Carve the column against this layer's material and KEEP the carved result: parent
+        // material that has caught part of the load has caught it for good. Recomputing a
+        // throwaway difference each layer (as the original did) let demand vanish at a shelf and
+        // reappear underneath it, asking for support below material that is already carrying it.
+        column = diff(union_(column), lmat);
+        if (! column.empty())
+            out[i] = column;
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<std::vector<PrintObject*>> Print::segment_families() const
+{
+    std::vector<std::vector<PrintObject*>> families;
+    for (PrintObject *object : const_cast<Print*>(this)->m_objects) {
+        if (! object->is_segment())
+            continue;
+        // One family per (ModelObject, effective instance transform): a tilt or mirror can change
+        // which side rests on the bed, so differently oriented instances derive different
+        // descriptors and must not be cascaded together.
+        auto family = std::find_if(families.begin(), families.end(), [object](const std::vector<PrintObject*> &f) {
+            return f.front()->model_object() == object->model_object() && same_trafo(f.front()->trafo(), object->trafo());
+        });
+        if (family == families.end()) {
+            families.push_back({ object });
+        } else {
+            family->push_back(object);
+        }
+    }
+
+    for (auto family = families.begin(); family != families.end(); ) {
+        if (family->size() < 2) {
+            // A lone segment has nobody to hand demand to; leave it on the ordinary path.
+            family = families.erase(family);
+            continue;
+        }
+        // Descriptor indices are assigned root-first in peel order, and a chunk's floor borders
+        // only the root and earlier-peeling chunks, so a parent's index is always below its
+        // children's; descending index order is therefore a valid postorder, and every child is
+        // generated before the parent that depends on it.
+        std::sort(family->begin(), family->end(), [](const PrintObject *l, const PrintObject *r) {
+            return l->segment_index() > r->segment_index();
+        });
+        for (const PrintObject *object : *family)
+            assert(object->is_root_segment() || object->segment()->parent < object->segment_index());
+        ++ family;
+    }
+    return families;
+}
+
+PrintObject* Print::segment_parent_of(const PrintObject *object) const
+{
+    if (object == nullptr || ! object->is_segment() || object->is_root_segment())
+        return nullptr;
+    const int parent_index = object->segment()->parent;
+    for (PrintObject *candidate : const_cast<Print*>(this)->m_objects)
+        if (candidate != object && candidate->is_segment()
+            && candidate->model_object() == object->model_object()
+            && same_trafo(candidate->trafo(), object->trafo())
+            && candidate->segment_index() == parent_index)
+            return candidate;
+    return nullptr;
+}
+
+// UNLAYERED_MOD -- may this object receive automatically-derived support demand?
+//
+// Inherited cut-chunk load is AUTOMATIC support: the slicer works out that a chunk rests on a
+// cut face with nothing under it. The operator did not ask for it by painting. support_type's
+// manual modes mean "I decide where support goes", so honour that here and let only painted
+// enforcers through -- they take the enforcer path and are unaffected by this.
+//
+// Gated at the two producers, not at the consumers: demand is read in six places across the
+// normal, tree and organic generators, and creating none at all is the only way to be sure they
+// all agree. enable_support is deliberately NOT consulted -- has_support() already gates
+// generation, and enforce_support_layers can legitimately turn it on with support off.
+//
+// The trade-off is real and is the operator's to make: a chunk floating over its base plane now
+// prints unsupported unless they paint it. That is what the setting asks for, and the slice is
+// not silent about it -- the suppression is logged per segment.
+static bool segment_demand_allowed(const PrintObject *object)
+{
+    return object != nullptr && is_auto(object->config().support_type.value);
+}
+
+void Print::run_segment_support_cascade(const std::vector<PrintObject*> &family)
+{
+    BOOST_LOG_TRIVIAL(info) << "Cut planes: support cascade over a family of " << family.size() << " segments (deepest first)";
+
+    // Demand is transient and rebuilt from scratch every run, so a stale contribution from a
+    // previous slice can never survive into this one.
+    for (PrintObject *segment : family)
+        segment->clear_segment_support_demand();
+
+    for (PrintObject *child : family) {
+        // A segment that FLOATS above its base plane (a plane through empty space between
+        // disconnected shells produces no cut face) has its whole first layer suspended. The stock
+        // generators assume layer 0 rests on the ground, so nothing would support it: seed the
+        // demand explicitly, before this segment generates.
+        if (! child->is_root_segment() && ! child->segment()->touches_base_plane() && child->layer_count() > 0
+            && ! segment_demand_allowed(child)) {
+            BOOST_LOG_TRIVIAL(info) << "Cut planes: segment " << child->segment_index()
+                                    << " floats above its base plane, but support_type is manual;"
+                                    << " not seeding it -- paint an enforcer to support it.";
+        }
+        else if (! child->is_root_segment() && ! child->segment()->touches_base_plane() && child->layer_count() > 0) {
+            std::vector<Polygons> seed(1);
+            seed[0] = to_polygons(child->get_layer(0)->lslices);
+            BOOST_LOG_TRIVIAL(info) << "Cut planes: segment " << child->segment_index()
+                                    << " floats " << child->segment()->base_plane_distance_below_material
+                                    << "mm above its base plane; seeding its first layer as unsupported";
+            child->add_segment_support_demand(seed);
+        }
+
+        child->generate_support_material();
+
+        PrintObject *parent = this->segment_parent_of(child);
+        if (parent == nullptr)
+            continue;               // the root: its floor is the build plate
+        const Polygons footprint = segment_support_footprint(child);
+        if (footprint.empty()) {
+            BOOST_LOG_TRIVIAL(info) << "Cut planes: segment " << child->segment_index() << " has no footprint to hand up";
+            continue;
+        }
+        // The authoritative composition. NOT parent->post_trafo() * child->post_trafo().inverse():
+        // the shared XY centering does not cancel across a relative rotation (see Print.hpp).
+        if (! segment_demand_allowed(parent)) {
+            BOOST_LOG_TRIVIAL(info) << "Cut planes: segment " << child->segment_index()
+                                    << " has load to hand to segment " << parent->segment_index()
+                                    << ", but its support_type is manual; not cascading it.";
+            continue;
+        }
+        const Transform3d     M      = parent->object_to_slice() * child->slice_to_object();
+        std::vector<Polygons> demand = distribute_demand(footprint, M, parent, child);
+        parent->add_segment_support_demand(demand);
+    }
+}
+
+void Print::run_segment_support_preview(PrintObject *member)
+{
+    // The support-painting preview asks ONE PrintObject to slice and generate support. For a
+    // segment that is not enough: its support depends on demand handed up by its children, so
+    // previewing it alone shows support with every inherited load missing -- and, worse, marks its
+    // support step done, so a later full slice can skip regenerating it and keep the wrong result.
+    for (const std::vector<PrintObject*> &family : this->segment_families()) {
+        if (std::find(family.begin(), family.end(), member) == family.end())
+            continue;
+        for (PrintObject *segment : family)
+            segment->slice();
+        this->run_segment_support_cascade(family);
+        return;
+    }
+    // A segment with no family (nothing to hand demand to): the ordinary path is correct.
+    member->slice();
+    member->generate_support_material();
 }
 
 // Slicing process, running at a background thread.
@@ -2361,6 +2809,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     int object_count = m_objects.size();
     std::set<PrintObject*> need_slicing_objects;
     std::set<PrintObject*> re_slicing_objects;
+
+    //UNLAYERED_MOD
+    //we just reslice everything since movements
+    for (int index = 0; index < object_count; index++) {
+        need_slicing_objects.insert(m_objects[index]);
+        re_slicing_objects.insert(m_objects[index]);
+    }
+    /*
     if (!use_cache) {
         for (int index = 0; index < object_count; index++)
         {
@@ -2407,9 +2863,11 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             }
         }
     }
+    */
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": total object counts %1% in current print, need to slice %2%")%m_objects.size()%need_slicing_objects.size();
     BOOST_LOG_TRIVIAL(info) << "Starting the slicing process." << log_memory_info();
+    
     if (!use_cache) {
         // Fire the SlicingPipeline hook for `obj` iff it just (re)computed `pstep` this pass.
         auto hook_after = [this](PrintObject* obj, bool was_done, PrintObjectStep pstep, SlicingPipelineStepPlugin sstep) {
@@ -2419,6 +2877,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
         // SlicingPipeline: dedicated slice loop so the Slice boundary is hookable before perimeters.
         for (PrintObject *obj : m_objects) {
+
             if (need_slicing_objects.count(obj) != 0) {
                 const bool was_done = obj->is_step_done(posSlice);
                 obj->slice();
@@ -2504,6 +2963,15 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             }
         }
 
+        // Declarative cut planes: segments of one family are supported child-first by the serial
+        // cascade below, because a parent's support depends on demand handed up by its children.
+        // They are skipped here; every other object keeps the parallel path unchanged, and with no
+        // cut planes in the scene `families` is empty and this is exactly the old behaviour.
+        const std::vector<std::vector<PrintObject*>> families = this->segment_families();
+        std::set<const PrintObject*> cascade_objects;
+        for (const std::vector<PrintObject*> &family : families)
+            for (const PrintObject *object : family)
+                cascade_objects.insert(object);
         // SlicingPipeline: support runs in the parallel block below; the hook must fire in a
         // sequential loop afterward. Snapshot per-object done-state just before the parallel_for.
         std::vector<char> sup_was_done(m_objects.size(), 1);
@@ -2512,9 +2980,11 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 sup_was_done[i] = m_objects[i]->is_step_done(posSupportMaterial) ? 1 : 0;
 
         tbb::parallel_for(tbb::blocked_range<int>(0, int(m_objects.size())),
-            [this, need_slicing_objects](const tbb::blocked_range<int>& range) {
+            [this, need_slicing_objects, &cascade_objects](const tbb::blocked_range<int>& range) {
                 for (int i = range.begin(); i < range.end(); i++) {
                     PrintObject* obj = m_objects[i];
+                    if (cascade_objects.count(obj) != 0)
+                        continue;           // handled by the cascade below
                     if (need_slicing_objects.count(obj) != 0) {
                         obj->generate_support_material();
                     }
@@ -2531,6 +3001,8 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 if (need_slicing_objects.count(m_objects[i]) != 0 && !sup_was_done[i]
                     && m_objects[i]->is_step_done(posSupportMaterial))
                     run_pipeline_hook(SlicingPipelineStepPlugin::posSupportMaterial, m_objects[i]);
+        for (const std::vector<PrintObject*> &family : families)
+            this->run_segment_support_cascade(family);
 
         for (PrintObject* obj : m_objects) {
             if (need_slicing_objects.count(obj) != 0) {
@@ -2545,6 +3017,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         }
     }
     else {
+        // Same deferral as the parallel branch above: a family's support has to run child-first,
+        // serially, after the per-object work below. Empty when the scene has no cut planes.
+        const std::vector<std::vector<PrintObject*>> cached_families = this->segment_families();
+        std::set<const PrintObject*> cached_cascade_objects;
+        for (const std::vector<PrintObject*> &family : cached_families)
+            for (const PrintObject *object : family)
+                cached_cascade_objects.insert(object);
+
         for (PrintObject *obj : m_objects) {
             if (re_slicing_objects.count(obj) == 0) {
                 if (obj->set_started(posSlice))
@@ -2568,11 +3048,24 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 obj->make_perimeters();
                 obj->infill();
                 obj->ironing();
-                obj->generate_support_material();
+                // Cut-plane family members are deferred to the cascade below; their support (and
+                // the lift/curled analysis that reads it) cannot be generated until every child
+                // has contributed.
+                if (cached_cascade_objects.count(obj) == 0) {
+                    obj->generate_support_material();
+                    obj->detect_overhangs_for_lift();
+                    obj->estimate_curled_extrusions();
+                }
+            }
+        }
+
+        for (const std::vector<PrintObject*> &family : cached_families)
+            this->run_segment_support_cascade(family);
+        for (PrintObject *obj : m_objects)
+            if (cached_cascade_objects.count(obj) != 0 && re_slicing_objects.count(obj) != 0) {
                 obj->detect_overhangs_for_lift();
                 obj->estimate_curled_extrusions();
             }
-        }
     }
 
     for (PrintObject *obj : m_objects)
@@ -2641,6 +3134,15 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         std::vector<const PrintInstance*> 					print_object_instances_ordering;
         std::vector<const PrintInstance*>::const_iterator 	print_object_instance_sequential_active;
         std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> layers_to_print = GCode::collect_layers_to_print(*this);
+
+        ////make a loop that iterates through layers to print and rotates them all by 10 degrees
+        //for (auto& layer_pair : layers_to_print) {
+        //    for (auto& layer_to_print : layer_pair.second) {
+        //        //layer_to_print.object
+        //        int iiii = 0;
+        //    }
+        //}
+
         std::vector<unsigned int> printExtruders;
         // Per-object first-layer mixed-slot resolutions for the by-object remap below
         // (BBS reads them from m_sequential_print_data->object_tool_ordering_map).
@@ -2870,6 +3372,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             *time_cost_with_cache = *time_cost_with_cache + end_time - start_time;
         }
     }
+    // one option is to inject the rotation after this point since simplifying paths is similar to rotating them
     //BBS
     for (PrintObject *obj : m_objects) {
         if (((!use_cache)&&(need_slicing_objects.count(obj) != 0))
@@ -2892,6 +3395,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         }
     }
 
+    //gcode hasnt happened l
     // BBS
     bool has_adaptive_layer_height = false;
     for (PrintObject* obj : m_objects) {
@@ -2948,15 +3452,110 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
     const Vec3d origin = this->get_plate_origin();
     gcode.set_gcode_offset(origin(0), origin(1));
     gcode.do_export(this, path.c_str(), result, thumbnail_cb);
-    gcode.export_layer_filaments(result);
-    //BBS
     if (result != nullptr) {
+        gcode.export_layer_filaments(result);
+        // UNLAYERED_MOD: hotend-cone collision check on the finished toolpaths. Only a print with more
+        // than one tool axis can have material above a later nozzle position, so planar prints skip
+        // it (the check returns immediately). Reported through the same ConflictResult plumbing as
+        // the G-code path conflicts: sidebar warning in the GUI, exit -101 in the CLI.
+        if (! m_conflict_result && ! m_no_check && m_config.enable_nonplanar.value && result->tool_axes.size() > 1) {
+            HotendCollisionParams hp;
+            hp.cone_height    = m_config.nonplanar_hotend_cone_height.value;
+            hp.cone_angle_deg = m_config.nonplanar_hotend_cone_angle.value;
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            m_conflict_result = check_hotend_collisions(*result, hp);
+            BOOST_LOG_TRIVIAL(info) << "hotend collision check took "
+                                    << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - t0).count() << " ms"
+                                    << (m_conflict_result ? ", COLLISION" : ", clear");
+        }
+        // UNLAYERED_MOD -- virtual 5-axis total-height limit. Runs LAST: on a large tilted plane the
+        // head climbs as it works outwards (chunk transitions lift clear of everything printed so
+        // far, GCode.cpp) until it can strike the gantry.
+        //
+        // The WRITTEN FILE is scanned rather than result->moves so that every Z word counts,
+        // including the apex of each transition hop, which is normally the highest point in the
+        // whole print. Post-processing scripts have also already run by this point, so this sees
+        // exactly what the printer gets.
+        bool height_limit_exceeded = false;
+        if (m_config.enable_nonplanar.value && m_config.virtual_5axis.value &&
+            m_config.nonplanar_virtual_max_z.value > 0.) {
+            const double limit   = m_config.nonplanar_virtual_max_z.value;
+            double       worst_z = 0., worst_x = 0., worst_y = 0.;
+            double       cur_x   = 0., cur_y   = 0.;
+            {
+                boost::nowide::ifstream in(path);
+                std::string             line;
+                while (std::getline(in, line)) {
+                    if (line.size() < 2 || (line[0] != 'G' && line[0] != 'g'))
+                        continue;
+                    // G0/G1 only: arcs carry I/J/R and never change Z on this path.
+                    if (line[1] != '0' && line[1] != '1')
+                        continue;
+                    if (line.size() > 2 && line[2] != ' ' && line[2] != '	')
+                        continue;
+                    double z = 0.;
+                    bool   have_z = false;
+                    for (size_t i = 2; i < line.size(); ++i) {
+                        const char c = line[i];
+                        if (c == ';')
+                            break;
+                        if (c != 'X' && c != 'Y' && c != 'Z')
+                            continue;
+                        char       *endp = nullptr;
+                        const double v   = std::strtod(line.c_str() + i + 1, &endp);
+                        if (endp == line.c_str() + i + 1)
+                            continue;
+                        if      (c == 'X') cur_x = v;
+                        else if (c == 'Y') cur_y = v;
+                        else { z = v; have_z = true; }
+                        i = size_t(endp - line.c_str()) - 1;
+                    }
+                    if (have_z && z > worst_z) {
+                        worst_z = z;
+                        worst_x = cur_x;
+                        worst_y = cur_y;
+                    }
+                }
+            }
+            height_limit_exceeded = worst_z > limit + EPSILON;
+            if (height_limit_exceeded) {
+                ConflictResult cr(_u8L("toolpath"), _u8L("the gantry"), worst_z, nullptr, nullptr);
+                cr.message = (boost::format(_u8L("Virtual 5-axis: the toolpath reaches Z%1% mm in the G-code, "
+                                                 "above the %2% mm total height this printer allows (worst near "
+                                                 "X%3% Y%4%). Lower the part, reduce the cut plane angle, or "
+                                                 "raise \"Max total height\" in the printer settings."))
+                              % (boost::format("%.1f") % worst_z).str()
+                              % (boost::format("%.1f") % limit).str()
+                              % (boost::format("%.1f") % worst_x).str()
+                              % (boost::format("%.1f") % worst_y).str()).str();
+                // Only ONE ConflictResult survives into result->conflict_result and the GUI renders
+                // exactly one message, so fold anything already found into this one rather than
+                // dropping it: a print can both collide and exceed the height.
+                if (m_conflict_result) {
+                    if (! m_conflict_result->message.empty())
+                        cr.message += " " + m_conflict_result->message;
+                    cr._obj1 = m_conflict_result->_obj1;
+                    cr._obj2 = m_conflict_result->_obj2;
+                }
+                m_conflict_result = cr;
+                BOOST_LOG_TRIVIAL(error) << "virtual 5-axis height limit: " << cr.message;
+            }
+        }
+
+        //BBS
         result->conflict_result = m_conflict_result;
         // Surface the slicer's per-filament nozzle grouping onto the post-slice result
         // the device GUI reads. This is the static L/R + rack subset the multi-nozzle path computes;
         // null for single-nozzle prints where nothing computes it. It is assigned after g-code
         // generation and read by no emitter, so it does not affect the emitted g-code.
         result->nozzle_group_result = this->get_layered_nozzle_group_result();
+
+        // A ConflictResult alone is only a SERIOUS WARNING in the GUI: the slice completes and the
+        // G-code stays exportable and sendable (only the CLI blocks on it). This limit exists to
+        // refuse, so raise a real slicing error -- after the assignment above, so the preview still
+        // carries the marker. BackgroundSlicingProcess reports it and never finalizes the export.
+        if (height_limit_exceeded && m_conflict_result)
+            throw Slic3r::SlicingError(m_conflict_result->message);
     }
     return path.c_str();
 }
@@ -2978,9 +3577,15 @@ void Print::_make_skirt()
     coordf_t skirt_height_z = 0.;
     if (generate_skirt) {
         for (const PrintObject *object : m_objects) {
+            // Declarative cut planes: non-root segments start at their cut height, not at the bed —
+            // including them would inflate skirt_height_z to the cut and oversize the skirt hull.
+            if (! object->is_root_segment())
+                continue;
             size_t skirt_layers = this->has_infinite_skirt() ?
                 object->layer_count() :
                 std::min(size_t(m_config.skirt_height.value), object->layer_count());
+            if (skirt_layers == 0)
+                continue;
             skirt_height_z = std::max(skirt_height_z, object->m_layers[skirt_layers-1]->print_z);
         }
     }
@@ -2994,6 +3599,12 @@ void Print::_make_skirt()
     // geometry up to skirt height. Instances translate this hull later.
     std::vector<ObjectSkirtHull> object_convex_hulls;
     for (PrintObject *object : m_objects) {
+        // Declarative cut planes: only the root segment contributes to (and receives) the skirt;
+        // upper segments neither touch the bed nor print in the first skirt_height layers.
+        if (! object->is_root_segment())
+            continue;
+        if (object->m_layers.empty())
+            continue;
         Points object_points;
         // Get object layers up to skirt_height_z.
         for (const Layer *layer : object->m_layers) {
@@ -3315,6 +3926,11 @@ Polygons Print::first_layer_islands() const
 {
     Polygons islands;
     for (PrintObject *object : m_objects) {
+        // Declarative cut planes: upper segments do not touch the bed — no first-layer islands.
+        if (! object->is_root_segment())
+            continue;
+        if (object->m_layers.empty())
+            continue;
         Polygons object_islands;
         for (ExPolygon &expoly : object->m_layers.front()->lslices)
             object_islands.push_back(expoly.contour);

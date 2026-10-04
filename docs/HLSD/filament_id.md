@@ -22,7 +22,7 @@ OrcaFilamentLibrary, OrcaArena, Qidi, and Snapmaker bundles all arrive at indepe
 
 **How it is used:** at runtime the id is the join key between hardware and profiles.
 When a printer reports what a tray holds (Bambu AMS, Qidi box, Creality CFS,
-Klipper, Snapmaker), OrcaSlicer matches the reported id against the filament presets
+Klipper, Snapmaker), Unlayered Slicer matches the reported id against the filament presets
 compatible with that printer to select the right profile; other features — tray display
 names, support-material detection, vitrification warnings, multi-nozzle filament grouping —
 look up material properties by id alone. An id that changes is not forwarded anywhere: a
@@ -366,7 +366,7 @@ file degrades to identity with a log line rather than failing.
 | --- | --- |
 | Everything the agent sends | `BBLPrinterAgent::send_message` and `send_message_to_printer`, plus `PrintParams::ams_mapping_info` in `dispatch_start` — the funnel all five `start_*` calls share |
 | Everything the agent receives | `set_on_message_fn` and `set_on_local_message_fn` wrap their callback, so `MachineObject::parse_json` and everything downstream see our ids only |
-| 3mf export | `Plater::export_3mf` writes Bambu's ids into `slice_info.config`, gated on `preset_bundle.is_bbl_vendor()` — the printer reads that file and knows only its own catalog, and no other vendor's export is affected. The CLI has its own writer in `OrcaSlicer.cpp`; it does the same, gated on the `printer_model` prefix that already decides `Print::is_BBL_printer()` for that run |
+| 3mf export | `Plater::export_3mf` writes Bambu's ids into `slice_info.config`, gated on `preset_bundle.is_bbl_vendor()` — the printer reads that file and knows only its own catalog, and no other vendor's export is affected. The CLI has its own writer in `UnlayeredSlicer.cpp`; it does the same, gated on the `printer_model` prefix that already decides `Print::is_BBL_printer()` for that run |
 | Project ingest | `Plater::priv::load_files` reverse-maps the project's `filament_ids` before the bundle ingests them, so a project saved by an older Orca or by BambuStudio still resolves the same presets |
 | Prints from the printer's SD card | `SelectMachineDialog::update_print_required_data` reverse-maps each plate's slice-info ids as it adopts the plates, so the AMS mapping dialog pairs them with trays |
 | Bambu-specific comparisons | `CalibUtils.cpp`, `DeviceManager.cpp`, `DeviceCore/DevFilaSystem.cpp`, `DeviceCore/DevFilaBlackList.cpp`, `SelectMachine.cpp`, `AMSDryControl.cpp`, `AMSMaterialsSetting.cpp`, `PresetComboBoxes.cpp`, `ColorDecomposeSupport.cpp` |
@@ -379,7 +379,7 @@ those sites read is Bambu's and stays verbatim — `white_fila_ids` in
 `resources/profiles/BBL/filament/filaments_color_codes.json`.
 
 `tests/slic3rutils/test_bambu_filament_ids.cpp` covers the lookups, the payload rewrite and the
-Bambu-specific rules. `orcaslicer_discover_tests` registers a Catch2 tag as a CTest **label**,
+Bambu-specific rules. `unlayered_discover_tests` registers a Catch2 tag as a CTest **label**,
 not as part of the test name, so `-R` matches nothing here and the filter is `-L`:
 
 ```bash
@@ -410,9 +410,9 @@ pulling the map down into libslic3r for.
   being saved — `Preset::save` writes a `filament_id` key only for a preset whose `inherits` is
   empty, and on the next load an inheriting preset takes its parent's id. A known gap, and not
   a regression: nothing forwarded a stale id before either.
-- **A build configured without the GUI.** `target_link_libraries(OrcaSlicer libslic3r_gui)` sits
+- **A build configured without the GUI.** `target_link_libraries(UnlayeredSlicer libslic3r_gui)` sits
   inside `if (SLIC3R_GUI)` in `src/CMakeLists.txt`, so the lookups are not linkable when the GUI
-  is off. The CLI's 3mf writer in `src/OrcaSlicer.cpp` therefore guards its translation with
+  is off. The CLI's 3mf writer in `src/UnlayeredSlicer.cpp` therefore guards its translation with
   `#ifdef SLIC3R_GUI`, and a 3mf that such a build slices for a Bambu printer carries our `OF`
   ids in `slice_info.config` rather than Bambu's. Every shipped build enables the GUI, so this
   reaches only a purpose-built GUI-less binary.

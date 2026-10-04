@@ -92,6 +92,11 @@ public:
     void RunScript(std::string script);
     void on_dpi_changed(const wxRect& suggested_rect) override;
     void update_version_info(wxString release_note, wxString version);
+    // true  -> the update manifest advertised an installer for this platform, so the confirm button
+    //          downloads and runs it.
+    // false -> the confirm button opens the download page in a browser instead.
+    // Safe to call in either order relative to update_version_info().
+    void set_install_mode(bool in_app);
     std::vector<std::string> splitWithStl(std::string str, std::string pattern);
 
     wxStaticBitmap*   m_brand{nullptr};
@@ -108,6 +113,10 @@ public:
     Button*           m_button_cancel;
     std::string       url_line;
     std::string       html_source;
+
+private:
+    bool     m_in_app_install{false};
+    wxString m_version;   // remembered so set_install_mode() can rebuild the info line
 };
 
 class SecondaryCheckDialog : public DPIFrame

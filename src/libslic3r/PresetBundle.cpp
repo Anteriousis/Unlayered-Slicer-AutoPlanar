@@ -914,7 +914,7 @@ bool PresetBundle::use_bbl_device_tab() {
 
 bool PresetBundle::backup_user_folder() const
 {
-    const std::string backup_folderpath = data_dir() + "/" + (boost::format("user_backup-v%1%") % SoftFever_VERSION).str();
+    const std::string backup_folderpath = data_dir() + "/" + (boost::format("user_backup-v%1%") % UNLAYERED_VERSION).str();
 
     // Check if backup file already exists
     if (boost::filesystem::exists(boost::filesystem::path(backup_folderpath)))
@@ -1566,10 +1566,112 @@ bool PresetBundle::apply_vendor_config(
 }
 
 // Import presets from UI control
+namespace {
+// Unlayered: one preset JSON (already read into memory) -> its (type subdir, inherits) need.
+void append_import_parent(const std::string &text, std::vector<std::pair<std::string, std::string>> &out)
+{
+    try {
+        json j = json::parse(text);
+        if (!j.is_object())
+            return;
+        const std::string inherits = j.value(BBL_JSON_KEY_INHERITS, std::string());
+        if (inherits.empty())
+            return;
+        std::string subdir;
+        if (j.contains("printer_settings_id"))
+            subdir = PRESET_PRINTER_NAME;
+        else if (j.contains("print_settings_id"))
+            subdir = PRESET_PRINT_NAME;
+        else if (j.contains("filament_settings_id"))
+            subdir = PRESET_FILAMENT_NAME;
+        else
+            return;
+        out.emplace_back(subdir, inherits);
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " not a preset JSON: " << e.what();
+    }
+}
+} // namespace
+
+std::vector<std::pair<std::string, std::string>> PresetBundle::collect_import_parents(const std::vector<std::string> &files)
+{
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const std::string &file : files) {
+        if (Slic3r::is_json_file(file)) {
+            boost::nowide::ifstream ifs(file);
+            std::stringstream       ss;
+            ss << ifs.rdbuf();
+            append_import_parent(ss.str(), out);
+        } else if (boost::iends_with(file, ".orca_printer") || boost::iends_with(file, ".orca_bundle") ||
+                   boost::iends_with(file, ".orca_filament") || boost::iends_with(file, ".zip")) {
+            FILE *zip_file = boost::nowide::fopen(file.c_str(), "rb");
+            if (zip_file == nullptr)
+                continue;
+            mz_zip_archive zip_archive;
+            mz_zip_zero_struct(&zip_archive);
+            if (!mz_zip_reader_init_cfile(&zip_archive, zip_file, 0, MZ_ZIP_FLAG_CASE_SENSITIVE)) {
+                fclose(zip_file);
+                continue;
+            }
+            const int num_files = int(mz_zip_reader_get_num_files(&zip_archive));
+            for (int i = 0; i < num_files; ++i) {
+                mz_zip_archive_file_stat st;
+                if (!mz_zip_reader_file_stat(&zip_archive, i, &st) || st.m_is_directory || !boost::iends_with(st.m_filename, ".json"))
+                    continue;
+                size_t size = 0;
+                void  *data = mz_zip_reader_extract_to_heap(&zip_archive, i, &size, 0);
+                if (data == nullptr)
+                    continue;
+                append_import_parent(std::string(static_cast<const char *>(data), size), out);
+                mz_free(data);
+            }
+            mz_zip_reader_end(&zip_archive);
+            fclose(zip_file);
+        }
+    }
+    return out;
+}
+
+std::string PresetBundle::find_resource_vendor_for_preset(const std::string &type_subdir, const std::string &preset_name,
+                                                          std::string *printer_model, std::string *printer_variant)
+{
+    boost::system::error_code ec;
+    const fs::path            profiles = fs::path(Slic3r::resources_dir()) / PRESET_PROFILES_DIR;
+    if (!fs::is_directory(profiles, ec))
+        return {};
+    for (fs::directory_iterator it(profiles, ec), end; it != end && !ec; it.increment(ec)) {
+        if (!fs::is_directory(it->path(), ec))
+            continue;
+        const fs::path candidate = it->path() / type_subdir / (preset_name + ".json");
+        if (!fs::is_regular_file(candidate, ec))
+            continue;
+        if (printer_model != nullptr || printer_variant != nullptr) {
+            try {
+                boost::nowide::ifstream ifs(candidate.string());
+                json                    j;
+                ifs >> j;
+                if (printer_model != nullptr)
+                    *printer_model = j.value("printer_model", std::string());
+                if (printer_variant != nullptr) {
+                    *printer_variant = j.value("printer_variant", std::string());
+                    // Older machine JSONs carry only the nozzle; the variant is that diameter.
+                    if (printer_variant->empty() && j.contains("nozzle_diameter") && j["nozzle_diameter"].is_array() && !j["nozzle_diameter"].empty())
+                        *printer_variant = j["nozzle_diameter"][0].get<std::string>();
+                }
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " cannot read " << candidate.string() << ": " << e.what();
+            }
+        }
+        return it->path().filename().string();
+    }
+    return {};
+}
+
 PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string> &              files,
                                                         std::function<int(std::string const &)> override_confirm,
                                                         ForwardCompatibilitySubstitutionRule    rule,
-                                                        AppConfig&                            config)
+                                                        AppConfig&                            config,
+                                                        ImportReport*                         report)
 {
     bundles.PauseRead(); // Pause threads from reading
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " entry";
@@ -1582,7 +1684,7 @@ PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string>
     this->update_user_presets_directory(user_id);
     for (auto &file : files) {
         if (Slic3r::is_json_file(file)) {
-            import_json_presets(substitutions, file, override_confirm, rule, overwrite, result);
+            import_json_presets(substitutions, file, override_confirm, rule, overwrite, result, std::string(), report);
         }
         // Determine if it is a preset bundle
         if (boost::iends_with(file, ".orca_printer") || boost::iends_with(file, ".orca_bundle") || boost::iends_with(file, ".orca_filament") || boost::iends_with(file, ".zip")) {
@@ -1681,7 +1783,7 @@ PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string>
                         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Failed to open target file: " << target_file_path;
                     } else {
                         bool is_success = import_json_presets(substitutions, target_file_path, override_confirm, rule, overwrite, result,
-                                                              has_bundle_structure ? bundle_base_dir.string() : std::string());
+                                                              has_bundle_structure ? bundle_base_dir.string() : std::string(), report);
                         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " import target file: " << target_file_path << " import result" << is_success;
                     }
                 }
@@ -1728,7 +1830,8 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
                                        ForwardCompatibilitySubstitutionRule    rule,
                                        int &                                   overwrite,
                                        std::vector<std::string> &              result,
-                                       const std::string &                     bundle_dir)
+                                       const std::string &                     bundle_dir,
+                                       ImportReport *                          report)
 {
     try {
         DynamicPrintConfig config;
@@ -1801,6 +1904,8 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             if (inherits_config2 && !inherits_config2->value.empty()) {
                 // we should skip this preset here
                 BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", can not find inherit preset for user preset %1%, just skip") % name;
+                if (report != nullptr)
+                    report->missing_parents.emplace_back(name, inherits_config2->value);
                 return false;
             }
             // Find a default preset for the config. The PrintPresetCollection provides different default preset based on the "printer_technology" field.
@@ -1842,6 +1947,8 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             preset.save(inherit_preset ? &inherit_preset->config : nullptr);
         }
 
+        if (report != nullptr)
+            report->imported.push_back(name); // the JSON name, not the bundle-prefixed canonical one
         result.push_back(file);
     } catch (const std::ifstream::failure &err) {
         ++m_errors;
@@ -2648,41 +2755,92 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_fil
         compatibility_rule = ForwardCompatibilitySubstitutionRule::Disable;
 
     // Here the vendor specific read only Config Bundles are stored.
+    //
+    // This walks EVERY vendor shipped in resources/profiles, not just the installed ones -- about
+    // 7000 filament json files and ~10 MB. That breadth is deliberate: callers use this to find an
+    // existing filament_id to reuse, so a filament from a vendor the user has not installed still
+    // has to be found. It used to run serially, one vendor at a time, which made it by far the
+    // most expensive load path in the application. It now mirrors load_system_presets_from_json:
+    // OrcaFilamentLibrary first, the rest in parallel, then a sequential merge in vendor order so
+    // duplicate reporting stays deterministic.
     boost::filesystem::path    dir = (boost::filesystem::path(resources_dir()) / "profiles").make_preferred();
     PresetsConfigSubstitutions substitutions;
     std::string                errors_cummulative;
     bool                       first = true;
+
+    std::string              orca_lib_vendor;
+    std::vector<std::string> other_vendors;
     for (auto &dir_entry : boost::filesystem::directory_iterator(dir)) {
-        std::string vendor_file = dir_entry.path().string();
-        if (Slic3r::is_json_file(vendor_file)) {
-            std::string vendor_name = dir_entry.path().filename().string();
-            // Remove the .json suffix.
-            vendor_name.erase(vendor_name.size() - 5);
-            try {
-                if (first) {
-                    // Reset this PresetBundle and load the first vendor config.
-                    append(substitutions, this->load_vendor_configs_from_json(dir.string(), vendor_name, PresetBundle::LoadSystem | PresetBundle::LoadFilamentOnly, compatibility_rule).first);
-                    first = false;
-                } else {
-                    // Load the other vendor configs, merge them with this PresetBundle.
-                    // Report duplicate profiles.
-                    PresetBundle other;
-                    append(substitutions, other.load_vendor_configs_from_json(dir.string(), vendor_name, PresetBundle::LoadSystem | PresetBundle::LoadFilamentOnly, compatibility_rule).first);
-                    std::vector<std::string> duplicates = this->merge_presets(std::move(other));
-                    if (!duplicates.empty()) {
-                        errors_cummulative += "Found duplicated settings in vendor " + vendor_name + "'s json file lists: ";
-                        for (size_t i = 0; i < duplicates.size(); ++i) {
-                            if (i > 0) errors_cummulative += ", ";
-                            errors_cummulative += duplicates[i];
-                        }
-                    }
+        if (!Slic3r::is_json_file(dir_entry.path().string()))
+            continue;
+        std::string vendor_name = dir_entry.path().filename().string();
+        vendor_name.erase(vendor_name.size() - 5); // drop ".json"
+        if (vendor_name == ORCA_FILAMENT_LIBRARY)
+            orca_lib_vendor = vendor_name;
+        else
+            other_vendors.push_back(vendor_name);
+    }
+
+    // Step 1: OrcaFilamentLibrary into `this`, synchronously. Other vendors' filaments inherit
+    // from it, and passing `this` as base_bundle below is what lets those resolve -- the previous
+    // serial loop never passed a base_bundle at all, so they silently did not.
+    if (!orca_lib_vendor.empty()) {
+        try {
+            append(substitutions, this->load_vendor_configs_from_json(dir.string(), orca_lib_vendor,
+                PresetBundle::LoadSystem | PresetBundle::LoadFilamentOnly, compatibility_rule).first);
+            first = false;
+        } catch (const std::runtime_error &err) {
+            errors_cummulative += err.what();
+            errors_cummulative += "\n";
+        }
+    }
+
+    // Step 2: the rest in parallel, each into its own bundle.
+    std::vector<std::unique_ptr<PresetBundle>> parallel_bundles(other_vendors.size());
+    std::vector<PresetsConfigSubstitutions>    parallel_substitutions(other_vendors.size());
+    std::vector<std::string>                   parallel_errors(other_vendors.size());
+
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, other_vendors.size()),
+        [&](const tbb::blocked_range<size_t>& range) {
+            for (size_t i = range.begin(); i < range.end(); ++i) {
+                auto bundle = std::make_unique<PresetBundle>();
+                try {
+                    auto result = bundle->load_vendor_configs_from_json(
+                        dir.string(), other_vendors[i],
+                        PresetBundle::LoadSystem | PresetBundle::LoadFilamentOnly,
+                        compatibility_rule, this);
+                    parallel_substitutions[i] = std::move(result.first);
+                    parallel_bundles[i]       = std::move(bundle);
+                } catch (const std::runtime_error &err) {
+                    parallel_errors[i] = err.what();
                 }
-            } catch (const std::runtime_error &err) {
-                errors_cummulative += err.what();
-                errors_cummulative += "\n";
+            }
+        });
+
+    // Step 3: sequential merge, in the original vendor order.
+    for (size_t i = 0; i < other_vendors.size(); ++i) {
+        if (!parallel_errors[i].empty()) {
+            errors_cummulative += parallel_errors[i];
+            errors_cummulative += "\n";
+            continue;
+        }
+        if (!parallel_bundles[i])
+            continue;
+
+        append(substitutions, std::move(parallel_substitutions[i]));
+        std::vector<std::string> duplicates = this->merge_presets(std::move(*parallel_bundles[i]));
+        first = false;
+        if (!duplicates.empty()) {
+            errors_cummulative += "Found duplicated settings in vendor " + other_vendors[i] + "'s json file lists: ";
+            for (size_t j = 0; j < duplicates.size(); ++j) {
+                if (j > 0) errors_cummulative += ", ";
+                errors_cummulative += duplicates[j];
             }
         }
     }
+
+    if (first)
+        this->reset(false);
 
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" finished, errors_cummulative %1%") % errors_cummulative;
     return std::make_pair(std::move(substitutions), errors_cummulative);
@@ -3025,7 +3183,7 @@ void PresetBundle::update_selections(AppConfig &config)
     if (!f_colors.empty()) {
         boost::algorithm::split(filament_colors, f_colors, boost::algorithm::is_any_of(","));
     }
-    filament_colors.resize(filament_presets.size(), "#26A69A");
+    filament_colors.resize(filament_presets.size(), "#3707f5");
     project_config.option<ConfigOptionStrings>("filament_colour")->values = filament_colors;
 
     std::vector<std::string> multi_filament_colors;
@@ -3188,7 +3346,7 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
     if (!f_colors.empty()) {
         boost::algorithm::split(filament_colors, f_colors, boost::algorithm::is_any_of(","));
     }
-    filament_colors.resize(filament_presets.size(), "#26A69A");
+    filament_colors.resize(filament_presets.size(), "#3707f5");
     project_config.option<ConfigOptionStrings>("filament_colour")->values = filament_colors;
 
     std::vector<std::string> multi_filament_colors;

@@ -54,6 +54,21 @@ wxString Duet::get_test_failed_msg (wxString &msg) const
                     % std::string(msg.ToUTF8())).str());
 }
 
+// Unlayered -- see the note in Duet.hpp. Only the naming differs from the base class.
+const char* Unlayered::get_name() const { return "Unlayered"; }
+
+wxString Unlayered::get_test_ok_msg () const
+{
+	return _(L("Connection to Unlayered is working correctly."));
+}
+
+wxString Unlayered::get_test_failed_msg (wxString &msg) const
+{
+    return GUI::from_u8((boost::format("%s: %s")
+                    % _utf8(L("Could not connect to Unlayered"))
+                    % std::string(msg.ToUTF8())).str());
+}
+
 bool Duet::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn error_fn, InfoFn info_fn) const
 {
 	wxString connect_msg;

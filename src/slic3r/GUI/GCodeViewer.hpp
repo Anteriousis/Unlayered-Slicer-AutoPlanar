@@ -62,6 +62,16 @@ public:
         class Marker
         {
             GLModel m_model;
+            // UNLAYERED_MOD: translucent cone standing on the nozzle tip, sized from the same two
+            // config options HotendCollisionCheck reads, so what is drawn is the envelope actually
+            // being tested. It leaves out the check's 0.5 mm lateral margin, sub-millimetre against
+            // a 40 mm cone. Built lazily in render(): set_envelope() is called from load(), where
+            // there is no guarantee of a current GL context.
+            GLModel m_envelope;
+            float m_envelope_height{ 0.0f };
+            // full opening angle in degrees, as the config states it (90 = a 45 deg half-angle)
+            float m_envelope_angle{ 0.0f };
+            bool m_envelope_enabled{ false };
             Vec3f m_world_position;
             // for seams, the position of the marker is on the last endpoint of the toolpath containing it
             // the offset is used to show the correct value of tool position in the "ToolPosition" window
@@ -70,6 +80,10 @@ public:
             float m_z_offset{ 0.0f };
             // z offset of the model
             float m_model_z_offset{ 0.5f };
+            // UNLAYERED_MOD: unit direction the nozzle points away from the surface along. +Z for an
+            // ordinary planar print; the chunk's tool axis on a multiplanar / 5-axis one, which tilts
+            // the hotend model about its tip so it stays on the toolpath.
+            Vec3f m_tool_axis{ 0.0f, 0.0f, 1.0f };
             bool m_visible{ true };
             bool m_is_dark = false;
             float m_scale_factor{ 1.0f };
@@ -87,6 +101,11 @@ public:
             void set_world_position(const Vec3f& position) { m_world_position = position; }
             void set_world_offset(const Vec3f& offset) { m_world_offset = offset; }
             void set_z_offset(float z_offset) { m_z_offset = z_offset; }
+            // UNLAYERED_MOD
+            void set_tool_axis(const Vec3f& axis) { m_tool_axis = (axis.squaredNorm() > 0.0f) ? axis.normalized() : Vec3f::UnitZ(); }
+            const Vec3f& get_tool_axis() const { return m_tool_axis; }
+            // UNLAYERED_MOD
+            void set_envelope(bool enabled, float cone_height, float cone_angle_deg);
 
 #if ENABLE_ACTUAL_SPEED_DEBUG
             void set_actual_speed_y_range(const std::pair<float, float>& y_range) {
@@ -174,6 +193,10 @@ public:
     };
     //BBS
     ConflictResultOpt m_conflict_result;
+    // UNLAYERED_MOD — the loaded G-code was sliced for virtual 5-axis (plain 3-axis) output. The
+    // layers tilt but the machine has no rotary axes, so the physical nozzle stays vertical and the
+    // sequential-view hotend marker must not be tilted by the per-move tool axis.
+    bool              m_virtual_5axis{ false };
     GCodeCheckResult  m_gcode_check_result;
     FilamentPrintableResult filament_printable_reuslt;
     Shells            m_shells;
@@ -294,6 +317,34 @@ public:
     }
     std::vector<float> get_layers_times() const { return m_viewer.get_layers_estimated_times(); }
 
+    // UNLAYERED_MOD: per-layer "printed with the tool straight up". Empty for an ordinary planar
+    // print, so consumers can skip the tilted-layer handling entirely.
+    std::vector<bool> get_layers_planar() const {
+        if (m_viewer.all_layers_planar())
+            return {};
+        const size_t count = m_viewer.get_layers_count();
+        std::vector<bool> ret(count);
+        for (size_t i = 0; i < count; ++i)
+            ret[i] = m_viewer.is_layer_planar(i);
+        return ret;
+    }
+    // Z extent of the given inclusive layer range. A tilted layer occupies a slab, so clipping the
+    // shells to a single Z band per layer would cut them apart.
+    std::array<double, 2> get_layers_z_extent(size_t first, size_t last) const {
+        const size_t count = m_viewer.get_layers_count();
+        if (count == 0)
+            return { 0.0, 0.0 };
+        first = std::min(first, count - 1);
+        last  = std::min(last, count - 1);
+        double z_min = m_viewer.get_layer_z_min(first);
+        double z_max = m_viewer.get_layer_z_max(first);
+        for (size_t i = first + 1; i <= last; ++i) {
+            z_min = std::min(z_min, double(m_viewer.get_layer_z_min(i)));
+            z_max = std::max(z_max, double(m_viewer.get_layer_z_max(i)));
+        }
+        return { z_min, z_max };
+    }
+
     const std::array<size_t,2> &get_layers_z_range() const { return m_viewer.get_layers_view_range(); }
 
     const SequentialView& get_sequential_view() const { return m_sequential_view; }
@@ -316,6 +367,11 @@ public:
     bool is_only_gcode_in_preview() const { return m_only_gcode_in_preview; }
 
     void set_view_type(libvgcode::EViewType type) {
+        // Declarative cut planes: per-section visibility is only reachable from the Section legend,
+        // so it must not survive a switch to another view -- otherwise toolpaths would silently
+        // stay hidden in Speed/Feature with no control to bring them back.
+        if (type != libvgcode::EViewType::CutSegment)
+            m_viewer.show_all_cut_segments();
         m_viewer.set_view_type(type);
     }
     void reset_visible(libvgcode::EViewType type) {

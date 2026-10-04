@@ -338,7 +338,7 @@ public:
     ModelObject*            model_object()          { return m_model_object; }
 
 protected:
-    PrintObjectBase(ModelObject *model_object) : m_model_object(model_object) {}
+    PrintObjectBase(ModelObject* model_object) : m_model_object(model_object) {}
     virtual ~PrintObjectBase() {}
     // Declared here to allow access from PrintBase through friendship.
 	static std::mutex&                  state_mutex(PrintBase *print);

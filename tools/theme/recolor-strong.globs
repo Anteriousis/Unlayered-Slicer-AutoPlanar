@@ -1,0 +1,22 @@
+# Icons where the accent is a SELECTED / ON state rather than decoration.
+# These get the strong tier, because the off state they must be distinguished from
+# is drawn in #949494 / #DBDBDB line art and a mid-grey would collapse into it.
+# One glob per line; '#' starts a comment.
+
+check_on.svg
+check_on_focused.svg
+check_half.svg
+check_half_focused.svg
+radio_on.svg
+radio_on_hover.svg
+toggle_on.svg
+capsule_tag_on.svg
+switch_send_mode_on.svg
+switch_send_mode_tag_on.svg
+video_state_on.svg
+plate_locked*.svg
+
+# one_layer_{on,off}[_hover][_dark] -- the layer slider. Loaded by IMTexture, which
+# has NO recolor hook, so the baked value is final; both on and off carry accent and
+# are told apart structurally (one highlighted band vs. a full outline).
+one_layer_*.svg

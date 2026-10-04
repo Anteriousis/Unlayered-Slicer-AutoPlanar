@@ -6,6 +6,8 @@
 #include "GLCanvas3D.hpp" // ORCA: for live preview refresh when toggling "Dim lower layers"
 #include "MsgDialog.hpp"
 #include "I18N.hpp"
+#include "WebAppPanel.hpp"
+#include "WebAppBridge.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Format/DRC.hpp"
 #include <wx/language.h>
@@ -369,7 +371,7 @@ wxBoxSizer *PreferencesDialog::create_item_language_combobox(wxString title, wxS
         wxLANGUAGE_THAI
     };
 
-    auto translations = wxTranslations::Get()->GetAvailableTranslations(SLIC3R_APP_KEY);
+    auto translations = wxTranslations::Get()->GetAvailableTranslations(SLIC3R_APP_CATALOG);
     std::vector<const wxLanguageInfo *> language_infos;
     language_infos.emplace_back(wxLocale::GetLanguageInfo(wxLANGUAGE_ENGLISH));
     for (size_t i = 0; i < translations.GetCount(); ++i) {
@@ -650,7 +652,7 @@ wxBoxSizer *PreferencesDialog::create_item_loglevel_combobox(wxString title, wxS
     return m_sizer;
 }
 
-wxBoxSizer *PreferencesDialog::create_item_input(wxString title, wxString title2, wxString tooltip, std::string param, std::function<void(wxString)> onchange, const wxString wiki_url)
+wxBoxSizer *PreferencesDialog::create_item_input(wxString title, wxString title2, wxString tooltip, std::string param, std::function<void(wxString)> onchange, const wxString wiki_url, long validator_style)
 {
     auto tip = tooltip.IsEmpty() ? title : tooltip; // auto fill tooltips with title if its empty
 
@@ -660,9 +662,11 @@ wxBoxSizer *PreferencesDialog::create_item_input(wxString title, wxString title2
     StateColor input_bg(std::pair<wxColour, int>(wxColour("#F0F0F1"), StateColor::Disabled), std::pair<wxColour, int>(*wxWHITE, StateColor::Enabled));
     input->SetBackgroundColor(input_bg);
     input->GetTextCtrl()->SetValue(app_config->get(param));
-    wxTextValidator validator(wxFILTER_DIGITS);
     input->SetToolTip(tip);
-    input->GetTextCtrl()->SetValidator(validator);
+    if (validator_style != wxFILTER_NONE) {
+        wxTextValidator validator(validator_style);
+        input->GetTextCtrl()->SetValidator(validator);
+    }
 
     auto second_title = new wxStaticText(m_parent, wxID_ANY, title2, wxDefaultPosition, wxDefaultSize, 0);
     second_title->SetForegroundColour(DESIGN_GRAY900_COLOR);
@@ -673,22 +677,80 @@ wxBoxSizer *PreferencesDialog::create_item_input(wxString title, wxString title2
     m_sizer->Add(input       , 0, wxALIGN_CENTER_VERTICAL);
     m_sizer->Add(second_title, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(2));
 
+    // onchange defaults to {}, so it must be tested before being called -- an empty std::function
+    // throws std::bad_function_call. Every pre-existing caller happens to pass a real lambda,
+    // which is the only reason this never fired.
     input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [this, param, input, onchange](wxCommandEvent &e) {
         auto value = input->GetTextCtrl()->GetValue();
         app_config->set(param, std::string(value.mb_str()));
         app_config->save();
-        onchange(value);
+        if (onchange)
+            onchange(value);
         e.Skip();
     });
 
     input->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [this, param, input, onchange](wxFocusEvent &e) {
         auto value = input->GetTextCtrl()->GetValue();
         app_config->set(param, std::string(value.mb_str()));
-        onchange(value);
+        if (onchange)
+            onchange(value);
         e.Skip();
     });
 
     return m_sizer;
+}
+
+// A URL field. create_item_input cannot serve here even with wxFILTER_NONE, because a URL needs
+// validating rather than filtering: we accept https:// anywhere, and http:// only for loopback,
+// matching WebAppPanel::is_secure_context. Modelled on create_camera_orbit_mult_input, which is
+// the existing precedent for "same widget, different validation". on_commit refreshes the tab
+// that owns `param`; empty means the generic web application tab.
+wxBoxSizer *PreferencesDialog::create_item_url_input(wxString title, wxString tooltip, std::string param, std::function<void()> on_commit)
+{
+    wxBoxSizer *sizer_input = new wxBoxSizer(wxHORIZONTAL);
+    auto        input_title = new wxStaticText(m_parent, wxID_ANY, title, wxDefaultPosition, DESIGN_TITLE_SIZE, wxST_NO_AUTORESIZE);
+    input_title->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    input_title->SetFont(::Label::Body_14);
+    input_title->SetToolTip(tooltip);
+    input_title->Wrap(DESIGN_TITLE_SIZE.x);
+
+    auto input = new ::TextInput(m_parent, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition,
+                                 wxSize(FromDIP(260), DESIGN_INPUT_SIZE.y), wxTE_PROCESS_ENTER);
+    StateColor input_bg(std::pair<wxColour, int>(wxColour("#F0F0F1"), StateColor::Disabled),
+                        std::pair<wxColour, int>(*wxWHITE, StateColor::Enabled));
+    input->SetBackgroundColor(input_bg);
+    input->GetTextCtrl()->SetValue(app_config->get(param));
+    input->SetToolTip(tooltip);
+
+    sizer_input->AddSpacer(FromDIP(DESIGN_LEFT_MARGIN));
+    sizer_input->Add(input_title, 0, wxALIGN_CENTER_VERTICAL);
+    sizer_input->Add(input, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
+
+    auto commit = [this, param, input, on_commit]() {
+        wxString value = input->GetTextCtrl()->GetValue();
+        value.Trim(true).Trim(false);
+
+        if (!value.empty() && !WebAppPanel::is_secure_context(value)) {
+            // Put the stored value back rather than persisting something that would only produce
+            // the "not secure" fallback page.
+            input->GetTextCtrl()->SetValue(app_config->get(param));
+            input->SetToolTip(_L("Only https:// addresses are accepted, apart from loopback addresses such as "
+                                 "http://127.0.0.1 and http://localhost."));
+            return;
+        }
+
+        app_config->set(param, std::string(value.ToUTF8().data()));
+        app_config->save();
+        if (on_commit)
+            on_commit();
+        else if (wxGetApp().mainframe != nullptr)
+            wxGetApp().mainframe->refresh_web_app();
+    };
+
+    input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit](wxCommandEvent &e) { commit(); e.Skip(); });
+    input->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [commit](wxFocusEvent &e) { commit(); e.Skip(); });
+
+    return sizer_input;
 }
 
 wxBoxSizer *PreferencesDialog::create_item_spinctrl(wxString title, wxString title2, wxString side_label, wxString tooltip, std::string param, int min, int max, std::function<void(int)> onchange, const wxString wiki_url)
@@ -1050,10 +1112,22 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
             if (enabled) wxGetApp().on_stealth_mode_enter();
             if (m_sync_user_preset_checkbox) m_sync_user_preset_checkbox->Enable(!enabled);
             if (m_bambu_cloud_checkbox)      m_bambu_cloud_checkbox->Enable(!enabled);
+            // Stealth mode now also gates the home page's account panel, so push the change
+            // through immediately -- otherwise the panel would not follow until a restart.
+            if (wxGetApp().mainframe && wxGetApp().mainframe->m_webview)
+                wxGetApp().mainframe->m_webview->SendCloudProvidersInfo();
         }
         else if (param == "hide_login_side_panel") {
             if (wxGetApp().mainframe && wxGetApp().mainframe->m_webview) {
                 wxGetApp().mainframe->m_webview->SendCloudProvidersInfo();
+            }
+        }
+        else if (param == "show_cut_chunk_colors") {
+            if (Plater* plater = wxGetApp().plater()) {
+                if (GLCanvas3D* canvas = plater->get_view3D_canvas3D()) {
+                    canvas->set_as_dirty();
+                    canvas->request_extra_frame();
+                }
             }
         }
         // ORCA: apply the preview dimming change immediately to the currently loaded preview
@@ -1106,12 +1180,8 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
             }
         }
 
-        if (param == "installed_networking") {
-            bool pbool = app_config->get_bool("installed_networking");
-            if (pbool) {
-                GUI::wxGetApp().CallAfter([] { GUI::wxGetApp().ShowDownNetPluginDlg(); });
-            }
-        }
+        // Unlayered: the "installed_networking" branch that used to be here opened the Bambu
+        // network plug-in download dialog. Its checkbox is gone, so nothing can set the key.
 
 #endif // __WXMSW__
 
@@ -1141,6 +1211,25 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
             // immediately, instead of only on the next printer-preset change or restart.
             if (wxGetApp().plater())
                 wxGetApp().plater()->sidebar().update_all_preset_comboboxes();
+        }
+
+        // Unlayered: the settings gate is consulted on every bridge call, so nothing needs
+        // re-wiring -- the page only has to be told that its capability list changed. Each key
+        // belongs to one slot; the other tab is unaffected.
+        if (param == SETTING_WEB_APP_ALLOW_SETTINGS || param == SETTING_AGENT_APP_ALLOW_SETTINGS ||
+            param == SETTING_UNIVERSE_APP_ALLOW_SETTINGS) {
+            MainFrame*   mainframe = wxGetApp().mainframe;
+            WebAppPanel* panel     = nullptr;
+            if (mainframe != nullptr) {
+                if (param == SETTING_AGENT_APP_ALLOW_SETTINGS)
+                    panel = mainframe->m_agent_view;
+                else if (param == SETTING_UNIVERSE_APP_ALLOW_SETTINGS)
+                    panel = mainframe->m_universe_view;
+                else
+                    panel = mainframe->m_web_app_view;
+            }
+            if (panel != nullptr && panel->bridge() != nullptr)
+                panel->bridge()->notify_capabilities();
         }
 
         if (param == "enable_high_low_temp_mixed_printing") {
@@ -1396,7 +1485,7 @@ wxBoxSizer *PreferencesDialog::create_item_network_plugin_version(wxString title
 wxBoxSizer* PreferencesDialog::create_item_link_association( wxString url_prefix, wxString website_name)
 {
     wxString title = _L("Associate") + (boost::format(" %1%://") % url_prefix.c_str()).str();
-    wxString tooltip = _L("Associate") + " " + url_prefix + ":// " + _L("with OrcaSlicer so that Orca can open models from") + " " + website_name;
+    wxString tooltip = _L("Associate") + " " + url_prefix + ":// " + _L("with Unlayered Slicer so that it can open models from") + " " + website_name;
 
     std::wstring registered_bin; // not used, just here to provide a ref to check fn
     bool reg_to_current_instance = wxGetApp().check_url_association(url_prefix.ToStdWstring(), registered_bin);
@@ -1633,12 +1722,12 @@ void PreferencesDialog::create_items()
     g_sizer->Add(item_darkmode);
 #endif
 
-    auto item_single_instance  = create_item_checkbox(_L("Allow only one OrcaSlicer instance"),
+    auto item_single_instance  = create_item_checkbox(_L("Allow only one Unlayered Slicer instance"),
     #if __APPLE__
             _L("On OSX there is always only one instance of app running by default. However it is allowed to run multiple instances "
                 "of same app from the command line. In such case this settings will allow only one instance."),
     #else
-            _L("If this is enabled, when starting OrcaSlicer and another instance of the same OrcaSlicer is already running, that instance will be reactivated instead."),
+            _L("If this is enabled, when starting Unlayered Slicer and another instance of the same Unlayered Slicer is already running, that instance will be reactivated instead."),
     #endif
             "single_instance");
     g_sizer->Add(item_single_instance);
@@ -1715,7 +1804,7 @@ void PreferencesDialog::create_items()
     //// GENERAL > Preset
     g_sizer->Add(create_item_title(_L("Preset")), 1, wxEXPAND);
 
-    auto item_remember_printer = create_item_checkbox(_L("Remember printer configuration"), _L("If enabled, Orca will remember and switch filament/process configuration for each printer automatically."), "remember_printer_config");
+    auto item_remember_printer = create_item_checkbox(_L("Remember printer configuration"), _L("If enabled, Unlayered Slicer will remember and switch filament/process configuration for each printer automatically."), "remember_printer_config");
     g_sizer->Add(item_remember_printer);
 
     auto item_filament_preset_grouping = create_item_combobox(_L("Group user filament presets"), _L("Group user filament presets based on selection"),
@@ -1739,6 +1828,35 @@ void PreferencesDialog::create_items()
 
     auto item_multi_machine    = create_item_checkbox(_L("Multi device management"), _L("With this option enabled, you can send a task to multiple devices at the same time and manage multiple devices."), "enable_multi_machine", _L("(Requires restart)"));
     g_sizer->Add(item_multi_machine);
+
+    //// GENERAL > Web application
+    // Unlayered: the embedded web-application tabs (Agent, Universe, and the generic Web
+    // application slot behind them) deliberately have no Preferences UI. Agent and Universe are
+    // shipped features with one sensible address each, so a switch would only offer the user a
+    // way to break them; the generic slot is a developer harness a customer should not find.
+    //
+    // What a tab is, where it points and what it may do through the bridge are fields on its
+    // WebAppSlot (src/slic3r/GUI/WebAppPanel.cpp), applied to the configuration once. On a
+    // development machine the URL overrides ORCA_WEB_APP_URL, ORCA_AGENT_APP_URL and
+    // ORCA_UNIVERSE_APP_URL point a tab elsewhere; each enables its tab whatever the
+    // configuration says (WebAppPanel::is_enabled) and is never written back, so it cannot leak
+    // into a customer profile. The widgets are in git history; WEB_APP_BRIDGE.md section 7 lists
+    // every key.
+
+    //// GENERAL > Printer updates
+    // The configuration feed is per-customer and gated, so it needs to know who is asking. The
+    // token is pasted in once from the customer's account page; it is an identifier rather than a
+    // grant, and entitlement is re-checked at the server on every request. Firmware updates are
+    // public and need nothing here.
+    g_sizer->Add(create_item_title(_L("Printer updates")), 1, wxEXPAND);
+
+    auto item_printer_updates_token = create_item_input(
+        _L("Access token"), "",
+        _L("Paste the slicer access token from your account page on the Unlayered website. It lets "
+           "this computer download configuration updates for your printer. Leave it empty if you "
+           "have not been given one -- firmware updates do not need it."),
+        SETTING_PRINTER_UPDATES_TOKEN, {}, wxEmptyString, wxFILTER_NONE);
+    g_sizer->Add(item_printer_updates_token);
 
 #if 0
     g_sizer->Add(create_item_title(_L("Filament Grouping")), 1, wxEXPAND);
@@ -1790,7 +1908,7 @@ void PreferencesDialog::create_items()
 
     auto item_auto_reslice = create_item_auto_reslice(
         _L("Auto slice after changes"),
-        _L("If enabled, OrcaSlicer will re-slice automatically whenever slicing-related settings change."),
+        _L("If enabled, Unlayered Slicer will re-slice automatically whenever slicing-related settings change."),
         _L("Delay in seconds before auto slicing starts, allowing multiple edits to be grouped. Use 0 to slice immediately."));
     g_sizer->Add(item_auto_reslice);
 
@@ -1863,6 +1981,15 @@ void PreferencesDialog::create_items()
         SETTING_OPENGL_PHONG_SMOOTH_NORMALS
     );
     g_sizer->Add(smooth_normals);
+
+    auto item_cut_chunk_colors = create_item_checkbox(
+        _L("Color cut chunks"),
+        _L("Draw each chunk of an object that has cut planes in its own color in the Prepare view, "
+           "without opening the cut planes tool. Filament colors are not shown for those objects "
+           "while this is on."),
+        "show_cut_chunk_colors"
+    );
+    g_sizer->Add(item_cut_chunk_colors);
 
     //// GRAPHICS > Realistic view
     g_sizer->Add(create_item_title(_L("Realistic View")), 1, wxEXPAND);
@@ -1981,14 +2108,26 @@ void PreferencesDialog::create_items()
     //// ONLINE > Connection
     g_sizer->Add(create_item_title(_L("Connection")), 1, wxEXPAND);
 
-    auto item_region           = create_item_region_combobox(_L("Login region"), "");
-    g_sizer->Add(item_region);
- 
-    auto item_stealth_mode     = create_item_checkbox(_L("Stealth mode"), _L("This disables all cloud features, including Orca Cloud profile syncing. Users who prefer to work entirely offline can enable this option.\nNote: When Stealth Mode is enabled, your user profiles will not be backed up to Orca Cloud."), "stealth_mode");
+    // Unlayered: the cloud-account settings are HIDDEN, not greyed out, while stealth mode is
+    // on -- an account panel you cannot use is still an account panel, and greying it out only
+    // advertises a service this build does not talk to. The Stealth mode checkbox itself stays
+    // put, so this is always recoverable: switch it off and reopen Preferences (the widgets
+    // below are not created while it is on, so they do not appear until the dialog is rebuilt).
+    const bool show_cloud_ui = !app_config->get_stealth_mode();
+
+    if (show_cloud_ui) {
+        auto item_region = create_item_region_combobox(_L("Login region"), "");
+        g_sizer->Add(item_region);
+    }
+
+    auto item_stealth_mode     = create_item_checkbox(_L("Stealth mode"), _L("Disables all outbound cloud features. Enabled by default.\nThe check for new versions of Unlayered Slicer still runs, and connections to printers on your own network are unaffected."), "stealth_mode");
     g_sizer->Add(item_stealth_mode);
 
-    auto item_hide_login_side_panel = create_item_checkbox(_L("Hide login side panel"), _L("Hide the login side panel on the home page."), "hide_login_side_panel");
-    g_sizer->Add(item_hide_login_side_panel);
+    if (show_cloud_ui) {
+        // Only meaningful when there is a panel to hide; stealth mode already hides it.
+        auto item_hide_login_side_panel = create_item_checkbox(_L("Hide login side panel"), _L("Hide the login side panel on the home page."), "hide_login_side_panel");
+        g_sizer->Add(item_hide_login_side_panel);
+    }
 
     auto item_network_test     = create_item_button(_L("Network test"), _L("Test") + " " + dots, "", _L("Open Network Test"), []() {
         NetworkTestDialog dlg(wxGetApp().mainframe);
@@ -1997,10 +2136,12 @@ void PreferencesDialog::create_items()
     g_sizer->Add(item_network_test);
 
     //// ONLINE > Cloud Providers
-    g_sizer->Add(create_item_title(_L("Cloud Providers")), 1, wxEXPAND);
+    if (show_cloud_ui) {
+        g_sizer->Add(create_item_title(_L("Cloud Providers")), 1, wxEXPAND);
 
-    auto item_bambu_cloud     = create_item_bambu_cloud(_L("Enable Bambu Cloud"), _L("Allow logging into Bambu Cloud alongside Orca Cloud. When enabled, a Bambu login section appears on the homepage."));
-    g_sizer->Add(item_bambu_cloud);
+        auto item_bambu_cloud = create_item_bambu_cloud(_L("Enable Bambu Cloud"), _L("Allow logging into Bambu Cloud alongside Orca Cloud. When enabled, a Bambu login section appears on the homepage."));
+        g_sizer->Add(item_bambu_cloud);
+    }
 
     //// ONLINE > Update & sync
     g_sizer->Add(create_item_title(_L("Update & sync")), 1, wxEXPAND);
@@ -2016,6 +2157,17 @@ void PreferencesDialog::create_items()
         if (m_sync_user_preset_checkbox) m_sync_user_preset_checkbox->Enable(false);
     }
 
+    // Unlayered: the "Update built-in Presets automatically." checkbox is gone. Built-in profiles
+    // ship with the application and are installed on startup; there is nothing to switch off.
+
+    auto item_token_storage    = create_item_checkbox(_L("Use encrypted file for token storage"),
+                                                      _L("Store authentication tokens in an encrypted file instead of the system keychain. (Requires restart)"),
+                                                      SETTING_USE_ENCRYPTED_TOKEN_FILE);
+    g_sizer->Add(item_token_storage);
+
+    //// ONLINE > Filament Sync Options
+    g_sizer->Add(create_item_title(_L("Filament Sync Options")), 1, wxEXPAND);
+
     auto item_filament_sync_mode = create_item_combobox(
         _L("Filament sync mode"),
         _L("Choose whether sync updates both filament preset and color, or only color."),
@@ -2023,22 +2175,10 @@ void PreferencesDialog::create_items()
         {_L("Filament & Color"), _L("Color only")});
     g_sizer->Add(item_filament_sync_mode);
 
-    auto item_system_sync      = create_item_checkbox(_L("Update built-in presets automatically."), "", "sync_system_preset");
-    g_sizer->Add(item_system_sync);
-
-    auto item_token_storage    = create_item_checkbox(_L("Use encrypted file for token storage"),
-                                                      _L("Store authentication tokens in an encrypted file instead of the system keychain. (Requires restart)"),
-                                                      SETTING_USE_ENCRYPTED_TOKEN_FILE);
-    g_sizer->Add(item_token_storage);
-
-    //// ONLINE > Network plugin
-    g_sizer->Add(create_item_title(_L("Bambu network plug-in")), 1, wxEXPAND);
-
-    auto item_enable_plugin    = create_item_checkbox(_L("Enable Bambu network plug-in"), "", "installed_networking");
-    g_sizer->Add(item_enable_plugin);
-
-    auto item_plugin_version = create_item_network_plugin_version(_L("Network plug-in version"), _L("Select the network plug-in version to use"));
-    g_sizer->Add(item_plugin_version);
+    // Unlayered: the "Network plug-in" section used to live here - an "Enable network plug-in"
+    // checkbox plus a version picker that downloaded the Bambu plug-in from api.bambulab.com. Both
+    // are gone, so there is no way to turn the plug-in on. installed_networking stays false and
+    // on_init_network() therefore never loads the module.
 
     g_sizer->AddSpacer(FromDIP(10));
     sizer_page->Add(g_sizer, 0, wxEXPAND);
@@ -2056,7 +2196,7 @@ void PreferencesDialog::create_items()
         g_sizer = f_sizers.back();
         g_sizer->AddGrowableCol(0, 1);
 
-        g_sizer->Add(create_item_title(_L("Associate files to OrcaSlicer")), 1, wxEXPAND);
+        g_sizer->Add(create_item_title(_L("Associate files to Unlayered Slicer")), 1, wxEXPAND);
 
         auto item_open_default_apps = create_item_button(
             _L("File associations for the Microsoft Store version are managed by Windows Settings."),
@@ -2073,22 +2213,22 @@ void PreferencesDialog::create_items()
     g_sizer->AddGrowableCol(0, 1);
 
     //// ASSOCIATE > Extensions
-    g_sizer->Add(create_item_title(_L("Associate files to OrcaSlicer")), 1, wxEXPAND);
+    g_sizer->Add(create_item_title(_L("Associate files to Unlayered Slicer")), 1, wxEXPAND);
 
-    auto item_associate_3mf    = create_item_checkbox(_L("Associate 3MF files to OrcaSlicer"), _L("If enabled, this sets OrcaSlicer as the default application to open 3MF files.") , "associate_3mf");
+    auto item_associate_3mf    = create_item_checkbox(_L("Associate 3MF files to Unlayered Slicer"), _L("If enabled, this sets Unlayered Slicer as the default application to open 3MF files.") , "associate_3mf");
     g_sizer->Add(item_associate_3mf);
 
-    auto item_associate_drc = create_item_checkbox(_L("Associate DRC files to OrcaSlicer"), _L("If enabled, sets OrcaSlicer as default application to open DRC files."), "associate_drc");
+    auto item_associate_drc = create_item_checkbox(_L("Associate DRC files to Unlayered Slicer"), _L("If enabled, sets Unlayered Slicer as default application to open DRC files."), "associate_drc");
     g_sizer->Add(item_associate_drc);
 
-    auto item_associate_stl    = create_item_checkbox(_L("Associate STL files to OrcaSlicer"), _L("If enabled, this sets OrcaSlicer as the default application to open STL files.") , "associate_stl");
+    auto item_associate_stl    = create_item_checkbox(_L("Associate STL files to Unlayered Slicer"), _L("If enabled, this sets Unlayered Slicer as the default application to open STL files.") , "associate_stl");
     g_sizer->Add(item_associate_stl);
 
-    auto item_associate_step   = create_item_checkbox(_L("Associate STEP files to OrcaSlicer"), _L("If enabled, this sets OrcaSlicer as the default application to open STEP files."), "associate_step");
+    auto item_associate_step   = create_item_checkbox(_L("Associate STEP files to Unlayered Slicer"), _L("If enabled, this sets Unlayered Slicer as the default application to open STEP files."), "associate_step");
     g_sizer->Add(item_associate_step);
 
     //// ASSOCIATE > WebLinks
-    g_sizer->Add(create_item_title(_L("Associate web links to OrcaSlicer")), 1, wxEXPAND);
+    g_sizer->Add(create_item_title(_L("Associate web links to Unlayered Slicer")), 1, wxEXPAND);
 
     auto associate_url_prusa   = create_item_link_association(L"prusaslicer", "Printables.com");
     g_sizer->Add(associate_url_prusa);
@@ -2126,7 +2266,7 @@ void PreferencesDialog::create_items()
 
     auto item_plugin_printer_agents = create_item_checkbox(
         _L("(Experimental) Use printer agents instead of print hosts"), _L(
-            "Route print jobs for non-Bambu printers through printer plug-in agents instead of the classic print-host upload flow.\nWhen disabled, OrcaSlicer uses the legacy print-host behavior."),
+            "Route print jobs for non-Bambu printers through printer plug-in agents instead of the classic print-host upload flow.\nWhen disabled, Unlayered Slicer uses the legacy print-host behavior."),
         "use_printer_agents");
     g_sizer->Add(item_plugin_printer_agents);
 
@@ -2147,6 +2287,9 @@ void PreferencesDialog::create_items()
     auto log_level_list  = std::vector<wxString>{_L("fatal"), _L("error"), _L("warning"), _L("info"), _L("debug"), _L("trace")};
     auto loglevel_combox = create_item_loglevel_combobox(_L("Log Level"), _L("Log Level"), log_level_list);
     g_sizer->Add(loglevel_combox);
+
+    // Unlayered: the developer-tab "Reload network plug-in" button is gone along with the rest of the
+    // plug-in path.
 
     //// DEVELOPER > Debug
 #if !BBL_RELEASE_TO_PUBLIC

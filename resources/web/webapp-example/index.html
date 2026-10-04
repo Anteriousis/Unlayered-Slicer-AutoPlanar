@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web App Bridge — reference client</title>
+<!--
+  SPDX-License-Identifier: MIT
+
+  Copyright (c) 2026 Unlayered 3D
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+  and associated documentation files (the "Software"), to deal in the Software without
+  restriction, including without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all copies or
+  substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+  BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+  DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+  ---------------------------------------------------------------------------------------------
+
+  A minimal, complete client for the Unlayered Slicer Web App Bridge. It exercises every method
+  and event in protocol v1 -- including the preset-settings family behind the per-tab opt-in --
+  and is deliberately dependency-free, unbuilt and readable top to bottom. It doubles as the
+  acceptance harness for the bridge: if a method works here, it works.
+
+  This file is MIT-licensed, unlike the rest of this repository (AGPL-3.0), so that it can be
+  copied wholesale into a web application under any licence. Copy it. That is what it is for.
+
+  The protocol is specified in WEB_APP_BRIDGE.md at the repository root.
+
+  To point the slicer at this page, set in Preferences > General > Web application:
+      Address:  file:///<resources dir>/web/webapp-example/index.html
+  ...or, more usefully, serve this directory over http://127.0.0.1:<port>/ and use that.
+  Note that a file:// address is not a trusted origin, so the bridge will report itself absent --
+  which is itself a useful thing to see this page do.
+-->
+<style>
+  :root {
+    --bg: #f4f4f4; --card: #fff; --fg: #1f1f1f; --muted: #6a6a6a; --line: #dcdcdc;
+    --btn-bg: #2b2b2b; --btn-fg: #fff; --code-bg: #ececec; --ok: #2e7d32; --err: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #262626; --card: #303030; --fg: #e8e8e8; --muted: #a0a0a0; --line: #454545;
+      --btn-bg: #e8e8e8; --btn-fg: #1f1f1f; --code-bg: #1f1f1f; --ok: #81c784; --err: #ef9a9a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif;
+    font-size: 14px; line-height: 1.55;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+       margin: 28px 0 10px; font-weight: 600; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 18px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  input[type=text] {
+    flex: 1 1 260px; font: inherit; padding: 7px 10px; border-radius: 5px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  }
+  button {
+    font: inherit; font-weight: 500; padding: 7px 16px; border-radius: 5px;
+    border: 1px solid var(--btn-bg); background: var(--btn-bg); color: var(--btn-fg); cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--fg); border-color: var(--line); }
+  button:disabled { opacity: .45; cursor: default; }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 5px;
+    padding: 12px; overflow: auto; max-height: 260px; margin: 0;
+    font-family: Consolas, "SF Mono", Menlo, monospace; font-size: 12.5px;
+  }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px;
+          border: 1px solid var(--line); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.err { color: var(--err); border-color: var(--err); }
+  .log { font-family: Consolas, "SF Mono", Menlo, monospace; font-size: 12.5px; }
+  .log div { padding: 2px 0; border-bottom: 1px solid var(--line); }
+  .log .e { color: var(--err); }
+  .log .o { color: var(--ok); }
+  .log .ev { color: var(--muted); }
+  .log .ev b { color: var(--fg); font-weight: 600; }
+  .mrow { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+  .mrow code { flex: 0 0 200px; padding-top: 8px; font-size: 12px; word-break: break-all; }
+  .mrow textarea {
+    flex: 1 1 280px; min-height: 34px; resize: vertical; padding: 6px 8px; border-radius: 5px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+    font-family: Consolas, "SF Mono", Menlo, monospace; font-size: 12.5px;
+  }
+  .mrow button { flex: 0 0 auto; }
+  footer { color: var(--muted); font-size: 12.5px; margin-top: 28px; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Web App Bridge — reference client</h1>
+  <p class="sub">
+    A complete, dependency-free client for protocol v1.
+    Status: <span id="status" class="pill">detecting…</span>
+  </p>
+
+  <h2>1 &nbsp;Handshake</h2>
+  <section>
+    <div class="row">
+      <button id="btnInfo">slicer.getInfo</button>
+      <button id="btnClear" class="ghost">Clear log</button>
+    </div>
+    <pre id="info">Not called yet.</pre>
+  </section>
+
+  <h2>2 &nbsp;Hand a file over by URL &mdash; the recommended path</h2>
+  <section>
+    <div class="row">
+      <input type="text" id="url" placeholder="https://your-app.example/download/abc123">
+      <input type="text" id="name" placeholder="part.3mf" style="flex:0 1 150px">
+    </div>
+    <div class="row">
+      <input type="text" id="sha" placeholder="sha256 (optional, but do send it)">
+      <button id="btnUrl">slicer.openProjectFromUrl</button>
+    </div>
+  </section>
+
+  <h2>3 &nbsp;Hand a local file over by path &mdash; loopback only</h2>
+  <section>
+    <div class="row">
+      <input type="text" id="path" placeholder="C:\path\to\part.3mf">
+      <button id="btnPath">slicer.openProject</button>
+    </div>
+    <p class="sub" style="margin:0">
+      Absent from <code>capabilities</code> unless the page is on a loopback origin, or the user has
+      enabled <em>Allow the web application to open local files</em>. The path must also sit under
+      <code>web_app_path_roots</code>.
+    </p>
+  </section>
+
+  <h2>4 &nbsp;Preset settings &mdash; behind the per-tab opt-in</h2>
+  <section>
+    <p class="sub" style="margin:0 0 12px">
+      One row per method; edit the JSON parameters and send. Rows are enabled from
+      <code>capabilities</code>, so they stay grey until the user ticks <em>Allow &hellip; to change
+      print settings</em> for this tab (Preferences &#9656; General) &mdash; watch
+      <code>slicer.capabilitiesChanged</code> arrive in the event log when they do. A
+      <code>1013</code> reply arms <em>Retry with ifDirty:"discard"</em>.
+    </p>
+    <div id="settingsRows"></div>
+    <div class="row">
+      <button id="btnRetryDiscard" disabled>Retry with ifDirty:"discard"</button>
+      <span id="settingsAccess" class="pill">settingsAccess: unknown</span>
+    </div>
+    <pre id="settingsResult">No settings call yet.</pre>
+  </section>
+
+  <h2>Events &mdash; every <code>slicer.*</code> event the page receives</h2>
+  <section><div class="log" id="events"></div></section>
+
+  <h2>Log</h2>
+  <section><div class="log" id="log"></div></section>
+
+  <footer>
+    Protocol: <strong>WEB_APP_BRIDGE.md</strong> &middot; This page is MIT-licensed and may be copied
+    into any application. <span id="source"></span>
+  </footer>
+</main>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------------------------
+// Detection. Feature-detect; never parse the user agent -- see WEB_APP_BRIDGE.md section 2.
+// ---------------------------------------------------------------------------------------------
+
+function bridge() { return window.__slicerBridge || null; }
+
+function log(message, kind) {
+  const el = document.getElementById("log");
+  const row = document.createElement("div");
+  row.className = kind || "";
+  row.textContent = new Date().toTimeString().slice(0, 8) + "  " + message;
+  el.insertBefore(row, el.firstChild);
+  while (el.childNodes.length > 200) el.removeChild(el.lastChild);
+}
+
+function setStatus(text, kind) {
+  const el = document.getElementById("status");
+  el.textContent = text;
+  el.className = "pill " + (kind || "");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Calls
+// ---------------------------------------------------------------------------------------------
+
+async function getInfo() {
+  const b = bridge();
+  if (!b) { log("no bridge: not running inside the slicer, or not on a trusted origin", "e"); return null; }
+  try {
+    const info = await b.send("slicer.getInfo");
+    document.getElementById("info").textContent = JSON.stringify(info, null, 2);
+    log("getInfo ok: " + info.app.name + " " + info.app.version, "o");
+
+    // The AGPL-3.0 source offer. If you host an application whose server runs the slicer for
+    // remote users, render this somewhere the user can see it.
+    const src = document.getElementById("source");
+    src.innerHTML = "";
+    src.appendChild(document.createTextNode("Slicing by " + info.app.name + " (" + info.app.license + ") — "));
+    const a = document.createElement("a");
+    a.href = info.app.sourceUrl;
+    a.textContent = "Source";
+    src.appendChild(a);
+
+    // capabilities is the only correct way to decide what you may call.
+    applyCapabilities(info.capabilities);
+    const access = document.getElementById("settingsAccess");
+    access.textContent = "settingsAccess: " + info.settingsAccess + " (tab " + (info.tab ? info.tab.slot : "?") + ")";
+    access.className = "pill " + (info.settingsAccess ? "ok" : "");
+    return info;
+  } catch (e) {
+    log("getInfo failed: [" + e.code + "] " + e.message, "e");
+    return null;
+  }
+}
+
+// Wait for the two-stage completion event that carries our request id.
+function awaitOpened(requestId) {
+  return new Promise(resolve => {
+    const b = bridge();
+    const onOpened = data => {
+      if (data && data.id && data.id !== requestId) return;   // not ours
+      b.off("slicer.projectOpened", onOpened);
+      resolve(data);
+    };
+    b.on("slicer.projectOpened", onOpened);
+    setTimeout(() => { b.off("slicer.projectOpened", onOpened); resolve({ ok: false, error: "timed out" }); }, 180000);
+  });
+}
+
+async function openFromUrl() {
+  const b = bridge();
+  if (!b) { log("no bridge", "e"); return; }
+
+  const url  = document.getElementById("url").value.trim();
+  const name = document.getElementById("name").value.trim();
+  const sha  = document.getElementById("sha").value.trim();
+  if (!url) { log("enter a URL first", "e"); return; }
+
+  const onProgress = p => {
+    const pct = p.total ? Math.round(100 * p.received / p.total) + "%" : (p.received + " bytes");
+    setStatus("downloading " + pct);
+  };
+  b.on("slicer.openProjectFromUrl.progress", onProgress);
+
+  const opened = awaitOpened(null);
+  try {
+    await b.send("slicer.openProjectFromUrl", { url: url, filename: name, sha256: sha || undefined });
+    log("openProjectFromUrl accepted — waiting for the outcome");
+    setStatus("opening…");
+  } catch (e) {
+    b.off("slicer.openProjectFromUrl.progress", onProgress);
+    log("openProjectFromUrl rejected: [" + e.code + "] " + e.message, "e");
+    setStatus("failed", "err");
+    return;
+  }
+
+  const result = await opened;
+  b.off("slicer.openProjectFromUrl.progress", onProgress);
+  if (result.ok) { log("opened: " + result.path, "o"); setStatus("opened", "ok"); }
+  else           { log("not opened: " + result.error, "e"); setStatus("failed", "err"); }
+}
+
+async function openByPath() {
+  const b = bridge();
+  if (!b) { log("no bridge", "e"); return; }
+
+  const path = document.getElementById("path").value.trim();
+  if (!path) { log("enter a path first", "e"); return; }
+
+  const opened = awaitOpened(null);
+  try {
+    await b.send("slicer.openProject", { path: path });
+    log("openProject accepted — waiting for the outcome");
+  } catch (e) {
+    log("openProject rejected: [" + e.code + "] " + e.message, "e");
+    setStatus("failed", "err");
+    return;
+  }
+
+  const result = await opened;
+  if (result.ok) { log("opened: " + result.path, "o"); setStatus("opened", "ok"); }
+  else           { log("not opened: " + result.error, "e"); setStatus("failed", "err"); }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Preset settings (WEB_APP_BRIDGE.md section 4.1) and events (section 4.5)
+// ---------------------------------------------------------------------------------------------
+
+// Every settings-family method with a starting set of parameters. Edit them in the page.
+const SETTINGS_METHODS = [
+  ["slicer.listPresets",       { type: "filament", query: "", compatibleOnly: true, limit: 20 }],
+  ["slicer.getSettingsSchema", { type: "print", query: "infill", includeCode: false, limit: 20 }],
+  ["slicer.getSettings",       { type: "print", keys: ["layer_height", "sparse_infill_density", "wall_loops"] }],
+  ["slicer.setSettings",       { type: "print", values: { sparse_infill_density: "35%" } }],
+  ["slicer.selectPreset",      { type: "print", name: "", ifDirty: "ask" }],
+  ["slicer.getPlate",          {}],
+  ["slicer.slice",             {}],
+  ["slicer.getSliceResult",    {}],
+];
+
+// Every unsolicited event the slicer can send. All are logged verbatim.
+const SLICER_EVENTS = [
+  "slicer.presetChanged", "slicer.settingsChanged", "slicer.plateChanged",
+  "slicer.sliceStarted", "slicer.sliceFinished", "slicer.themeChanged", "slicer.capabilitiesChanged",
+];
+
+let lastSettingsCall = null;   // {method, params, textarea} of the last send, for the 1013 retry
+
+function buildSettingsRows() {
+  const host = document.getElementById("settingsRows");
+  for (const [method, params] of SETTINGS_METHODS) {
+    const row = document.createElement("div");
+    row.className = "mrow";
+    const label = document.createElement("code");
+    label.textContent = method;
+    const box = document.createElement("textarea");
+    box.value = JSON.stringify(params);
+    box.rows = 1;
+    const btn = document.createElement("button");
+    btn.textContent = "Send";
+    btn.disabled = true;
+    btn.dataset.method = method;
+    btn.className = "settings-send";
+    btn.addEventListener("click", () => callSettings(method, box));
+    row.appendChild(label); row.appendChild(box); row.appendChild(btn);
+    host.appendChild(row);
+  }
+}
+
+function applyCapabilities(caps) {
+  document.getElementById("btnPath").disabled = !caps.includes("slicer.openProject");
+  document.getElementById("btnUrl").disabled  = !caps.includes("slicer.openProjectFromUrl");
+  for (const btn of document.querySelectorAll(".settings-send")) {
+    // selectPreset is always listed (its printer form is v1); the print/filament forms need the
+    // opt-in, which the presence of any other settings method tells us about.
+    const gated = btn.dataset.method === "slicer.selectPreset"
+      ? caps.includes("slicer.getSettings")
+      : caps.includes(btn.dataset.method);
+    btn.disabled = !gated;
+  }
+}
+
+function showSettingsResult(method, code, message, data) {
+  const head = method + "  ->  " + code + " " + message + "\n";
+  document.getElementById("settingsResult").textContent = head + JSON.stringify(data === undefined ? null : data, null, 2);
+}
+
+async function callSettings(method, box) {
+  const b = bridge();
+  if (!b) { log("no bridge", "e"); return; }
+  let params;
+  try { params = box.value.trim() ? JSON.parse(box.value) : {}; }
+  catch (e) { log(method + ": parameters are not valid JSON: " + e.message, "e"); return; }
+
+  lastSettingsCall = { method: method, params: params, box: box };
+  document.getElementById("btnRetryDiscard").disabled = true;
+  try {
+    const data = await b.send(method, params);
+    showSettingsResult(method, 0, "success", data);
+    log(method + " ok", "o");
+  } catch (e) {
+    // A rejection carries the response data too: for 1013 that is {dirty, type, dirtyKeys}.
+    showSettingsResult(method, e.code, e.message, e.data);
+    log(method + " failed: [" + e.code + "] " + e.message, "e");
+    if (e.code === 1013) document.getElementById("btnRetryDiscard").disabled = false;
+  }
+}
+
+function retryWithDiscard() {
+  if (!lastSettingsCall) return;
+  const params = Object.assign({}, lastSettingsCall.params, { ifDirty: "discard" });
+  lastSettingsCall.box.value = JSON.stringify(params);
+  callSettings(lastSettingsCall.method, lastSettingsCall.box);
+}
+
+function logEvent(name, data) {
+  const el = document.getElementById("events");
+  const row = document.createElement("div");
+  row.className = "ev";
+  let text = JSON.stringify(data);
+  if (text && text.length > 600) text = text.slice(0, 600) + "\u2026";
+  const when = document.createTextNode(new Date().toTimeString().slice(0, 8) + "  ");
+  const b = document.createElement("b");
+  b.textContent = name;
+  row.appendChild(when); row.appendChild(b); row.appendChild(document.createTextNode("  " + text));
+  el.insertBefore(row, el.firstChild);
+  while (el.childNodes.length > 200) el.removeChild(el.lastChild);
+}
+
+function subscribeEvents() {
+  const b = bridge();
+  for (const name of SLICER_EVENTS) b.on(name, data => logEvent(name, data));
+  // What you may call changed under you: re-enable rows from the new list.
+  b.on("slicer.capabilitiesChanged", data => { if (data && data.capabilities) applyCapabilities(data.capabilities); getInfo(); });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------------------------
+
+document.getElementById("btnInfo").addEventListener("click", getInfo);
+document.getElementById("btnUrl").addEventListener("click", openFromUrl);
+document.getElementById("btnPath").addEventListener("click", openByPath);
+document.getElementById("btnClear").addEventListener("click", () => {
+  document.getElementById("log").innerHTML = "";
+  document.getElementById("events").innerHTML = "";
+});
+document.getElementById("btnRetryDiscard").addEventListener("click", retryWithDiscard);
+buildSettingsRows();
+
+function start() {
+  if (bridge()) {
+    setStatus("bridge available", "ok");
+    log("window.__slicerBridge found, version " + bridge().version, "o");
+    subscribeEvents();
+    getInfo();
+  } else if (window.wx && typeof window.wx.postMessage === "function") {
+    // Inside a slicer web view, but the shim was not injected -- this origin is not trusted.
+    setStatus("inside the slicer, untrusted origin", "err");
+    log("window.wx exists but no shim was injected: this origin does not match web_app_url", "e");
+    document.getElementById("btnUrl").disabled = true;
+    document.getElementById("btnPath").disabled = true;
+  } else {
+    setStatus("ordinary browser", "");
+    log("no bridge: this page is not running inside the slicer. Everything below is inert.");
+    document.getElementById("btnUrl").disabled = true;
+    document.getElementById("btnPath").disabled = true;
+  }
+}
+
+// The shim is injected after the document loads, so it may not be there yet on first paint.
+if (bridge()) start();
+else {
+  window.addEventListener("slicerbridgeready", start, { once: true });
+  setTimeout(() => { if (document.getElementById("status").textContent === "detecting…") start(); }, 1200);
+}
+</script>
+</body>
+</html>

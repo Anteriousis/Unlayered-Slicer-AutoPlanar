@@ -7,6 +7,7 @@
 // CuraEngine is released under the terms of the AGPLv3 or higher.
 
 #include "TreeSupport3D.hpp"
+#include "SegmentSupportBounds.hpp"
 #include "AABBTreeIndirect.hpp"
 #include "AABBTreeLines.hpp"
 #include "BuildVolume.hpp"
@@ -3482,6 +3483,34 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
 #else
         std::vector<Polygons>        overhangs = generate_overhangs(config, *print.get_object(processing.second.front()), throw_on_cancel);
 #endif
+        // Declarative cut planes: seed the demand handed up by this segment's children as real
+        // OVERHANGS, so the organic tree places tips at the shared cut face and grows its own
+        // tapered branches down around this segment's body -- rather than stamping the child's flat
+        // root pad onto every base layer. Only the FRESH BAND (demand[i] - demand[i+1]) is seeded;
+        // the tree's own downward growth builds the column beneath it.
+        //
+        // Timing matters: this is after generate_overhangs (pure geometry, which never sees the
+        // demand) and before precalculate, so the demand participates in avoidance precalculation
+        // AND in tip placement. Indexing matters too: demand is OBJECT-layer indexed while
+        // `overhangs` is SUPPORT-layer indexed with a raft offset.
+        {
+            PrintObject &demand_object = *print.get_object(processing.second.front());
+            if (! demand_object.segment_support_demand().empty()) {
+                const std::vector<Polygons> &demand   = demand_object.segment_support_demand();
+                const size_t                 num_raft = config.raft_layers.size();
+                for (size_t i = 0; i < demand.size() && i < demand_object.layer_count(); ++ i) {
+                    if (demand[i].empty())
+                        continue;
+                    Polygons band = (i + 1 < demand.size()) ? diff(demand[i], demand[i + 1]) : demand[i];
+                    if (band.empty())
+                        continue;
+                    const size_t idx = i + num_raft;
+                    if (idx < overhangs.size())
+                        append(overhangs[idx], band);
+                }
+            }
+        }
+
         // ### Precalculate avoidances, collision etc.
         size_t num_support_layers = precalculate(print, overhangs, processing.first, processing.second, volumes, throw_on_cancel);
         bool   has_support = num_support_layers > 0;
@@ -3597,6 +3626,19 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
         tbb::parallel_for_each(layers_sorted.begin(), layers_sorted.end(), [&](SupportGeneratorLayer *layer) {
             if (layer) layer->polygons = intersection(layer->polygons, volumes.m_bed_area);
         });
+
+        // Declarative cut planes: terminate organic branches on this segment's floor and keep them
+        // below its ceilings. Applied to the assembled layers -- whose polygons alias the per-type
+        // lists generate_support_toolpaths reads, the same trick the bed-area clip above uses -- so
+        // it must stay before that call. Inactive for an ordinary object.
+        {
+            const SegmentSupportBounds segment_bounds(print_object, print_object.slicing_parameters().first_print_layer_height);
+            if (segment_bounds.is_active())
+                tbb::parallel_for_each(layers_sorted.begin(), layers_sorted.end(), [&segment_bounds](SupportGeneratorLayer *layer) {
+                    if (layer != nullptr && ! layer->polygons.empty())
+                        layer->polygons = intersection(layer->polygons, segment_bounds.valid_region_polygon(layer->print_z));
+                });
+        }
 
         print.set_status(69, _L("Generating support"));
         generate_support_toolpaths(print_object.support_layers(), print_object.config(), support_params, print_object.slicing_parameters(),

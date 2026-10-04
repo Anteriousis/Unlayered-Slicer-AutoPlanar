@@ -1,11 +1,11 @@
 #!/bin/sh
 
-#  OrcaSlicer gettext
+#  Unlayered Slicer gettext
 #  Created by SoftFever on 27/5/23.
 #
 
 list_file="./localization/i18n/list.txt"
-pot_file="./localization/i18n/OrcaSlicer.pot"
+pot_file="./localization/i18n/UnlayeredSlicer.pot"
 filtered_list=""
 missing_list=""
 generated_root_dir=""
@@ -82,7 +82,7 @@ if $FULL_MODE; then
     if $has_sources; then
         generated_root_dir=$(mktemp -d)
         generated_i18n_dir="${generated_root_dir}/i18n"
-        generated_pot_file="${generated_i18n_dir}/OrcaSlicer.pot"
+        generated_pot_file="${generated_i18n_dir}/UnlayeredSlicer.pot"
 
         mkdir -p "$generated_i18n_dir"
         xgettext --keyword=L --keyword=_L --keyword=_u8L --keyword=L_CONTEXT:1,2c --keyword=_L_CONTEXT:1,2c --keyword=_u8L_CONTEXT:1,2c --keyword=_L_PLURAL:1,2 --add-comments=TRN --from-code=UTF-8 --no-location --debug --boost --no-wrap -f "$filtered_list" -o "$generated_pot_file"
@@ -105,23 +105,23 @@ do
     dir=${dir%*/}      # remove the trailing "/"
     lang=${dir##*/}    # extract the language identifier
 
-    if [ -f "$dir/OrcaSlicer_${lang}.po" ]; then
+    if [ -f "$dir/UnlayeredSlicer_${lang}.po" ]; then
         if $FULL_MODE && [ -f "$pot_file" ]; then
             merged_po=$(mktemp)
-            if ! msgmerge -N --no-wrap -o "$merged_po" "$dir/OrcaSlicer_${lang}.po" "$pot_file"; then
+            if ! msgmerge -N --no-wrap -o "$merged_po" "$dir/UnlayeredSlicer_${lang}.po" "$pot_file"; then
                 echo "Error encountered with msgmerge command for language ${lang}."
                 rm -f "$merged_po"
                 exit 1
             fi
 
-            if files_equal_ignoring_pot_date "$dir/OrcaSlicer_${lang}.po" "$merged_po"; then
+            if files_equal_ignoring_pot_date "$dir/UnlayeredSlicer_${lang}.po" "$merged_po"; then
                 rm -f "$merged_po"
             else
-                mv "$merged_po" "$dir/OrcaSlicer_${lang}.po"
+                mv "$merged_po" "$dir/UnlayeredSlicer_${lang}.po"
             fi
         fi
         mkdir -p "resources/i18n/${lang}"
-        if ! msgfmt --check-format -o "resources/i18n/${lang}/OrcaSlicer.mo" "$dir/OrcaSlicer_${lang}.po"; then
+        if ! msgfmt --check-format -o "resources/i18n/${lang}/UnlayeredSlicer.mo" "$dir/UnlayeredSlicer_${lang}.po"; then
             echo "Error encountered with msgfmt command for language ${lang}."
             exit 1  # Exit the script with an error status
         fi

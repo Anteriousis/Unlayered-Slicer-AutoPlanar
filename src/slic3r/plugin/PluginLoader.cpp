@@ -461,7 +461,7 @@ bool install_packages(const std::vector<std::string>& pkgs, std::string& error)
         process::child    child(uv_path, process::args(args),
 #ifdef _WIN32
                                 // uv.exe (and the python.exe it spawns) are console-subsystem programs.
-                                // OrcaSlicer is a GUI app with no console of its own, so without this flag
+                                // Unlayered Slicer is a GUI app with no console of its own, so without this flag
                                 // Windows allocates a fresh console window for the child that flashes on
                                 // screen during startup plugin loading. Matches ProcessRunner/MediaPlayCtrl.
                                 process::windows::create_no_window,

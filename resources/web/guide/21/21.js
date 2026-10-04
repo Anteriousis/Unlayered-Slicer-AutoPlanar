@@ -15,5 +15,5 @@ function GotoFilamentPage()
 	let nChoose=OnExitFilter();
 	
 	if(nChoose>0)
-		window.open('../22/index.html','_self');
+		window.open('../0/index.html?target=22&wait=detail','_self');
 }

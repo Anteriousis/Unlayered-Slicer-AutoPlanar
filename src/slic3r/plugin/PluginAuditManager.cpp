@@ -294,9 +294,9 @@ std::vector<std::string> PluginAuditManager::default_denied_filenames()
 bool PluginAuditManager::is_denied_filename(const boost::filesystem::path& candidate) const
 {
     // Match on the base name alone, with no path resolution.  Traversal is handled for free,
-    // because filename() of data_dir()/plugins/../OrcaSlicer.conf is already "OrcaSlicer.conf",
+    // because filename() of data_dir()/plugins/../<app>.conf is already "<app>.conf",
     // and the prefix rule covers the .bak/.tmp companions that hold the same secrets plus Windows
-    // alternate data streams ("OrcaSlicer.conf:stream").  A plugin that launders a denied file
+    // alternate data streams ("<app>.conf:stream").  A plugin that launders a denied file
     // through a symlink, a hardlink, a subprocess, or a Windows 8.3 short name is out of scope
     // (see the design doc): this blocks direct access, not an actively evasive plugin.
     const std::string filename = candidate.filename().string();

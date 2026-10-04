@@ -17,6 +17,21 @@ struct SerialPortInfo {
 	std::string friendly_name;
 	bool        is_printer = false;
 
+	// Which physical USB socket this port is plugged into, e.g.
+	// "PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(6)". Empty when it cannot be determined.
+	//
+	// This is the only durable identity a Duet has. It reports an EMPTY USB serial number, and a
+	// firmware update changes everything else about the device: RRF 3.6 presents one CDC port with
+	// product id 0x60EE, RRF 3.7 presents two with 0x60EF, so the port name, the product id and
+	// even the number of ports all change across an update. The socket does not.
+	std::string topology_key;
+	// Interface number of a composite device (the MI_xx part), or -1 when not composite. A Duet on
+	// RRF 3.7 has two independent G-code channels; either works, and the lower is preferred.
+	int         usb_interface = -1;
+	// Windows CM_PROB_* code: 0 when healthy. A device whose driver failed to start is still
+	// enumerated and still yields a port name, so without this a dead port looks like a live one.
+	unsigned    problem_code = 0;
+
 	SerialPortInfo() {}
 	SerialPortInfo(std::string port) : port(port), friendly_name(std::move(port)) {}
 
@@ -34,6 +49,14 @@ inline bool operator==(const SerialPortInfo &sp1, const SerialPortInfo &sp2)
 
 extern std::vector<std::string> 	scan_serial_ports();
 extern std::vector<SerialPortInfo> 	scan_serial_ports_extended();
+
+// USB vendor id shared by every Duet mainboard.
+constexpr unsigned DUET_USB_VENDOR_ID = 0x1D50;
+
+// Ports that look like a Duet mainboard, best candidate first: healthy before faulted, and the
+// lower USB interface before the higher. On RRF 3.7 a board presents two CDC ports and both are
+// full G-code channels, so either works.
+extern std::vector<SerialPortInfo>	scan_duet_ports();
 
 
 class Serial : public boost::asio::serial_port

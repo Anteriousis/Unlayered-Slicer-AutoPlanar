@@ -4,6 +4,7 @@
 #include "libslic3r.h"
 #include <string>
 #include <charconv>
+#include <optional>
 #include "Extruder.hpp"
 #include "Point.hpp"
 #include "Polygon.hpp"
@@ -79,13 +80,13 @@ public:
     // SoftFever NOTE: the returned speed is mm/minute
     double      get_current_speed() const { return m_current_speed;}
     std::string travel_to_xy(const Vec2d &point, const std::string &comment = std::string());
-    std::string travel_to_xyz(const Vec3d &point, const std::string &comment = std::string(), bool force_z = false);
+    std::string travel_to_xyz(const Vec3d &point, const std::string &comment = std::string(), bool force_z = false, Transform3d trafo = Transform3d::Identity());
     std::string travel_to_z(double z, const std::string &comment = std::string(), bool force = false);
     bool        will_move_z(double z) const;
     std::string extrude_to_xy(const Vec2d &point, double dE, const std::string &comment = std::string(), bool force_no_extrusion = false);
     //BBS: generate G2 or G3 extrude which moves by arc
     std::string extrude_arc_to_xy(const Vec2d &point, const Vec2d &center_offset, double dE, const bool is_ccw, const std::string &comment = std::string(), bool force_no_extrusion = false);
-    std::string extrude_to_xyz(const Vec3d &point, double dE, const std::string &comment = std::string(), bool force_no_extrusion = false);
+    std::string extrude_to_xyz(const Vec3d &point, double dE, const std::string &comment = std::string(), bool force_no_extrusion = false, Transform3d trafo = Transform3d::Identity());
     std::string retract(bool before_wipe = false, double retract_length = 0);
     std::string retract_for_toolchange(bool before_wipe = false, double retract_length = 0);
     // extra_retract adds a small over-extrusion to the deretract move (PETG pre-extrusion).
@@ -100,10 +101,34 @@ public:
     Vec3d&       get_position() { return m_pos; }
     void        set_position(const Vec3d& in) { m_pos = in; }
     double      get_zhop() const { return m_lifted; }
+    // UNLAYERED_MOD — highest MACHINE-frame Z at which this file has laid material so far. The
+    // nozzle tip sits on top of the bead it is extruding, so this is an upper bound on the height
+    // of everything printed, in the frame travels are emitted in. GCode::m_max_layer_z cannot serve
+    // that role for multiplanar prints: it tracks Layer::print_z, which for a tilted chunk is a
+    // distance along that chunk's build normal, not a bed-frame height.
+    double      max_extrusion_z() const { return m_max_extrusion_z; }
 
     //BBS: set offset for gcode writer
     void set_xy_offset(double x, double y) { m_x_offset = x; m_y_offset = y; }
     Vec2f get_xy_offset() { return Vec2f{m_x_offset, m_y_offset}; };
+
+    // UNLAYERED_MOD — the active extruder's XY nozzle offset, in the MACHINE frame.
+    // GCode::point_to_gcode subtracts this while building the point, i.e. BEFORE the nonplanar
+    // un-rotation in apply_test_rotation2. For a tilted segment that rotation then carries a
+    // machine-frame quantity into the chunk's frame, so one offset lands on a different axis per
+    // segment and the chunks come out of register with each other. Measured on a real part with
+    // extruder_offset = 0x2: the untilted root shifted 2 mm in Y while a 45-degree chunk shifted
+    // 2 mm in X. Zero for every machine whose extruder_offset is 0 (the usual case), which is why
+    // only the P1S profile showed it.
+    Vec3d extruder_offset_xy() const {
+        const Extruder *e = this->filament();
+        if (e == nullptr)
+            return Vec3d::Zero();
+        const size_t id = e->extruder_id();
+        if (id >= m_extruder_offsets.size())
+            return Vec3d::Zero();
+        return Vec3d(m_extruder_offsets[id].x(), m_extruder_offsets[id].y(), 0.);
+    }
     // To be called by the CoolingBuffer from another thread.
     // ORCA: `part_cooling_fan_min_pwm` (0-100, default 0) is a floor applied only when `speed` is non-zero, used to overcome
     // PWM start-up thresholds on fans that won't spool below a certain duty cycle. A `speed` of 0 is always honoured.
@@ -126,6 +151,28 @@ public:
     //BBS:
     void set_current_position_clear(bool clear) { m_is_current_pos_clear = clear; };
     bool is_current_position_clear() const { return m_is_current_pos_clear; };
+    // UNLAYERED_MOD — emit a collision-safe hop to a destination given in the part's local frame:
+    // traverse in XY at the current (already-lifted) machine-vertical height, then descend straight
+    // down onto the destination. Unlike the normal travel paths this keeps the traverse height in
+    // machine Z (not the tilted tool axis), so it never drags over neighbors or dives through the
+    // bed regardless of the member's orientation. Used by ByGroup cross-orientation hops.
+    // When rotate is true, the B/C swing to (angle_b_deg, angle_c_deg) is folded into the high XY
+    // traverse so the rotary axes move simultaneously with X/Y. bc_angular_dist_deg is the total
+    // angular travel and is used to clamp the feedrate so the rotary axes never whip on short hops.
+    std::string travel_to_xyz_high_then_down(const Vec3d &local_point, const Transform3d &trafo, const std::string &comment,
+                                             bool rotate = false, double angle_b_deg = 0., double angle_c_deg = 0.,
+                                             double bc_angular_dist_deg = 0.);
+    // UNLAYERED_MOD — emit one travel to an absolute point that is ALREADY in the bed frame, with
+    // no trafo applied and none of travel_to_xyz's lazy-lift rewriting. Multiplanar inter-chunk
+    // transitions plan their path in the bed frame directly, so they need a dumb emitter; going
+    // through travel_to_xyz would re-apply a rotation, and through travel_to_z would risk
+    // will_move_z() silently swallowing the lift.
+    std::string travel_to_xyz_direct(const Vec3d &bed_point, const std::string &comment);
+    // UNLAYERED_MOD — one G0 rapid to an absolute bed-frame point, with optional B/C words.
+    // Same dumb-emitter contract as travel_to_xyz_direct (no trafo, no lazy-lift rewriting);
+    // used by the ByObject inter-chunk transition, whose staging moves are rapids by design.
+    std::string rapid_to_xyzbc(const Vec3d &bed_point, std::optional<double> angle_b_deg, std::optional<double> angle_c_deg,
+                               const std::string &comment);
     //BBS:
     static bool full_gcode_comment;
     //SoftFever
@@ -173,6 +220,8 @@ public:
     double          m_to_lift;
     LiftType        m_to_lift_type;
     Vec3d           m_pos = Vec3d::Zero();
+    // UNLAYERED_MOD — see max_extrusion_z(). Updated only by the extrude_* emitters.
+    double          m_max_extrusion_z = 0.;
     //BBS: this flag is used to indicate whether the m_pos is real.
     //A example that of the first move, the m_pos is zero, but the real position of extruder doesn't
     //Pos must be clear after the first xyz travel move
@@ -180,6 +229,11 @@ public:
     //BBS: x, y offset for gcode generated
     double          m_x_offset{ 0 };
     double          m_y_offset{ 0 };
+    // UNLAYERED_MOD — see extruder_offset_xy(). Cached from PrintConfig in apply_print_config
+    // because GCodeConfig (this->config) does not carry extruder_offset.
+    std::vector<Vec2d> m_extruder_offsets;
+    // UNLAYERED_MOD — enable_nonplanar, cached for the lift clamp in lazy_lift()/eager_lift().
+    bool            m_nonplanar { false };
 
     // Orca: slicing resolution in mm
     double          m_resolution = 0.01;
@@ -207,6 +261,10 @@ public:
 
     std::string _travel_to_z(double z, const std::string &comment);
     std::string _spiral_travel_to_z(double z, const Vec2d &ij_offset, const std::string &comment);
+    // UNLAYERED_MOD — travel feedrate for a move that also swings B/C. The firmware finishes every
+    // axis of a G1 together and interprets F over the linear distance (T = d / F), so bounding the
+    // rotary speed to ROT_FEED deg/min means F <= d * ROT_FEED / d_bc.
+    double      _clamp_feed_for_rotary(double linear_dist, double bc_angular_dist_deg, double travel_feed) const;
     // Orca: printable area of the active extruder (per-extruder when configured, otherwise the bed). Null when unknown.
     const Polygon *active_printable_area() const;
     // Orca: true if a full spiral-lift circle (center in bed coordinates, mm) fits inside the active printable area.
@@ -315,6 +373,20 @@ public:
 
     GCodeG1Formatter(const GCodeG1Formatter&) = delete;
     GCodeG1Formatter& operator=(const GCodeG1Formatter&) = delete;
+};
+
+// UNLAYERED_MOD — G0 rapid, same emission as GCodeG1Formatter.
+class GCodeG0Formatter : public GCodeFormatter {
+public:
+    GCodeG0Formatter() {
+        this->buf[0] = 'G';
+        this->buf[1] = '0';
+        this->buf_end = buf + buflen;
+        this->ptr_err.ptr = this->buf + 2;
+    }
+
+    GCodeG0Formatter(const GCodeG0Formatter&) = delete;
+    GCodeG0Formatter& operator=(const GCodeG0Formatter&) = delete;
 };
 
 class GCodeG2G3Formatter : public GCodeFormatter {

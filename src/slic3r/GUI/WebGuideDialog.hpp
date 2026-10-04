@@ -30,13 +30,11 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/PresetUpdater.hpp"
 
-#include <atomic>
-#include <memory>
 #include <unordered_map>
+#include <mutex>
+#include <set>
 
 #include <nlohmann/json.hpp>
-
-#include <boost/thread.hpp>
 
 namespace Slic3r { namespace GUI {
 
@@ -79,15 +77,19 @@ public:
     bool IsFirstUse();
 
     //Model - Machine - Filaments
+    // Orca/Unlayered: profile data loads in two stages so the printer picker does not have to wait
+    // for every vendor's machine/filament/process presets. Models is ~450 files, Details is ~11500.
+    enum class ProfileStage { Models, Details };
+
     int LoadProfileData();
     int SaveProfileData();
-    int LoadProfileFamily(std::string strVendor, std::string strFilePath);
-    void init_guide_paths();
-    void on_profile_loaded();
-    bool BuildProfileJson(const PresetBundle& bundle, bool require_all_resource_vendors);
-    bool BuildProfileDataFromPresetBundle();
-    bool BuildProfileDataFromVendors();
-    void reset_profile_json();
+    int LoadProfileFamily(std::string strVendor, std::string strFilePath, ProfileStage stage, json &out);
+    // Builds and sends the response_userguide_profile message. UI thread only.
+    void SendProfileToWeb();
+    // Marks filaments already installed per app_config as selected in m_ProfileJson.
+    void ApplyInstalledFilamentSelection();
+    // Merges stage-2 data into m_ProfileJson. UI thread, idempotent; false if not ready yet.
+    bool MergeDetailData();
     int SaveProfile();
     int GetFilamentInfo( std::string VendorDirectory,json & pFilaList, std::string filepath, std::string &sVendor, std::string &sType);
 
@@ -112,6 +114,7 @@ private:
     AppConfig m_appconfig_new;
 
     wxWebView *m_browser;
+    wxButton * m_TestBtn;
 
     wxString m_SectionName;
 
@@ -121,11 +124,8 @@ private:
 
     //First Load
     bool bFirstComplete{false};
-    // Set once in the destructor. Read through `this` by the loading thread
-    // (joined before `this` dies) and captured as the shared_ptr by CallAfter
-    // lambdas so they don't touch `this` after the object is freed.
-    std::shared_ptr<std::atomic<bool>> m_cancel_token{std::make_shared<std::atomic<bool>>(false)};
-    std::unique_ptr<boost::thread> m_load_task;
+    bool m_destroy{false};
+    boost::thread* m_load_task{ nullptr };
 
     // User Config
     bool PrivacyUse;
@@ -135,9 +135,20 @@ private:
     bool InstallNetplugin;
     bool network_plugin_ready {false};
 
-    json m_ProfileJson;
     json m_OrcaFilaList;
     std::string m_OrcaFilaLibPath;
+
+    // Stage-2 (machine/filament/process) load state. The loader publishes into m_detail_json under
+    // m_detail_mutex; the UI thread merges it into m_ProfileJson either from the posted CallAfter
+    // and never blocks the UI thread, so a page that needs filaments is never handed an
+    // empty list. m_detail_loaded and m_detail_request_pending are UI thread only.
+    json       m_detail_json;
+    std::mutex m_detail_mutex;
+    bool       m_detail_ready{false}; // guarded by m_detail_mutex
+    bool       m_detail_loaded{false};
+    bool       m_detail_request_pending{false};
+    // Default materials named by a printer picked before the filament list existed.
+    std::set<std::string> m_pending_default_materials;
 
 #if wxUSE_WEBVIEW_IE
     wxMenuItem *m_script_object_el;

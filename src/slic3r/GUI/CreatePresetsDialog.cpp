@@ -34,7 +34,7 @@
 #define STATIC_TEXT_COLOUR wxColour("#363636")
 #define PRINTER_LIST_COLOUR wxColour("#EEEEEE")
 #define FILAMENT_OPTION_COLOUR wxColour("#D9D9D9")
-#define SELECT_ALL_OPTION_COLOUR wxColour("#009688")
+#define SELECT_ALL_OPTION_COLOUR wxColour("#767676")
 #define DEFAULT_PROMPT_TEXT_COLOUR wxColour("#ACACAC")
 
 namespace Slic3r {
@@ -77,7 +77,7 @@ static const std::vector<std::string> printer_vendors =
      "Orca Arena Printer", "Peopoly",            "Positron 3D",        "Prusa",              "Qidi",
      "Raise3D",            "RatRig",             "re3D",               "RolohaunDesign",     "SecKit",             
      "Snapmaker",          "Sovol",              "Thinker X400",       "Tronxy",             "TwoTrees",           
-     "UltiMaker",          "Vivedino",           "Volumic",            "Voron",              "Voxelab",            
+     "UltiMaker",          "Unlayered",          "Vivedino",           "Volumic",            "Voron",              "Voxelab",            
      "Vzbot",              "Wanhao",             "Z-Bolt"};
 
 static const std::unordered_map<std::string, std::vector<std::string>> printer_model_map =
@@ -151,6 +151,7 @@ static const std::unordered_map<std::string, std::vector<std::string>> printer_m
      {"Tronxy",            {"Tronxy X5SA 400 Marlin Firmware"}},
      {"TwoTrees",          {"TwoTrees SP-5 Klipper", "TwoTrees SK1"}},
      {"UltiMaker",         {"UltiMaker 2"}},
+     {"Unlayered", {"Unlayered 5 Axis Printer"}},
      {"Vivedino",          {"Troodon 2.0 - RRF",     "Troodon 2.0 - Klipper"}},
      {"Volumic",           {"EXO42 Performance", "EXO65 Performance", "SH65 Performance",  "EXO42",             "EXO65",           
                             "SH65",              "VS30SC2",           "VS30SC",            "VS30ULTRA",         "VS30MK3",         
@@ -484,11 +485,34 @@ static std::string calculate_md5(const std::string &input)
     return md5;
 }
 
-static std::string get_filament_id(std::string vendor_typr_serial)
-{
-    std::unordered_map<std::string, std::set<std::string>> filament_id_to_filament_name;
+// Cached (filament_name, filament_id) pairs derived from the system + user filament presets, in
+// the order PresetCollection returns them.
+//
+// get_filament_id() is handed to PresetCollection::clone_presets_for_printer as a callback, so it
+// runs once PER PRESET being cloned -- and it used to rebuild an entire PresetBundle each time,
+// parsing ~7000 filament json files from every shipped vendor. Cloning a dozen presets therefore
+// re-read roughly 120 MB. The scan itself is unavoidable (see the note on
+// load_system_filaments_json), but doing it more than once per dialog is not.
+//
+// Only the derived pairs are kept, not the PresetBundle, so this costs a few hundred KB. It is
+// dropped when either creation dialog opens, so a dialog always sees the current state on disk.
+// Newly created presets do not need to invalidate it: they land in the live global preset bundle,
+// which the second half of get_filament_id() reads directly on every call.
+static std::vector<std::pair<std::string, std::string>> s_filament_name_id_cache;
+static bool                                             s_filament_name_id_cached = false;
 
-    // temp filament presets
+static void invalidate_filament_id_cache()
+{
+    s_filament_name_id_cache.clear();
+    s_filament_name_id_cache.shrink_to_fit();
+    s_filament_name_id_cached = false;
+}
+
+static const std::vector<std::pair<std::string, std::string>> &get_filament_name_id_pairs()
+{
+    if (s_filament_name_id_cached)
+        return s_filament_name_id_cache;
+
     PresetBundle temp_preset_bundle;
     temp_preset_bundle.load_system_filaments_json(Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
     std::string dir_user_presets = wxGetApp().app_config->get("preset_folder");
@@ -497,19 +521,33 @@ static std::string get_filament_id(std::string vendor_typr_serial)
     } else {
         temp_preset_bundle.load_user_presets(dir_user_presets, ForwardCompatibilitySubstitutionRule::EnableSilent);
     }
-    const std::deque<Preset> &filament_presets = temp_preset_bundle.filaments.get_presets();
 
+    const std::deque<Preset> &filament_presets = temp_preset_bundle.filaments.get_presets();
+    s_filament_name_id_cache.reserve(filament_presets.size());
     for (const Preset &preset : filament_presets) {
-        std::string preset_name = preset.name;
-        size_t      index_at    = preset_name.find_first_of('@');
+        size_t index_at = preset.name.find_first_of('@');
         if (index_at == std::string::npos) {
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " filament preset name has no @ and name is: " << preset_name;
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " filament preset name has no @ and name is: " << preset.name;
             continue;
         }
-        std::string filament_name = preset_name.substr(0, index_at - 1);
-        if (filament_name == vendor_typr_serial && preset.filament_id != "null")
-            return preset.filament_id;
-        filament_id_to_filament_name[preset.filament_id].insert(filament_name);
+        s_filament_name_id_cache.emplace_back(preset.name.substr(0, index_at - 1), preset.filament_id);
+    }
+
+    s_filament_name_id_cached = true;
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " cached " << s_filament_name_id_cache.size() << " filament name/id pairs";
+    return s_filament_name_id_cache;
+}
+
+static std::string get_filament_id(std::string vendor_typr_serial)
+{
+    std::unordered_map<std::string, std::set<std::string>> filament_id_to_filament_name;
+
+    for (const auto &name_id : get_filament_name_id_pairs()) {
+        const std::string &filament_name = name_id.first;
+        const std::string &filament_id   = name_id.second;
+        if (filament_name == vendor_typr_serial && filament_id != "null")
+            return filament_id;
+        filament_id_to_filament_name[filament_id].insert(filament_name);
     }
     // global filament presets
     PresetBundle *                                     preset_bundle               = wxGetApp().preset_bundle;
@@ -659,6 +697,9 @@ static void adjust_dialog_in_screen(DPIDialog* dialog) {
 CreateFilamentPresetDialog::CreateFilamentPresetDialog(wxWindow *parent)
 	: DPIDialog(parent ? parent : nullptr, wxID_ANY, _L("Create Filament"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX | wxCENTRE | wxRESIZE_BORDER)
 {
+    // Re-read the filament name/id index for this dialog session; it is then reused across every
+    // get_filament_id() callback made while cloning, instead of re-parsing ~7000 files per preset.
+    invalidate_filament_id_cache();
     m_create_type.base_filament = _L("Create Based on Current Filament");
     m_create_type.base_filament_preset = _L("Copy Current Filament Preset ");
     get_all_filament_presets();
@@ -1574,6 +1615,8 @@ void CreateFilamentPresetDialog::clear_filament_preset_map()
 CreatePrinterPresetDialog::CreatePrinterPresetDialog(wxWindow *parent)
 : DPIDialog(parent ? parent : nullptr, wxID_ANY, _L("Create Printer/Nozzle"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX | wxCENTER)
 {
+    // See the note in CreateFilamentPresetDialog's constructor.
+    invalidate_filament_id_cache();
     m_create_type.create_printer    = _L("Create Printer");
     m_create_type.create_nozzle     = _L("Create Nozzle for Existing Printer");
     m_create_type.base_template     = _L("Create from Template");

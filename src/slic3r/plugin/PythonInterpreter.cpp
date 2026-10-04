@@ -558,7 +558,7 @@ bool PythonInterpreter::initialize()
         BOOST_LOG_TRIVIAL(debug) << "Python home set successfully";
 
         // Set program name
-        status = PyConfig_SetBytesString(&config, &config.program_name, "OrcaSlicer");
+        status = PyConfig_SetBytesString(&config, &config.program_name, "UnlayeredSlicer");
         if (PyStatus_Exception(status)) {
             m_last_error = status.err_msg ? status.err_msg : "Failed to set program name";
             BOOST_LOG_TRIVIAL(error) << "Failed to set program name: " << m_last_error;

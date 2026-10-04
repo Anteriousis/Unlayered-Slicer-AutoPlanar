@@ -1359,6 +1359,8 @@ wxString ObjectGridTable::GetValue (int row, int col)
                 return "Brim";
             case col_speed_perimeter:
                 return "Perimeter speed";
+            case col_print_group:
+                return "Print group";
             default:
                 return wxString();
         }
@@ -1878,6 +1880,14 @@ void ObjectGridTable::init_cols(ObjectGrid *object_grid)
     col = new ObjectGridCol(coString, "extruder_reset", ObjectGridTable::category_all, false, false, false, false, wxALIGN_CENTRE);
     m_col_data.push_back(col);
 
+    // print group (col_print_group=6, col_print_group_reset=7)
+    col = new ObjectGridCol(coInt, "print_group", ObjectGridTable::category_all, true, false, true, true, wxALIGN_CENTRE);
+    col->size = object_grid->GetTextExtent(L("Print group")).x;
+    m_col_data.push_back(col);
+
+    col = new ObjectGridCol(coInt, "print_group_reset", ObjectGridTable::category_all, true, true, false, false, wxALIGN_CENTRE);
+    m_col_data.push_back(col);
+
     //object layer height
     col       = new ObjectGridCol(coFloat, "layer_height", L("Quality"), true, false, true, true, wxALIGN_LEFT);
     col->size = object_grid->GetTextExtent(L("Layer height")).x - 28;
@@ -2008,6 +2018,8 @@ void ObjectGridTable::construct_object_configs(ObjectGrid *object_grid)
         object_grid->ori_brim_type = *(global_config.option<ConfigOptionEnum<BrimType>>(m_col_data[col_brim_type]->key));
         object_grid->speed_perimeter       = *(get_object_config_value<ConfigOptionFloatsNullable>(global_config, object_grid->config, m_col_data[col_speed_perimeter]->key));
         object_grid->ori_speed_perimeter   = *(global_config.option<ConfigOptionFloatsNullable>(m_col_data[col_speed_perimeter]->key));
+        object_grid->print_group = *(get_object_config_value<ConfigOptionInt>(global_config, object_grid->config, m_col_data[col_print_group]->key));
+        object_grid->ori_print_group = *(global_config.option<ConfigOptionInt>(m_col_data[col_print_group]->key));
         m_grid_data.push_back(object_grid);
 
         int volume_count = object->volumes.size();
@@ -2104,6 +2116,8 @@ void ObjectGridTable::reload_object_data(ObjectGridRow* grid_row, const std::str
         grid_row->ori_brim_type = *(global_config.option<ConfigOptionEnum<BrimType>>(m_col_data[col_brim_type]->key));
         grid_row->speed_perimeter       = *(get_object_config_value<ConfigOptionFloatsNullable>(global_config, grid_row->config, m_col_data[col_speed_perimeter]->key));
         grid_row->ori_speed_perimeter   = *(global_config.option<ConfigOptionFloatsNullable>(m_col_data[col_speed_perimeter]->key));
+        grid_row->print_group = *(get_object_config_value<ConfigOptionInt>(global_config, grid_row->config, m_col_data[col_print_group]->key));
+        grid_row->ori_print_group = *(global_config.option<ConfigOptionInt>(m_col_data[col_print_group]->key));
     }
     else if (category == L("Quality")) {
         grid_row->layer_height = *(get_object_config_value<ConfigOptionFloat>(global_config, grid_row->config, m_col_data[col_layer_height]->key));

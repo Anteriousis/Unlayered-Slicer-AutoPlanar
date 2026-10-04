@@ -31,7 +31,7 @@ if (MSVC AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
     set(_boost_c_flags_line "-DCMAKE_C_FLAGS:STRING=-Wno-incompatible-pointer-types")
 endif ()
 
-orcaslicer_add_cmake_project(Boost
+unlayered_add_cmake_project(Boost
     ${_options}
     URL "https://github.com/boostorg/boost/releases/download/boost-1.84.0/boost-1.84.0.tar.gz"
     URL_HASH SHA256=4d27e9efed0f6f152dc28db6430b9d3dfb40c0345da7342eaa5a987dde57bd95

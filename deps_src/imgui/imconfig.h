@@ -183,8 +183,12 @@ namespace ImGui
     const wchar_t MinimalizeHoverDarkButton      = 0x081D;
     const wchar_t RightArrowDarkButton           = 0x081E;
     const wchar_t RightArrowHoverDarkButton      = 0x081F;
-    const wchar_t PreferencesDarkButton          = 0x0820;
-    const wchar_t PreferencesHoverDarkButton     = 0x0821;
+    // UNLAYERED_MOD — moved off 0x0820/0x0821, which ORCA had already taken for VisibleIcon and
+    // HiddenIcon. font_icons is a std::map keyed by codepoint, so the duplicate keys silently
+    // dropped whichever entry came second and the preferences (gear) glyph could never load --
+    // which is why its four font_icons rows were commented out. 0x0845/0x0846 are unused.
+    const wchar_t PreferencesDarkButton          = 0x0845;
+    const wchar_t PreferencesHoverDarkButton     = 0x0846;
 
     const wchar_t CircleButtonDarkIcon     = 0x0822;
     const wchar_t TriangleButtonDarkIcon   = 0x0823;

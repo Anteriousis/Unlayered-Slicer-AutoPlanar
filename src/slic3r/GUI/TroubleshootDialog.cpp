@@ -128,11 +128,11 @@ TroubleshootDialog::TroubleshootDialog()
     // LEFT SIZER //////////////////////
 
     // HEADER
-    m_logo            = ScalableBitmap(this, is_dark ? "OrcaSlicer_horizontal_dark" : "OrcaSlicer_horizontal_light", 64);
+    m_logo            = ScalableBitmap(this, is_dark ? "UnlayeredSlicer_horizontal_dark" : "UnlayeredSlicer_horizontal_light", 64);
     m_header_logo     = new wxStaticBitmap(this, wxID_ANY, m_logo.bmp());
     auto logo_line    = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(2)));
-    logo_line->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#009687")));
-    auto version      = new Label(this, wxString(SoftFever_VERSION), wxALIGN_CENTRE_HORIZONTAL);
+    logo_line->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#767676")));
+    auto version      = new Label(this, wxString(UNLAYERED_VERSION), wxALIGN_CENTRE_HORIZONTAL);
     wxFont version_font = GetFont();
     version_font = version_font.Scaled(1.65f); // SetPointSize(18) not works on macOS because it uses a 72 PPI reference
     version->SetFont(version_font);
@@ -140,7 +140,7 @@ TroubleshootDialog::TroubleshootDialog()
 
     auto build = new Button(this, wxString(build_commit_label));
     build->SetStyle(ButtonStyle::Regular, ButtonType::Window);
-    auto hash_url = "https://github.com/OrcaSlicer/OrcaSlicer/commit/" + wxString(build_commit_hash);
+    auto hash_url = "https://github.com/Unlayered3D/Unlayered-Slicer/commit/" + wxString(build_commit_hash);
     build->SetToolTip(hash_url);
     build->Bind(wxEVT_BUTTON, [hash_url](wxCommandEvent &e) {
          wxLaunchDefaultBrowser(hash_url);
@@ -249,11 +249,11 @@ TroubleshootDialog::TroubleshootDialog()
             return out;
         };
 
-        wxString url = "https://github.com/OrcaSlicer/OrcaSlicer/issues/new?template=bug_report.yml";
+        wxString url = "https://github.com/Unlayered3D/Unlayered-Slicer/issues/new?template=bug_report.yml";
         wxString os = GetOStype();
         if(!os.IsEmpty())
             url += "&os_type=%22" + os +"%22";
-        url += "&version="     + encodeStr(wxString(SoftFever_VERSION));
+        url += "&version="     + encodeStr(wxString(UNLAYERED_VERSION));
         url += "&os_version="  + encodeStr(GetOSinfo());
         wxLaunchDefaultBrowser(url);
     });
@@ -297,7 +297,7 @@ TroubleshootDialog::TroubleshootDialog()
     auto log_pack_btn = create_btn(_L("Pack") + "...", "");
     log_pack_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
         auto data_dir   = boost::filesystem::path(Slic3r::data_dir());
-        ExportAsZip({wxString((data_dir / "log").string())}, "OrcaSlicer_Logs_" + GetTimestamp());
+        ExportAsZip({wxString((data_dir / "log").string())}, "UnlayeredSlicer_Logs_" + GetTimestamp());
     });
     log_pack_szr->Add(log_pack_btn, 0, wxALIGN_CENTER_VERTICAL);
 
@@ -371,7 +371,7 @@ wxString TroubleshootDialog::GetTimestamp()
 wxString TroubleshootDialog::GetSysInfoAll()
 {
     wxString info;
-    info += "Version   :  " + wxString(SoftFever_VERSION) + "\n"
+    info += "Version   :  " + wxString(UNLAYERED_VERSION) + "\n"
           + "Build     :  " + wxString(build_commit_label) + "\n"
           + "Package   :  " + GetPackageType() + "\n"
           + "Platform  :  " + GetOSinfo()      + "\n"
@@ -696,7 +696,7 @@ wxString TroubleshootDialog::GetPackageType()
     wxString path = wxStandardPaths::Get().GetExecutablePath();
     wxString dir  = wxPathOnly(path);
 
-    if (path.Contains("OrcaSlicer\\build"))
+    if (path.Contains("Unlayered-Slicer\\build"))
         return "Local Build";
 
     if (wxFileExists(dir + "\\Uninstall.exe"))
@@ -713,7 +713,7 @@ wxString TroubleshootDialog::GetPackageType()
     //if (wxFileExists("/usr/bin/pacman")) return "Arch (pacman)";
 
     wxString path = wxStandardPaths::Get().GetExecutablePath();
-    if (path.Contains("OrcaSlicer/build")) return "Local Build";
+    if (path.Contains("Unlayered-Slicer/build")) return "Local Build";
     //if (path.StartsWith("/usr/local"))   return "Compiled (local)";
     if (path.StartsWith("/opt"))           return "Third-party";
 
@@ -722,7 +722,7 @@ wxString TroubleshootDialog::GetPackageType()
     wxString path = wxStandardPaths::Get().GetExecutablePath();
     wxString dir  = wxPathOnly(path);
 
-    if (path.Contains("OrcaSlicer/build"))
+    if (path.Contains("Unlayered-Slicer/build"))
         return "Local Build";
 
     //if (wxDirExists(dir + "/../_MASReceipt"))
@@ -731,7 +731,7 @@ wxString TroubleshootDialog::GetPackageType()
     if (path.Contains("/Cellar/") || wxGetEnv("HOMEBREW_PREFIX", nullptr))
         return "Homebrew";
 
-    if (path.StartsWith("/Volumes/OrcaSlicer")) // running from .dmg
+    if (path.StartsWith("/Volumes/UnlayeredSlicer")) // running from .dmg
         return "Temporary";
 
     if (path.StartsWith("/Applications"))
@@ -947,7 +947,7 @@ void TroubleshootDialog::PackAll()
         ).ShowModal();
     }
 
-    ExportAsZip(include_zip, "OrcaSlicer_PackedDebugInfo_" + GetTimestamp());
+    ExportAsZip(include_zip, "UnlayeredSlicer_PackedDebugInfo_" + GetTimestamp());
 }
 
 void TroubleshootDialog::RebuildSystemProfiles()
@@ -970,7 +970,7 @@ void TroubleshootDialog::RebuildSystemProfiles()
     
     MessageDialog msg(this,
         _L("Restart Required") + "\n" +
-        _L("Please make sure any instances of OrcaSlicer are not running") + "\n" +
+        _L("Please make sure any instances of Unlayered Slicer are not running") + "\n" +
         _L("Do you want to continue?")
         , wxString(SLIC3R_APP_FULL_NAME), wxICON_QUESTION | wxOK | wxCANCEL
     );

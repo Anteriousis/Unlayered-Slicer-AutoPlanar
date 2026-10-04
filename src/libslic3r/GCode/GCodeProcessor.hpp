@@ -143,6 +143,9 @@ class Print;
         const void *_obj1; // nullptr means wipe tower
         const void *_obj2;
         int                layer = -1;
+        // UNLAYERED_MOD: when set, a ready-made description shown instead of the generic
+        // "G-code paths conflict between A and B" text (the hotend collision check fills this in).
+        std::string        message;
         ConflictResult(const std::string &objName1, const std::string &objName2, double height, const void *obj1, const void *obj2)
             : _objName1(objName1), _objName2(objName2), _height(height), _obj1(obj1), _obj2(obj2)
         {}
@@ -243,6 +246,17 @@ class Print;
             //BBS
             int  object_label_id{-1};
             float print_z{0.0f};
+            // UNLAYERED_MOD: index into GCodeProcessorResult::tool_axes of the direction the nozzle
+            // pointed away from the surface for this move. 0 is always straight up, so a planar print
+            // leaves every move at 0.
+            uint16_t tool_axis_id{0};
+            // Declarative cut planes: index of the segment ("section") this move belongs to, -1
+            // for an ordinary object. Drives the section view in the preview.
+            //
+            // KEEP THESE TWO LAST, IN THIS ORDER: this struct is brace-initialised positionally in
+            // store_move_vertex(), so an insert in the middle -- or swapping these two -- silently
+            // shifts every later field.
+            int  cut_segment_id{-1};
 
             float volumetric_rate() const { return feedrate * mm3_per_mm; }
             float actual_volumetric_rate() const { return actual_feedrate * mm3_per_mm; }
@@ -258,6 +272,14 @@ class Print;
         std::string filename;
         unsigned int id;
         std::vector<MoveVertex> moves;
+        // UNLAYERED_MOD: palette of tool axes referenced by MoveVertex::tool_axis_id. Entry 0 is
+        // always +Z, so a planar print has exactly one entry and every move points at it. The
+        // multiplanar orientation is piecewise constant per chunk, so this stays tiny.
+        std::vector<Vec3f> tool_axes;
+        // UNLAYERED_MOD: the print was sliced for virtual-5-axis (3-axis) output -- B/C words are
+        // suppressed and the physical nozzle stays vertical, so the preview's hotend marker must
+        // not tilt even though tool_axes carries the layers' (tilted) build directions.
+        bool virtual_5axis{ false };
         // Positions of ends of lines of the final G-code this->filename after TimeProcessor::post_process() finalizes the G-code.
         std::vector<size_t> lines_ends;
         Pointfs printable_area;
@@ -328,6 +350,12 @@ class Print;
             filename = other.filename;
             id = other.id;
             moves = other.moves;
+            // UNLAYERED_MOD: must travel with `moves` - MoveVertex::tool_axis_id indexes into it.
+            // NOTE: this operator exists because the result_mutex member deletes the implicit copy
+            // and move assignments, so every new member has to be added here by hand or it silently
+            // stays at its default in the destination (which is how the tilted preview first broke).
+            tool_axes = other.tool_axes;
+            virtual_5axis = other.virtual_5axis;
             lines_ends = other.lines_ends;
             printable_area = other.printable_area;
             bed_exclude_area = other.bed_exclude_area;
@@ -514,6 +542,9 @@ class Print;
             PA_Change,
             Print_Time_Sec_Placeholder,
             Used_Filament_Length_Placeholder,
+            // UNLAYERED_MOD: multiplanar tool axis. Keep last; Reserved_Tags and
+            // Reserved_Tags_compatible are indexed by this enum and must stay aligned with it.
+            Tool_Axis,
         };
 
         static const std::string& reserved_tag(ETags tag) { return s_IsBBLPrinter ? Reserved_Tags[static_cast<unsigned char>(tag)] : Reserved_Tags_compatible[static_cast<unsigned char>(tag)]; }
@@ -1081,6 +1112,8 @@ class Print;
         bool m_skippable{false};
         SkipType m_skippable_type{SkipType::stNone};
         int m_object_label_id{-1};
+        // Declarative cut planes: segment currently being printed, from the ;SEGMENT_ID: tag.
+        int m_cut_segment_id{-1};
         float m_print_z{0.0f};
         std::vector<float> m_remaining_volume;
         ExtruderTemps m_filament_nozzle_temp;
@@ -1143,6 +1176,15 @@ class Print;
         float m_height; // mm
         float m_forced_width; // mm
         float m_forced_height; // mm
+        // UNLAYERED_MOD: current entry in m_result.tool_axes; 0 = +Z, i.e. an ordinary planar print.
+        uint16_t m_tool_axis_id{ 0 };
+        // Set once a ";TOOL_AXIS:" tag is seen. While false, B/C words in G0/G1 are used instead, so
+        // externally produced 5-axis G-code still previews; once true the tags win outright (they are
+        // exact, and virtual_5axis exports carry the tags but no B/C words at all).
+        bool m_has_tool_axis_tag{ false };
+        // Last B/C seen as G-code words, degrees. Seeded with the identity datum (B = -90, C = 0) so a
+        // line that moves only one of the two keeps the other.
+        std::array<float, 2> m_last_bc_deg{ -90.0f, 0.0f };
         float m_mm3_per_mm;
         float m_travel_dist; // mm
         float m_fan_speed; // percentage
@@ -1175,6 +1217,8 @@ class Print;
         int m_seams_count;
         bool m_measure_g29_time {false};
         bool m_single_extruder_multi_material;
+        // UNLAYERED_MOD: from apply_config, stamped into the result at finalize().
+        bool m_virtual_5axis {false};
         float m_preheat_time;
         int m_preheat_steps;
         bool m_disable_m73;
@@ -1280,6 +1324,14 @@ class Print;
 
         // Process tags embedded into comments
         void process_tags(const std::string_view comment, bool producers_enabled);
+        // UNLAYERED_MOD: intern a tool axis into m_result.tool_axes and return its index. Axes are
+        // deduplicated with a coarse tolerance because they only ever come from a handful of chunk
+        // orientations; the palette is what keeps the per-move cost down to one index.
+        uint16_t tool_axis_id(const Vec3f &axis);
+        // UNLAYERED_MOD: true while the active tool axis is +Z, i.e. the ordinary planar case. Move
+        // classification needs it because "extruding but no XY change" only means "Z lift that oozed"
+        // for a vertical tool axis - see move_type() in process_G1().
+        bool tool_axis_is_vertical() const;
         bool process_producers_tags(const std::string_view comment);
         bool process_bambuslicer_tags(const std::string_view comment);
         bool process_cura_tags(const std::string_view comment);

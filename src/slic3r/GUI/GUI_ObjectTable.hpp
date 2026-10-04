@@ -305,18 +305,20 @@ public:
         col_name                  = 3,
         col_filaments             = 4,
         col_filaments_reset       = 5,
-        col_layer_height          = 6,
-        col_layer_height_reset    = 7,
-        col_wall_loops            = 8,
-        col_wall_loops_reset      = 9,
-        col_fill_density          = 10,
-        col_fill_density_reset    = 11,
-        col_enable_support        = 12,
-        col_enable_support_reset  = 13,
-        col_brim_type             = 14,
-        col_brim_type_reset       = 15,
-        col_speed_perimeter       = 16,
-        col_speed_perimeter_reset = 17,
+        col_print_group           = 6,
+        col_print_group_reset     = 7,
+        col_layer_height          = 8,
+        col_layer_height_reset    = 9,
+        col_wall_loops            = 10,
+        col_wall_loops_reset      = 11,
+        col_fill_density          = 12,
+        col_fill_density_reset    = 13,
+        col_enable_support        = 14,
+        col_enable_support_reset  = 15,
+        col_brim_type             = 16,
+        col_brim_type_reset       = 17,
+        col_speed_perimeter       = 18,
+        col_speed_perimeter_reset = 19,
         col_max
     };
 
@@ -346,6 +348,8 @@ public:
         ConfigOptionEnum<BrimType>  ori_brim_type;
         ConfigOptionFloatsNullable  speed_perimeter;
         ConfigOptionFloatsNullable  ori_speed_perimeter;
+        ConfigOptionInt             print_group;
+        ConfigOptionInt             ori_print_group;
 
         ModelConfig*                config;
         ModelVolumeType             model_volume_type;
@@ -398,6 +402,10 @@ public:
                     return speed_perimeter;
                 case col_speed_perimeter_reset:
                     return ori_speed_perimeter;
+                case col_print_group:
+                    return print_group;
+                case col_print_group_reset:
+                    return ori_print_group;
                 default:
                     break;
             }

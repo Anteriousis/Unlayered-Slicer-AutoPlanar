@@ -16,17 +16,17 @@
             ProcessorArchitecture="@MSIX_ARCH@" />
 
   <Properties>
-    <DisplayName>OrcaSlicer</DisplayName>
+    <DisplayName>Unlayered Slicer</DisplayName>
     <PublisherDisplayName>@MSIX_PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
-    <!-- Keep config in the real %APPDATA%\OrcaSlicer so it survives uninstall and
+    <!-- Keep config in the real %APPDATA%\Unlayered Slicer so it survives uninstall and
          is shared with the classic (NSIS/portable) install.
          Win10 1903+: coarse switch disables AppData write virtualization entirely.
          Win11+: fine-grained exclusion below takes precedence over the coarse switch. -->
     <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
     <virtualization:FileSystemWriteVirtualization>
       <virtualization:ExcludedDirectories>
-        <virtualization:ExcludedDirectory>$(KnownFolder:RoamingAppData)\OrcaSlicer</virtualization:ExcludedDirectory>
+        <virtualization:ExcludedDirectory>$(KnownFolder:RoamingAppData)\Unlayered Slicer</virtualization:ExcludedDirectory>
       </virtualization:ExcludedDirectories>
     </virtualization:FileSystemWriteVirtualization>
   </Properties>
@@ -40,16 +40,16 @@
   </Resources>
 
   <Applications>
-    <Application Id="OrcaSlicer" Executable="orca-slicer.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="UnlayeredSlicer" Executable="unlayered-slicer.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="OrcaSlicer"
+        DisplayName="Unlayered Slicer"
         Description="Open-source slicer for FDM 3D printers"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png" />
       <Extensions>
         <uap:Extension Category="windows.fileTypeAssociation">
-          <uap:FileTypeAssociation Name="orcaslicer-models">
+          <uap:FileTypeAssociation Name="unlayeredslicer-models">
             <uap:SupportedFileTypes>
               <uap:FileType>.3mf</uap:FileType>
               <uap:FileType>.stl</uap:FileType>
@@ -64,7 +64,7 @@
           </uap:FileTypeAssociation>
         </uap:Extension>
         <uap:Extension Category="windows.protocol">
-          <uap:Protocol Name="orcaslicer" />
+          <uap:Protocol Name="unlayeredslicer" />
         </uap:Extension>
         <uap:Extension Category="windows.protocol">
           <uap:Protocol Name="prusaslicer" />
@@ -77,7 +77,7 @@
         </uap:Extension>
         <uap3:Extension Category="windows.appExecutionAlias" EntryPoint="Windows.FullTrustApplication">
           <uap3:AppExecutionAlias>
-            <desktop:ExecutionAlias Alias="orca-slicer.exe" />
+            <desktop:ExecutionAlias Alias="unlayered-slicer.exe" />
           </uap3:AppExecutionAlias>
         </uap3:Extension>
       </Extensions>

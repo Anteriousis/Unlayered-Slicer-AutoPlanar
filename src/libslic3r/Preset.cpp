@@ -1123,6 +1123,7 @@ static std::vector<std::string> s_Preset_print_options{
     "support_interface_pattern",
     "support_interface_spacing",
     "support_interface_loop_pattern",
+    "test_input", "layer_rotation_b", "layer_rotation_c", "print_group",
     "support_top_z_distance",
     "support_on_build_plate_only",
     "support_critical_regions_only",
@@ -1341,6 +1342,8 @@ static std::vector<std::string> s_Preset_print_options{
     "zaa_dont_alternate_fill_direction",
     "zaa_min_z",
     "ironing_expansion",
+    // Multi-Axis
+    "test_input", "layer_rotation_b", "layer_rotation_c", "print_group",
 };
 
 static std::vector<std::string> s_Preset_filament_options {/*"filament_colour", */ "default_filament_colour", "required_nozzle_HRC", "filament_diameter", "pellet_flow_coefficient", "volumetric_speed_coefficients", "filament_type",
@@ -1453,7 +1456,15 @@ static std::vector<std::string> s_Preset_printer_options {
     // Fast-purge printer flag + device/firmware-facing per-variant extruder-change
     // deretraction speed (unconsumed by the slicer; carried by H2D/A2L/X2D/P2S machine profiles).
     "support_fast_purge_mode", "deretract_speed_extruder_change",
-    "printer_plugin_config_overrides"
+    "printer_plugin_config_overrides",
+    // Orca non-planar printing settings
+    "enable_nonplanar", "virtual_5axis", "axis_selection",
+    "axis_a_rotation_min", "axis_a_rotation_max", "axis_b_rotation_min", "axis_b_rotation_max", "axis_c_rotation_min", "axis_c_rotation_max",
+    "axis_a_continuous", "axis_b_continuous", "axis_c_continuous",
+    "radius", "max_build_height", "min_build_height",
+    "nonplanar_departure_distance", "nonplanar_approach_distance", "nonplanar_nozzle_to_b_axis",
+    "nonplanar_hotend_cone_height", "nonplanar_hotend_cone_angle",
+    "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"
     };
 
 static std::vector<std::string> s_Preset_sla_print_options {
@@ -3112,7 +3123,7 @@ std::string PresetCollection::add_detached_preset(const std::string &name_base, 
     preset.m_excluded_from.clear();
     preset.setting_id.clear();
     preset.inherits().clear();
-    preset.version = Semver::parse(SoftFever_VERSION).value_or(Semver());
+    preset.version = Semver::parse(UNLAYERED_VERSION).value_or(Semver());
     preset.is_default  = false;
     preset.is_system   = false;
     preset.is_external = false;

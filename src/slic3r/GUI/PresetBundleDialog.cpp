@@ -380,18 +380,9 @@ void PresetBundleDialog::UnsubscribeBundle(const std::string& id)
     wxGetApp().mainframe->update_side_preset_ui();
 }
 
-void PresetBundleDialog::OpenBundleOnCloud(const std::string& id)
+void PresetBundleDialog::OpenBundleOnCloud(const std::string& /*id*/)
 {
-    if (id.empty())
-        return;
-
-    if (!wxGetApp().getAgent())
-        return;
-
-    auto orca_agent = std::dynamic_pointer_cast<OrcaCloudServiceAgent>(wxGetApp().getAgent()->get_cloud_agent());
-    if (!orca_agent)
-        return;
-
-    wxLaunchDefaultBrowser(wxString::FromUTF8(orca_agent->get_bundle_url(id)));
+    // Unlayered: bundles are local only; there is no cloud page to open.
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": no preset cloud in this build";
 }
 }} // namespace Slic3r::GUI

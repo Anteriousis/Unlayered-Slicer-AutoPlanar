@@ -72,6 +72,7 @@ const std::map<InfoItemType, InfoItemAtributes> INFO_ITEMS{
             { InfoItemType::MmSegmentation,     {L("Color Painting"),          "mmu_segmentation"},  },
             //{ InfoItemType::Sinking,             {L("Sinking"),                 "objlist_sinking"}, },
             { InfoItemType::CutConnectors,       {L("Cut connectors"),          "cut_connectors" },    },
+            { InfoItemType::CutPlanes,           {L("Cut planes"),              "cut_connectors" },    }, // TODO: dedicated icon
             { InfoItemType::FuzzySkin,           {L("Paint-on fuzzy skin"),     "objlist_fuzzy_skin_paint" }, },
 };
 
@@ -465,6 +466,7 @@ ObjectDataViewModel::ObjectDataViewModel()
     m_warning_bmp = create_scaled_bitmap(WarningIcon);
     m_warning_manifold_bmp = create_scaled_bitmap(WarningManifoldIcon);
     m_lock_bmp = create_scaled_bitmap(LockIcon);
+    m_drag_handle_bmp = create_scaled_bitmap("drag_handle");
 
     for (auto item : INFO_ITEMS)
         m_info_bmps[item.first] = create_scaled_bitmap(item.second.bmp_name);
@@ -1760,7 +1762,7 @@ wxString ObjectDataViewModel::GetColumnType(unsigned int col) const
     if (col == colName || col == colFilament)
         return wxT("DataViewBitmapText");
     // BBS
-    if (/*col == colPrint || */col == colEditing)
+    if (/*col == colPrint || */col == colEditing || col == colDragHandle)
         return wxT("DataViewBitmap");
     return wxT("string");
 }
@@ -1797,6 +1799,11 @@ void ObjectDataViewModel::GetValue(wxVariant &variant, const wxDataViewItem &ite
 	case colEditing:
 		variant << node->m_action_icon;
 		break;
+    case colDragHandle:
+        // Only objects and parts can be reordered (see ObjectList::OnBeginDrag), so only they get
+        // a grip; other rows keep the cell blank rather than advertising a drag that is vetoed.
+        variant << ((node->m_type & (itObject | itVolume)) ? m_drag_handle_bmp : m_empty_bmp);
+        break;
 	default:
 		;
 	}
@@ -2381,6 +2388,7 @@ void ObjectDataViewModel::Rescale()
     m_warning_bmp = create_scaled_bitmap(WarningIcon);
     m_warning_manifold_bmp = create_scaled_bitmap(WarningManifoldIcon);
     m_lock_bmp = create_scaled_bitmap(LockIcon);
+    m_drag_handle_bmp = create_scaled_bitmap("drag_handle");
 
     for (auto item : INFO_ITEMS)
         m_info_bmps[item.first] = create_scaled_bitmap(item.second.bmp_name);

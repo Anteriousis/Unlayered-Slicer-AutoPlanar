@@ -37,7 +37,7 @@ target_link_libraries(your_target PRIVATE stb_dxt::stb_dxt)
 
 ## How to Use in Your Project
 
-### From within the OrcaSlicer src/ directory:
+### From within the Unlayered Slicer src/ directory:
 
 1. **In your CMakeLists.txt**, simply link the library:
 ```cmake

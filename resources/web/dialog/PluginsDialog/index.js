@@ -1,9 +1,6 @@
 const pluginsById = new Map();
+// Unlayered: no plugin hub in this build -- the only install source is a local package.
 const pluginInstallActions = {
-  "explore": {
-    label: "Install plugin",
-    command: "open_plugin_hub"
-  },
   "install-local": {
     label: "Install local plugin",
     command: "install_local_plugin"
@@ -18,7 +15,7 @@ let searchExpandOverride = new Map();
 let selectedPluginId = "";
 let contextPluginId = "";
 let activeDetailTab = "plugin-info";
-let selectedInstallAction = "explore";
+let selectedInstallAction = "install-local";
 // Config tab: the capability whose config is shown. Name and type together address it natively.
 let selectedCapabilityName = "";
 let selectedCapabilityType = "";
@@ -193,7 +190,7 @@ function StoreSplitRatio(ratio) {
 
 function NormalizeInstallAction(action) {
   const normalized = String(action || "");
-  return pluginInstallActions[normalized] ? normalized : "explore";
+  return pluginInstallActions[normalized] ? normalized : "install-local";
 }
 
 function SetSelectedInstallAction(action, notifyNative = false) {

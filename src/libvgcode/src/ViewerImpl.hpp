@@ -104,8 +104,29 @@ public:
 
     size_t get_layer_id_at(float z) const { return m_layers.get_layer_id_at(z); }
 
+    // UNLAYERED_MOD
+    float get_layer_z_min(size_t layer_id) const { return m_layers.get_layer_z_min(layer_id); }
+    float get_layer_z_max(size_t layer_id) const { return m_layers.get_layer_z_max(layer_id); }
+    bool  is_layer_planar(size_t layer_id) const { return m_layers.is_layer_planar(layer_id); }
+    bool  all_layers_planar() const { return m_layers.all_planar(); }
+    Vec3  get_tool_axis(size_t tool_axis_id) const {
+        return (tool_axis_id < m_tool_axes.size()) ? m_tool_axes[tool_axis_id] : Vec3{ 0.0f, 0.0f, 1.0f };
+    }
+    Vec3  get_layer_tool_axis(size_t layer_id) const {
+        return get_tool_axis(m_layers.get_layer_tool_axis_id(layer_id));
+    }
+
     size_t get_used_extruders_count() const { return m_used_extruders.size(); }
     std::vector<uint8_t> get_used_extruders_ids() const;
+    // Declarative cut planes: the sections present in this G-code, and their colours.
+    std::vector<int16_t> get_used_cut_segments_ids() const;
+    size_t               get_used_cut_segments_count() const { return m_used_cut_segments.size(); }
+    Color                get_cut_segment_color(int16_t segment_id) const;
+    // Per-section visibility, so one section can be inspected on its own. A section-less move
+    // (id < 0) is always visible; restoring all sections is what leaving the Section view does.
+    bool                 is_cut_segment_visible(int16_t segment_id) const;
+    void                 toggle_cut_segment_visibility(int16_t segment_id);
+    void                 show_all_cut_segments();
 
     size_t get_color_prints_count(uint8_t extruder_id) const;
     std::vector<ColorPrint> get_color_prints(uint8_t extruder_id) const;
@@ -281,6 +302,13 @@ private:
     //
     std::vector<PathVertex> m_vertices;
 
+    //
+    // UNLAYERED_MOD: palette of unit tool axes indexed by PathVertex::tool_axis_id. The axis is the
+    // direction a move's extrusion height runs along, so a tilted layer renders in its own plane.
+    // Always non-empty after load(); index 0 is always +Z, which is the whole of a planar print.
+    //
+    std::vector<Vec3> m_tool_axes;
+
     // Cache for the colors to reduce the need to recalculate colors of all the vertices.
     std::vector<float> m_vertices_colors;
 
@@ -310,6 +338,10 @@ private:
         ColorRange(EColorRangeType::Linear), ColorRange(EColorRangeType::Logarithmic)
     };
     Palette m_tool_colors;
+    // Declarative cut planes: section ids seen while loading, sorted and unique.
+    std::vector<int16_t> m_used_cut_segments;
+    // Declarative cut planes: palette for EViewType::CutSegment, indexed by cut_segment_id.
+    Palette m_cut_segment_colors;
     Palette m_color_print_colors;
     //
     // OpenGL shaders ids
@@ -330,6 +362,8 @@ private:
     int m_uni_segments_height_width_angle_tex_id{ -1 };
     int m_uni_segments_colors_tex_id{ -1 };
     int m_uni_segments_segment_index_tex_id{ -1 };
+    // UNLAYERED_MOD
+    int m_uni_segments_tool_axis_tex_id{ -1 };
     //
     // Caches for OpenGL uniforms id for options shader 
     //
@@ -339,6 +373,8 @@ private:
     int m_uni_options_height_width_angle_tex_id{ -1 };
     int m_uni_options_colors_tex_id{ -1 };
     int m_uni_options_segment_index_tex_id{ -1 };
+    // UNLAYERED_MOD
+    int m_uni_options_tool_axis_tex_id{ -1 };
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
     //
     // Caches for OpenGL uniforms id for cog marker shader 
@@ -460,6 +496,13 @@ private:
     unsigned int m_enabled_options_tex_id{ 0 };
     size_t m_enabled_options_count{ 0 };
     //
+    // UNLAYERED_MOD: OpenGL buffer holding the tool-axis palette (see m_tool_axes). One texel per
+    // distinct chunk orientation, indexed per vertex through the 4th component of the positions
+    // texture, so tilting layers costs no extra per-vertex memory.
+    //
+    unsigned int m_tool_axes_buf_id{ 0 };
+    unsigned int m_tool_axes_tex_id{ 0 };
+    //
     // Caches for size of data sent to gpu, in bytes
     //
     size_t m_positions_tex_size{ 0 };
@@ -467,6 +510,7 @@ private:
     size_t m_colors_tex_size{ 0 };
     size_t m_enabled_segments_tex_size{ 0 };
     size_t m_enabled_options_tex_size{ 0 };
+    size_t m_tool_axes_tex_size{ 0 };
 #endif // ENABLE_OPENGL_ES
 
     void update_view_full_range();

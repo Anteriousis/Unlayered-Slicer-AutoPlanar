@@ -35,7 +35,7 @@ drawing the transform it is about to apply as an isometric stack of layer
 outlines. It reaches the host only through the injected window.orca bridge --
 getConfig/saveConfig/restoreDefaults/getContext/onConfig/onTheme -- and styles
 itself from the --orca-* theme variables the host hands the frame, so it
-follows OrcaSlicer's light/dark theme.
+follows Unlayered Slicer's light/dark theme.
 """
 import math
 import json

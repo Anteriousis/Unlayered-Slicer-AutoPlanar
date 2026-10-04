@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "Development overlay for the Universe tab, the third embedded web-application slot.",
+    "",
+    "This file no longer carries the shipped defaults. The address, the tab name, whether the tab",
+    "appears and which bridge permissions it holds are all fields on WebAppSlot::universe() in",
+    "src/slic3r/GUI/WebAppPanel.cpp, because this file is excluded from the installer and a",
+    "customer machine therefore has nothing to read. The same goes for the storage hosts the page",
+    "may fetch a model from: that is WebAppSlot::download_hosts, and it has to be compiled in",
+    "because the host belongs to the deployment rather than to the product.",
+    "",
+    "Read once, on the first run of a build that has the tab -- see WebAppPanel::ensure_seeded and",
+    "the universe_app_seeded key. To point the tab at a local copy of the site set",
+    "ORCA_UNIVERSE_APP_URL, which wins over both the slot and this file and is never written back."
+  ],
+
+  "_extra_origins_comment": [
+    "Additional https origins the tab may NAVIGATE to. Navigable is NOT trusted: the bridge",
+    "session token is injected only on the slot's own address. Google sign-in is deliberately",
+    "absent -- it needs a popup the web view cannot serve, so the page hands sign-in to the user's",
+    "real browser and collects the session back."
+  ],
+  "extra_origins": []
+}

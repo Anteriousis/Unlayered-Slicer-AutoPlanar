@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web application unavailable</title>
+<!--
+  Shown by WebAppPanel when the configured web application cannot be loaded.
+
+  Deliberately self-contained: no stylesheet, no script, no image and no font from anywhere
+  else. The sibling page resources/web/unlayered/missing_connection.html pulls in four relative
+  dependencies, which is a poor bet for a page whose entire job is to work when things are
+  broken. Everything here is inline, and the dark theme comes from prefers-color-scheme so the
+  slicer does not have to tell us which theme is active.
+
+  It also runs on a file:// origin, which is deliberately NOT trusted by the bridge -- so there
+  is no window.wx access here and no way for this page to drive the slicer. "Try again" is a
+  plain top-level navigation back to the configured URL, nothing more.
+-->
+<style>
+  :root {
+    --bg:      #f4f4f4;
+    --card:    #ffffff;
+    --fg:      #1f1f1f;
+    --muted:   #6a6a6a;
+    --line:    #dcdcdc;
+    --btn-bg:  #2b2b2b;
+    --btn-fg:  #ffffff;
+    --code-bg: #ececec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:      #262626;
+      --card:    #303030;
+      --fg:      #e8e8e8;
+      --muted:   #a0a0a0;
+      --line:    #454545;
+      --btn-bg:  #e8e8e8;
+      --btn-fg:  #1f1f1f;
+      --code-bg: #1f1f1f;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    max-width: 560px;
+    width: 100%;
+    padding: 32px;
+    text-align: center;
+  }
+  .glyph { width: 48px; height: 48px; margin: 0 auto 16px; display: block; opacity: .55; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 10px; }
+  p  { margin: 0 0 16px; color: var(--muted); }
+  .url {
+    font-family: Consolas, "SF Mono", Menlo, monospace;
+    font-size: 12.5px;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 9px 12px;
+    margin: 0 0 20px;
+    word-break: break-all;
+    color: var(--fg);
+    text-align: left;
+  }
+  .actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  button {
+    font: inherit;
+    font-weight: 500;
+    padding: 9px 20px;
+    border-radius: 5px;
+    border: 1px solid var(--line);
+    cursor: pointer;
+    background: transparent;
+    color: var(--fg);
+  }
+  button.primary { background: var(--btn-bg); color: var(--btn-fg); border-color: var(--btn-bg); }
+  button:hover { opacity: .85; }
+  .hint { font-size: 12.5px; color: var(--muted); margin: 20px 0 0; }
+  .hidden { display: none !important; }
+  .glyph-soon { display: none; }
+  body.soon .glyph-x { display: none; }
+  body.soon .glyph-soon { display: inline; }
+  body.soon .actions { margin-top: 4px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="2" y="4" width="20" height="16" rx="2"/>
+      <line x1="2" y1="9" x2="22" y2="9"/>
+      <g class="glyph-x"><line x1="9" y1="14" x2="15" y2="17"/><line x1="15" y1="14" x2="9" y2="17"/></g>
+      <g class="glyph-soon"><circle cx="12" cy="15" r="3.2"/><polyline points="12,13.4 12,15 13.2,15.8"/></g>
+    </svg>
+
+    <h1 id="title">Web application unavailable</h1>
+    <p id="detail"></p>
+    <div class="url" id="url"></div>
+
+    <div class="actions">
+      <button class="primary" id="retry" type="button">Try again</button>
+      <button id="copy" type="button">Copy address</button>
+    </div>
+
+    <p class="hint" id="hint"></p>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  function param(name) {
+    var m = new RegExp("[?&]" + name + "=([^&]*)").exec(window.location.search);
+    if (!m) return "";
+    try { return decodeURIComponent(m[1].replace(/\+/g, " ")); } catch (e) { return ""; }
+  }
+
+  var reason = param("reason") || "other";
+  var url    = param("url");
+  var label  = param("title") || "The web application";
+
+  // Each entry: heading, explanation, whether retrying could plausibly help, and an extra hint.
+  var CASES = {
+    unconfigured: {
+      head: "No web application is configured",
+      body: "This tab has no address to load. Set one in Preferences › General › Web application.",
+      retry: false,
+      hint: ""
+    },
+    malformed: {
+      head: "That address is not valid",
+      body: "The configured address could not be understood as a URL. It should look like " +
+            "https://example.com or http://127.0.0.1:8765.",
+      retry: false,
+      hint: ""
+    },
+    insecure: {
+      head: "That address is not secure",
+      body: "Only https:// addresses are loaded, apart from loopback addresses such as " +
+            "http://127.0.0.1 and http://localhost, which are used for local development. " +
+            "A plain http:// address on the network was refused before any connection was made.",
+      retry: false,
+      hint: "Change the address in Preferences › General › Web application."
+    },
+    // Nothing is listening. For an end user that is not an error -- the tools simply are not
+    // available on their machine yet -- so this reads as "coming soon" rather than as a failure.
+    // The retry is kept because it is the whole development loop, but demoted to a quiet link so
+    // it does not turn the screen back into an error message.
+    connection: {
+      head: label + " — coming soon",
+      body: "Print preparation tools are on the way. This tab is where they will appear, right " +
+            "inside the slicer, with nothing extra to install.",
+      retry: true,
+      soon: true,
+      hint: ""
+    },
+    notfound: {
+      head: label + " — coming soon",
+      body: "This tab is reserved for print preparation tools. They are not published at this " +
+            "address yet.",
+      retry: true,
+      soon: true,
+      hint: ""
+    },
+    certificate: {
+      head: "The security certificate was rejected",
+      body: "The server presented a certificate that could not be verified. Nothing was loaded, and " +
+            "there is deliberately no way to continue past this.",
+      retry: true,
+      hint: ""
+    },
+    auth:     { head: "Sign-in required", body: "The server asked for credentials that were not supplied.", retry: true, hint: "" },
+    security: { head: "The page was blocked", body: "The browser engine blocked this page for security reasons.", retry: true, hint: "" },
+    request:  { head: "The request failed", body: "The server could not complete the request.", retry: true, hint: "" },
+    other:    { head: label + " could not be loaded", body: "The page failed to load.", retry: true, hint: "" }
+  };
+
+  var info = CASES[reason] || CASES.other;
+
+  document.title = info.head;
+  document.getElementById("title").textContent = info.head;
+  document.getElementById("detail").textContent = info.body;
+
+  var soon = !!info.soon;
+  if (soon) document.body.classList.add("soon");
+
+  var urlBox = document.getElementById("url");
+  // The address is diagnostic detail; on the coming-soon screen it is just noise.
+  if (url && !soon) { urlBox.textContent = url; } else { urlBox.classList.add("hidden"); }
+
+  var hint = document.getElementById("hint");
+  if (info.hint) { hint.textContent = info.hint; } else { hint.classList.add("hidden"); }
+
+  var retry = document.getElementById("retry");
+  if (soon) {
+    // Demoted to a quiet link: still one click for a developer, invisible as an error to a user.
+    retry.className = "";
+    retry.textContent = "Check again";
+    retry.style.cssText = "background:none;border:none;color:var(--muted);text-decoration:underline;" +
+                          "font-size:12px;padding:4px;cursor:pointer";
+  }
+  if (info.retry && url) {
+    // A plain top-level navigation. If the server is still down the panel catches the error and
+    // brings this page back, so there is no loop -- nothing happens without a click.
+    retry.addEventListener("click", function () { window.location.href = url; });
+  } else {
+    retry.classList.add("hidden");
+  }
+
+  var copy = document.getElementById("copy");
+  // Copying the address is a diagnostic affordance; it has no meaning on the coming-soon screen.
+  if (url && !soon) {
+    copy.addEventListener("click", function () {
+      var done = function () { copy.textContent = "Copied"; setTimeout(function () { copy.textContent = "Copy address"; }, 1600); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(done, function () {});
+      } else {
+        var ta = document.createElement("textarea");
+        ta.value = url; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+    });
+  } else {
+    copy.classList.add("hidden");
+  }
+})();
+</script>
+</body>
+</html>

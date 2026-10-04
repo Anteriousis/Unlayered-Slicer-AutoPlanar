@@ -71,6 +71,7 @@ PrintHost* PrintHost::get_print_host(DynamicPrintConfig *config)
             case htElegooLink: return new ElegooLink(config);
             case ht3DPrinterOS: return new C3DPrinterOS(config);
             case htMoonraker: return new Moonraker(config);
+            case htUnlayered: return new Unlayered(config);
             default:          return nullptr;
         }
     } else {

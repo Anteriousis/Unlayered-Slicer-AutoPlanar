@@ -10,10 +10,11 @@
 
 Unlayered Slicer is Unlayered 3D's fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer). It is built on OrcaSlicer 2.5.0-dev and keeps its feature set: calibration tools, wall and seam control, adaptive layer heights, tree supports, multi-material printing, and network printing through Klipper, PrusaLink, OctoPrint, Duet and others.
 
-This README describes **Unlayered Slicer 0.1.1**.
+This README describes **Unlayered Slicer 0.1.2**.
 
 - **Website:** <https://unlayered3d.com>
-- **Source:** this repository. Each release is tagged; [`v0.1.1`](https://github.com/Unlayered3D/Unlayered-Slicer/tree/v0.1.1) is the exact source of the 0.1.1 installer.
+- **What's new:** [CHANGELOG.md](CHANGELOG.md) lists the changes in each release.
+- **Source:** this repository. Each release is tagged; [`v0.1.2`](https://github.com/Unlayered3D/Unlayered-Slicer/tree/v0.1.2) is the exact source of the 0.1.2 installer.
 
 # What it adds
 

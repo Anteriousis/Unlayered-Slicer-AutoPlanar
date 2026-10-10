@@ -393,6 +393,12 @@ wxString WebAppPanel::configured_title(const WebAppSlot& slot)
 
 bool WebAppPanel::is_enabled(const WebAppSlot& slot)
 {
+    // Not in a release build, whatever the config or the ORCA_*_APP_URL environment says:
+    // - the generic slot is a developer harness, not part of the product;
+    // - the Agent tab is not part of this release.
+    // The dev edition keeps both.
+    if (std::string(slot.id) == WebAppSlot::generic().id || std::string(slot.id) == WebAppSlot::agent().id)
+        return false;
     // An environment override implies the developer wants the tab, whatever the config says.
     if (!env_or_empty(slot.env_url).empty())
         return true;

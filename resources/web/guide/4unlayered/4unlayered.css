@@ -1,19 +1,31 @@
-
 #Content
 {
 	padding:0%  15%;
 }
 
-#FeatureText
+/* Unlayered 2026-10-09: one page, two questions (stealth mode, Bambu Lab network plug-in). */
+.Section
 {
-	line-height: 30px;
-	margin-top: 10mm;
+	margin-top: 6mm;
 }
 
-
-#CheckArea
+.SectionTitle
 {
-	margin-top:10mm;
+	font-size: 16px;
+	font-weight: 600;
+	line-height: 30px;
+}
+
+.FeatureText
+{
+	line-height: 26px;
+	margin-top: 2mm;
+}
+
+.CheckArea
+{
+	display: block;
+	margin-top: 3mm;
 	line-height: 30px;
 }
 /* ORCA brokes shape of custom css checkbox

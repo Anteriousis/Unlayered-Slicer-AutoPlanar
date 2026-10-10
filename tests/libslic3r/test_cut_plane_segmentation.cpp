@@ -230,11 +230,19 @@ TEST_CASE("Two crossing planes peel into three sections seated correctly", "[cut
         CHECK_THAT(segs[2].build_normal[i], WithinAbs(Vec3d::UnitZ()[i], 1e-12));
 
     // The merged chunk peels last, so only its own plane clips it; the x-chunk keeps a ceiling
-    // against the later plane.
+    // against the later plane. The x-chunk also stands on the build plate while building along +X,
+    // so it carries the plate as a third, Bed clip; the merged top chunk starts at z = 15 and does not.
     REQUIRE(segs[2].clips.size() == 1);
     CHECK(segs[2].clips[0].plane_index == 1);
     CHECK(segs[2].clips[0].role == CutClipRole::Floor);
-    CHECK(segs[1].clips.size() == 2);
+    CHECK(! segs[2].has_bed_clip());
+    REQUIRE(segs[1].clips.size() == 3);
+    CHECK(segs[1].clips[0].role == CutClipRole::Floor);
+    CHECK(segs[1].clips[0].plane_index == 0);
+    CHECK(segs[1].clips[1].role == CutClipRole::Ceiling);
+    CHECK(segs[1].clips[1].plane_index == 1);
+    CHECK(segs[1].clips[2].role == CutClipRole::Bed);
+    CHECK(segs[1].clips[2].plane_index == -1);
 }
 
 TEST_CASE("Peel order follows the seats, not the authoring order", "[cutplanes]") {
@@ -551,7 +559,10 @@ TEST_CASE("A part with its own build direction becomes its own segment", "[cutpl
     CHECK(! segs[1].is_root());
     CHECK(segs[1].is_part());
     CHECK(segs[1].part_volume == directed->id());
-    CHECK(segs[1].clips.empty());
+    // A part segment has no plane clips. This one stands on the build plate while building along
+    // +X, so its only clip is the plate itself.
+    REQUIRE(segs[1].clips.size() == 1);
+    CHECK(segs[1].clips[0].role == CutClipRole::Bed);
     for (int i = 0; i < 3; ++ i)
         CHECK_THAT(segs[1].build_normal[i], WithinAbs(Vec3d::UnitX()[i], 1e-9));
     // Extent along the build axis (+X): the right cube spans x = 20..30.
@@ -648,4 +659,35 @@ TEST_CASE("Derivation status explains an empty partition", "[cutplanes]") {
     // ... and the same stack derives fine without that bound.
     CHECK(derive_cut_segments(*mo, Transform3d::Identity(), 0., &status).size() == 2);
     CHECK(status == CutSegmentationStatus::Ok);
+}
+
+TEST_CASE("A tilted segment that reaches the build plate carries the plate as a clip", "[cutplanes]") {
+    // Box 20x10x20 with a steep plane, 70 degrees from vertical, meeting the plate along x = 14.
+    // The far chunk builds along that tilted normal, so nothing else would stop its layers at the
+    // plate. Sunk 2 mm (an un-seated import), it even owns material under the plate.
+    Model model;
+    ModelObject *mo = make_object(model, { make_cube(20., 10., 20.) });
+    mo->cut_planes.enabled = true;
+    const Vec3d n(std::cos(Geometry::deg2rad(20.)), 0., std::sin(Geometry::deg2rad(20.)));
+    mo->cut_planes.planes.push_back(plane_at(Vec3d(14., 5., 2.), n));   // world (14, 5, 0) once sunk
+
+    Transform3d sunk = Transform3d::Identity();
+    sunk.translation() = Vec3d(0., 0., -2.);
+    const auto segs = derive_cut_segments(*mo, sunk);
+    REQUIRE(segs.size() == 2);
+    CHECK(! segs[0].has_bed_clip());   // the root stops at the plate through slice_z_base()
+    REQUIRE(segs[1].has_bed_clip());
+    const CutSegmentClip &bed = segs[1].clips.back();
+    CHECK(bed.role == CutClipRole::Bed);
+    CHECK(bed.plane_index == -1);
+    // world z = local z - 2 must stay >= 0:  (-z_hat) . p - (-2) <= 0.
+    CHECK_THAT(bed.normal.z(), WithinAbs(-1., 1e-12));
+    CHECK_THAT(bed.offset, WithinAbs(-2., 1e-12));
+
+    // The same box lifted 5 mm clear of the plate gets no plate clip at all.
+    Transform3d lifted = Transform3d::Identity();
+    lifted.translation() = Vec3d(0., 0., 5.);
+    const auto clear = derive_cut_segments(*mo, lifted);
+    REQUIRE(clear.size() == 2);
+    CHECK(! clear[1].has_bed_clip());
 }

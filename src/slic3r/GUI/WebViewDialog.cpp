@@ -1,6 +1,8 @@
 #include "WebViewDialog.hpp"
 
 #include "I18N.hpp"
+#include "Theme.hpp"
+#include "Widgets/StateColor.hpp"
 #include "slic3r/GUI/wxExtensions.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/MainFrame.hpp"
@@ -640,8 +642,25 @@ void WebViewPanel::OnNavigationComplete(wxWebViewEvent& evt)
 /**
     * Callback invoked when a page is finished loading
     */
+void WebViewPanel::apply_theme_style()
+{
+    if (m_browser == nullptr)
+        return;
+    const auto& colors = ThemeManager::get().active().colors;
+    auto hex = [](const char* key) { return StateColor::darkModeColorFor(wxColour(key)).GetAsString(wxC2S_HTML_SYNTAX).ToStdString(); };
+    std::string css;
+    if (colors.count("window_background")) css += "body{background-color:" + hex("#FFFFFF") + " !important}";
+    if (colors.count("labels"))            css += ".TextS1{color:" + hex("#363636") + " !important}";
+    if (colors.count("disabled_text"))     css += ".TextS2{color:" + hex("#6B6B6B") + " !important}";
+    if (colors.count("separators"))        css += "*{border-color:" + hex("#EEEEEE") + " !important}";
+    if (colors.count("panel_title_strips")) css += ".FileImg{background-color:" + hex("#F8F8F8") + " !important}"; // the recent-file cards
+    WebView::RunScript(m_browser,
+        "(function(){var s=document.getElementById('unlayered-theme');if(!s){s=document.createElement('style');s.id='unlayered-theme';document.head.appendChild(s);}s.textContent='" + css + "';})();");
+}
+
 void WebViewPanel::OnDocumentLoaded(wxWebViewEvent& evt)
 {
+    apply_theme_style();
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetTarget().ToUTF8().data();
     // Only notify if the document is the main frame, not a subframe
     if (evt.GetURL() == m_browser->GetCurrentURL())

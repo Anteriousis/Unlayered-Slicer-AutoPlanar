@@ -17,6 +17,8 @@
 #include <wx/checkbox.h>
 
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/BedMesh.hpp"
+#include <nlohmann/json.hpp>
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/MsgDialog.hpp"
@@ -177,6 +179,100 @@ Duet::ConnectionType Duet::connect(wxString &msg) const
 		.perform_sync();
 
 	return res;
+}
+
+// Bed mesh readback, logged step by step under "Duet: bed mesh:":
+//   1. rr_connect (standalone) or machine/status (DSF), as for any request.
+//   2. rr_model?key=move.compensation  or  machine/status .move.compensation
+//      -> "file" is the loaded height map's path, null when none is loaded (RRF 3; RRF 2 has no
+//         object model and the default path is assumed).
+//   3. rr_download?name=<file>  or  machine/file/<file>  -> the CSV, parsed by BedMesh.
+bool Duet::get_bed_mesh(BedMesh &mesh, wxString &error) const
+{
+	using json = nlohmann::json;
+	wxString msg;
+	const ConnectionType type = connect(msg);
+	if (type == ConnectionType::error) {
+		error = msg;
+		return false;
+	}
+	const bool        dsf  = type == ConnectionType::dsf;
+	const std::string base = get_base_url();
+	auto request = [&](const std::string& url, const char* step, std::string& body, unsigned& status) -> bool {
+		bool ok = true;
+		status  = 0;
+		auto http = Http::get(url);
+		http.timeout_connect(5).timeout_max(20)
+			.on_error([&](std::string b, std::string err, unsigned s) {
+				ok     = false;
+				status = s;
+				body   = std::move(b);
+				BOOST_LOG_TRIVIAL(error) << "Duet: bed mesh: " << step << " failed: " << err << ", HTTP " << s << ", body: `" << body.substr(0, 300) << "`";
+			})
+			.on_complete([&](std::string b, unsigned s) {
+				status = s;
+				body   = std::move(b);
+				BOOST_LOG_TRIVIAL(info) << "Duet: bed mesh: " << step << " HTTP " << s << ", " << body.size() << " bytes";
+				BOOST_LOG_TRIVIAL(debug) << "Duet: bed mesh: " << step << " body: " << body.substr(0, 600);
+			})
+			.perform_sync();
+		return ok;
+	};
+	std::string body;
+	unsigned    status = 0;
+
+	std::string file   = "0:/sys/heightmap.csv";
+	bool        loaded = true;
+	{
+		const std::string url = dsf ? base + "machine/status" : base + "rr_model?key=move.compensation";
+		if (request(url, dsf ? "GET machine/status" : "GET rr_model?key=move.compensation", body, status)) {
+			try {
+				json        j    = json::parse(body);
+				const json* comp = nullptr;
+				if (dsf) {
+					if (j.contains("move") && j["move"].is_object() && j["move"].contains("compensation"))
+						comp = &j["move"]["compensation"];
+				}
+				else if (j.contains("result"))
+					comp = &j["result"];
+				if (comp != nullptr && comp->is_object()) {
+					auto f = comp->find("file");
+					if (f != comp->end() && f->is_string() && !f->get<std::string>().empty()) {
+						file   = f->get<std::string>();
+						loaded = true;
+					}
+					else if (f != comp->end() && f->is_null())
+						loaded = false;
+					BOOST_LOG_TRIVIAL(info) << "Duet: bed mesh: move.compensation.file = " << (loaded ? file : std::string("null")) << ", type = " << comp->value("type", std::string("?"));
+				}
+			} catch (const std::exception& ex) {
+				BOOST_LOG_TRIVIAL(warning) << "Duet: bed mesh: object model reply not understood (" << ex.what() << "); assuming " << file;
+			}
+		}
+		else
+			BOOST_LOG_TRIVIAL(warning) << "Duet: bed mesh: no object model (RRF 2?); assuming " << file;
+	}
+
+	const std::string url = dsf ? base + "machine/file/" + Http::url_encode(file) : base + "rr_download?name=" + Http::url_encode(file);
+	if (!request(url, dsf ? "GET machine/file" : "GET rr_download", body, status)) {
+		disconnect(type);
+		error = GUI::from_u8(status == 404 ? "There is no height map file " + file + " on the printer. Run G29 to probe one." :
+		                                     "Could not download " + file + ", HTTP " + std::to_string(status) + ".");
+		return false;
+	}
+	disconnect(type);
+	std::string perr;
+	if (!BedMesh::from_rrf_heightmap_csv(body, mesh, perr)) {
+		BOOST_LOG_TRIVIAL(error) << "Duet: bed mesh: " << file << " not understood: " << perr;
+		error = GUI::from_u8("Could not read " + file + ": " + perr);
+		return false;
+	}
+	mesh.profile_name = file;
+	mesh.loaded       = loaded;
+	if (!loaded)
+		mesh.note = "on the printer but not loaded; G29 S1 loads it";
+	BOOST_LOG_TRIVIAL(info) << "Duet: bed mesh: " << file << " parsed, " << mesh.probed_cols() << " x " << mesh.probed_rows() << ", loaded = " << loaded;
+	return true;
 }
 
 void Duet::disconnect(ConnectionType connectionType) const

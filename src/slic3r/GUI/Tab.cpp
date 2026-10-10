@@ -8,6 +8,11 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PublishSettings.hpp"
+#include "libslic3r/Fill/FillSvg.hpp"
+#include "libslic3r/Flow.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Geometry.hpp"
+#include "PartPlate.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 
 #include "Search.hpp"
@@ -415,6 +420,9 @@ void Tab::create_preset_tab()
     if (m_presets_choice) {
         m_presets_choice->Reparent(m_top_panel);
         m_top_sizer->Add(m_presets_choice, 1, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(SidebarProps::ElementSpacing()));
+        // Reparent() appended the list after the icons; Tab should follow the layout instead.
+        m_undo_btn->MoveBeforeInTabOrder(m_btn_save_preset);
+        m_presets_choice->MoveAfterInTabOrder(m_undo_btn);
     } else {
         m_top_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
         m_top_sizer->AddStretchSpacer(1);
@@ -2661,6 +2669,9 @@ void TabPrint::build()
         optgroup->append_single_option_line("initial_layer_print_height","quality_settings_layer_height");
         optgroup->append_single_option_line("enable_mixed_color_sublayer");
 
+        // BELT_MOD -- the print's slicing angle on a belt printer; TabPrint::toggle_options hides it elsewhere.
+        optgroup = page->new_optgroup(L("Belt printer"), L"param_layer_height");
+        optgroup->append_single_option_line("belt_slice_rotation_angle");
         optgroup = page->new_optgroup(L("Line width"), L"param_line_width");
         optgroup->append_single_option_line("line_width","quality_settings_line_width");
         optgroup->append_single_option_line("initial_layer_line_width","quality_settings_line_width#first-layer");
@@ -2790,6 +2801,50 @@ void TabPrint::build()
         optgroup->append_single_option_line("overhang_reverse_internal_only", "quality_settings_overhangs#reverse-internal-only");
         optgroup->append_single_option_line("overhang_reverse_threshold", "quality_settings_overhangs#reverse-threshold");
 
+        // Wave overhangs sit with the other overhang settings on this page; their speeds join the
+        // Speed page, the leftover-support switch the Support page, and the debug output Others >
+        // G-code output -- where each of those families already lives, rather than a page of
+        // their own. ConfigManipulation toggles them by key, so the gating follows them here.
+        optgroup = page->new_optgroup(L("Wave overhangs"), L"param_overhang");
+        optgroup->append_single_option_line("wave_overhangs");
+        optgroup->append_single_option_line("wave_overhangs_instead_of_bridges");
+        optgroup->append_single_option_line("wave_overhang_min_angle");
+        optgroup->append_single_option_line("wave_overhang_min_length");
+        optgroup->append_single_option_line("wave_overhang_max_iterations");
+
+        optgroup = page->new_optgroup(L("Wave overhang pattern"), L"param_overhang");
+        optgroup->append_single_option_line("wave_overhang_pattern");
+        optgroup->append_single_option_line("wave_overhang_seam_mode");
+        optgroup->append_single_option_line("wave_overhang_outer_perimeters");
+        optgroup->append_single_option_line("wave_overhang_line_spacing");
+        optgroup->append_single_option_line("wave_overhang_spacing_mode");
+        optgroup->append_single_option_line("wave_overhang_perimeter_overlap");
+        optgroup->append_single_option_line("wave_overhang_minimum_width");
+        optgroup->append_single_option_line("wave_overhang_min_new_area");
+        optgroup->append_single_option_line("wave_overhang_flow_mm3_per_mm");
+        // corner reinforcement: master toggle, then the three tunables it reveals
+        optgroup->append_single_option_line("wave_overhang_corner_taper_enable");
+        optgroup->append_single_option_line("wave_overhang_line_spacing_corner");
+        optgroup->append_single_option_line("wave_overhang_corner_taper_distance");
+        optgroup->append_single_option_line("wave_overhang_corner_angle_threshold");
+
+        optgroup = page->new_optgroup(L("Wave overhang floor"), L"param_overhang");
+        optgroup->append_single_option_line("wave_overhang_floor_layers");
+        optgroup->append_single_option_line("wave_overhang_floor_use_hilbert");
+        optgroup->append_single_option_line("wave_overhang_floor_hilbert_layers");
+        optgroup->append_single_option_line("wave_overhang_floor_hilbert_density");
+
+        // Process presets have no cooling page (fans are filament settings), so the wave's own
+        // cooling and temperature overrides stay beside the feature.
+        optgroup = page->new_optgroup(L("Wave overhang cooling"), L"param_cooling");
+        optgroup->append_single_option_line("wave_overhang_fan_speed");
+        optgroup->append_single_option_line("wave_overhang_aux_fan_speed");
+        optgroup->append_single_option_line("wave_overhang_floor_fan_speed");
+        optgroup->append_single_option_line("wave_overhang_floor_aux_fan_speed");
+        optgroup->append_single_option_line("wave_overhang_nozzle_temp");
+        optgroup->append_single_option_line("wave_overhang_min_wave_time");
+        optgroup->append_single_option_line("wave_overhang_min_layer_time");
+
     page = add_options_page(L("Strength"), "custom-gcode_strength"); // ORCA: icon only visible on placeholders
         optgroup = page->new_optgroup(L("Walls"), L"param_wall");
         optgroup->append_single_option_line("wall_loops", "strength_settings_walls#wall-loops");
@@ -2820,7 +2875,45 @@ void TabPrint::build()
         optgroup->append_single_option_line("sparse_infill_density", "strength_settings_infill#sparse-infill-density");
         optgroup->append_single_option_line("fill_multiline", "strength_settings_infill#fill-multiline");
         optgroup->append_single_option_line("sparse_infill_pattern", "strength_settings_infill#sparse-infill-pattern");
+        // Browse buttons for the file-path options, on full-width widget lines keyed
+        // "browse_<option>" so ConfigManipulation can show them with their pattern. A group drawn
+        // by the custom line control lays widget lines out after all of its option lines, so the
+        // Infill group ends right after the pattern combo (the buttons land directly under it)
+        // and the remaining infill options continue in an untitled group below.
+        auto append_browse_line = [this, optgroup](const std::string &opt_key, const wxString &label, const wxString &wildcard) {
+            Line line = Line{ "", "" };
+            line.full_width = 1;
+            line.widget_key = "browse_" + opt_key;
+            line.append_widget([this, opt_key, label, wildcard](wxWindow *parent) {
+                auto *btn = new ScalableButton(parent, wxID_ANY, "", label,
+                                               wxDefaultSize, wxDefaultPosition, wxBU_LEFT | wxBU_EXACTFIT, true);
+                btn->SetFont(wxGetApp().normal_font());
+                btn->Bind(wxEVT_BUTTON, [this, opt_key, wildcard, parent](wxCommandEvent &) {
+                    wxFileDialog dlg(parent, _L("Choose a file"), "", "", wildcard, wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+                    if (dlg.ShowModal() != wxID_OK)
+                        return;
+                    // The text field takes a wxString, the config setter a std::string.
+                    const std::string path = into_u8(dlg.GetPath());
+                    if (Field *field = this->get_field(opt_key); field != nullptr)
+                        field->set_value(wxString::FromUTF8(path), false);
+                    this->load_key_value(opt_key, path);
+                });
+                auto *sizer = new wxBoxSizer(wxHORIZONTAL);
+                sizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
+                sizer->AddStretchSpacer(1);
+                return sizer;
+            });
+            optgroup->append_line(line);
+        };
+        append_browse_line("sparse_infill_svg_path", _L("Browse for SVG file..."), _L("SVG files") + " (*.svg)|*.svg;*.SVG");
+        append_browse_line("infill_mesh_path", _L("Browse for infill mesh file..."), _L("Mesh files") + " (*.stl;*.obj;*.3mf)|*.stl;*.STL;*.obj;*.OBJ;*.3mf;*.3MF");
+        optgroup = page->new_optgroup("");
         optgroup->append_single_option_line("gyroid_optimized", "strength_settings_patterns#gyroid-optimized");
+        optgroup->append_single_option_line("sparse_infill_svg_path", "strength_settings_patterns#svg");
+        optgroup->append_single_option_line("sparse_infill_svg_scale", "strength_settings_patterns#svg");
+        optgroup->append_single_option_line("sparse_infill_single_wall", "strength_settings_patterns#svg");
+        optgroup->append_single_option_line("infill_mesh_path", "strength_settings_patterns#infill-mesh");
+        optgroup->append_single_option_line("infill_mesh_global_orientation", "strength_settings_patterns#infill-mesh");
         optgroup->append_single_option_line("sparse_infill_smooth_factor", "strength_settings_infill#sparse-infill-smooth-factor");
         optgroup->append_single_option_line("infill_direction", "strength_settings_infill#direction");
         optgroup->append_single_option_line("sparse_infill_rotate_template", "strength_settings_infill_rotation_template_metalanguage");
@@ -2866,6 +2959,20 @@ void TabPrint::build()
         optgroup->append_single_option_line("initial_layer_infill_speed", "speed_settings_initial_layer_speed#initial-layer-infill", 0);
         optgroup->append_single_option_line("initial_layer_travel_speed", "speed_settings_initial_layer_speed#initial-layer-travel-speed", 0);
         optgroup->append_single_option_line("slow_down_layers", "speed_settings_initial_layer_speed#number-of-slow-layers");
+        // BELT_MOD -- layers laid on already-printed plastic (cut-plane segments on their parent).
+        // Shown only while the printer has non-planar printing enabled (or in developer mode), see
+        // TabPrint::toggle_options. The explanation lives in the heading's tooltip, not in the sidebar.
+        optgroup = page->new_optgroup(L("Multiplanar cut plane settings"), L"param_speed_first", 15);
+        optgroup->title_tooltip = _L("When an object is split by cut planes, each segment's first layers are laid on the "
+                                     "printed cut face of the segment below rather than on the build plate. These settings "
+                                     "give those layers their own fan, speed and flow, so bonding to plastic is not treated "
+                                     "like a first layer on the bed. They only apply to printers with non-planar printing "
+                                     "enabled.");
+        optgroup->append_single_option_line("object_contact_layers");
+        optgroup->append_single_option_line("object_contact_fan_mode");
+        optgroup->append_single_option_line("object_contact_fan_speed");
+        optgroup->append_single_option_line("object_contact_speed");
+        optgroup->append_single_option_line("object_contact_flow_ratio");
         optgroup = page->new_optgroup(L("Other layers speed"), L"param_speed", 15);
         optgroup->append_single_option_line("outer_wall_speed", "speed_settings_other_layers_speed#outer-wall", 0);
         optgroup->append_single_option_line("inner_wall_speed", "speed_settings_other_layers_speed#inner-wall", 0);
@@ -2896,6 +3003,15 @@ void TabPrint::build()
         line.append_option(optgroup->get_option("bridge_speed", 0));
         line.append_option(optgroup->get_option("internal_bridge_speed", 0));
         optgroup->append_line(line);
+
+        optgroup = page->new_optgroup(L("Wave overhang speed"), L"param_overhang_speed", 15);
+        optgroup->append_single_option_line("wave_overhang_print_speed");
+        optgroup->append_single_option_line("wave_overhang_perimeter_speed");
+        optgroup->append_single_option_line("wave_overhang_floor_print_speed");
+        optgroup->append_single_option_line("wave_overhang_floor_perimeter_speed");
+        optgroup->append_single_option_line("wave_overhang_floor_speed_ramp");
+        optgroup->append_single_option_line("wave_overhang_travel_speed");
+        optgroup->append_single_option_line("wave_overhang_end_retract_length");
 
         optgroup = page->new_optgroup(L("Travel speed"), L"param_travel_speed", 15);
         optgroup->append_single_option_line("travel_speed", "speed_settings_travel", 0);
@@ -2937,6 +3053,12 @@ void TabPrint::build()
         optgroup->append_single_option_line("enable_support", "support_settings_support");
         optgroup->append_single_option_line("support_type", "support_settings_support#type");
         optgroup->append_single_option_line("support_style", "support_settings_support#style");
+        // UNLAYERED_MOD -- support direction (lean), see Support/SupportDirection.hpp.
+        optgroup->append_single_option_line("support_direction", "support_settings_support#direction");
+        optgroup->append_single_option_line("support_direction_b", "support_settings_support#direction");
+        optgroup->append_single_option_line("support_direction_c", "support_settings_support#direction");
+        optgroup->append_single_option_line("support_direction_max_lean", "support_settings_support#direction");
+        optgroup->append_single_option_line("support_section_overlap", "support_settings_support#section-overlap");
         optgroup->append_single_option_line("support_threshold_angle", "support_settings_support#threshold-angle");
         optgroup->append_single_option_line("support_threshold_overlap", "support_settings_support#threshold-overlap");
         optgroup->append_single_option_line("raft_first_layer_density", "support_settings_support#initial-layer-density");
@@ -2944,6 +3066,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("support_on_build_plate_only", "support_settings_support#on-build-plate-only");
         optgroup->append_single_option_line("support_critical_regions_only", "support_settings_support#support-critical-regions-only");
         optgroup->append_single_option_line("support_remove_small_overhang", "support_settings_support#ignore-small-overhangs");
+        optgroup->append_single_option_line("support_remaining_areas_after_wave_overhangs");
         //optgroup->append_single_option_line("enforce_support_layers", "support_settings_support");
 
         optgroup = page->new_optgroup(L("Raft"), L"param_raft");
@@ -3008,6 +3131,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("enable_tower_interface_cooldown_during_tower", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_enable_framework", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_width", "multimaterial_settings_prime_tower#width");
+        optgroup->append_single_option_line("belt_purge_tower_width");   // BELT_MOD
         optgroup->append_single_option_line("prime_volume", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_brim_width", "multimaterial_settings_prime_tower#brim-width");
         optgroup->append_single_option_line("prime_tower_infill_gap", "multimaterial_settings_prime_tower");
@@ -3074,6 +3198,8 @@ page = add_options_page(L("Others"), "custom-gcode_other"); // ORCA: icon only v
         optgroup = page->new_optgroup(L("Brim"), L"param_adhension");
         optgroup->append_single_option_line("brim_type", "others_settings_brim#type");
         optgroup->append_single_option_line("brim_width", "others_settings_brim#width");
+        optgroup->append_single_option_line("leading_brim_length");   // BELT_MOD
+        optgroup->append_single_option_line("extra_brim_width");      // BELT_MOD
         optgroup->append_single_option_line("brim_object_gap", "others_settings_brim#brim-object-gap");
         optgroup->append_single_option_line("brim_flow_ratio", "others_settings_brim#brim-flow-ratio");
         optgroup->append_single_option_line("brim_use_efc_outline", "others_settings_brim#brim-use-efc-outline");
@@ -3116,6 +3242,7 @@ page = add_options_page(L("Others"), "custom-gcode_other"); // ORCA: icon only v
         optgroup->append_single_option_line("gcode_comments", "others_settings_g_code_output#verbose-g-code");
         optgroup->append_single_option_line("gcode_label_objects", "others_settings_g_code_output#label-objects");
         optgroup->append_single_option_line("exclude_object", "others_settings_g_code_output#exclude-objects");
+        optgroup->append_single_option_line("wave_overhang_debug_gcode");
 
         option = optgroup->get_option("filename_format");
         // option.opt.full_width = true;
@@ -3199,6 +3326,77 @@ void TabPrint::update_description_lines()
 
 }
 
+// Tile the art of the current SVG pattern over the current plate at the scale it will print and
+// hand it to the 3D view as an overlay, while the Strength page (the one with the SVG settings)
+// is the active page and an SVG pattern is selected; otherwise clear the overlay.
+void TabPrint::update_svg_infill_preview()
+{
+    Plater *plater = wxGetApp().plater();
+    if (plater == nullptr)
+        return;
+    const bool svg_page = m_active_page != nullptr && m_active_page->get_field("sparse_infill_svg_scale") != nullptr;
+    const InfillPattern pattern = m_config->opt_enum<InfillPattern>("sparse_infill_pattern");
+    const bool svg_art = pattern == ipSvg || pattern == ipCatfill || pattern == ipSharkfill || pattern == ipPuppyfill;
+    if (! svg_page || ! svg_art || m_config->option<ConfigOptionPercent>("sparse_infill_density")->value <= 0.) {
+        if (! m_svg_infill_preview_key.empty()) {
+            m_svg_infill_preview_key.clear();
+            plater->set_svg_infill_preview(Polylines());
+        }
+        return;
+    }
+    const std::string svg_path      = m_config->opt_string("sparse_infill_svg_path");
+    const double      density       = 0.01 * m_config->option<ConfigOptionPercent>("sparse_infill_density")->value;
+    const double      scale_percent = m_config->option<ConfigOptionPercent>("sparse_infill_svg_scale")->value;
+    const bool        single_wall   = m_config->opt_bool("sparse_infill_single_wall");
+    const double      direction     = m_config->opt_float("infill_direction");
+    const double      layer_height  = m_config->opt_float("layer_height");
+    const auto       &printer_cfg   = m_preset_bundle->printers.get_edited_preset().config;
+    const auto       *nozzles       = printer_cfg.option<ConfigOptionFloats>("nozzle_diameter");
+    const double      nozzle        = nozzles != nullptr && ! nozzles->values.empty() ? nozzles->values.front() : 0.4;
+    const double      spacing       = Flow::new_from_config_width(frInfill,
+        *m_config->option<ConfigOptionFloatOrPercent>("sparse_infill_line_width"), float(nozzle), float(layer_height)).spacing();
+    const BoundingBoxf3 plate = plater->get_partplate_list().get_curr_plate()->get_bounding_box();
+
+    std::shared_ptr<const SvgInfillTile> tile = FillSvg::tile_for(pattern, svg_path);
+    char key_buf[320];
+    std::snprintf(key_buf, sizeof(key_buf), "%d|%.6g|%.6g|%d|%.6g|%.6g|%p|%.6g,%.6g,%.6g,%.6g", int(pattern), density, scale_percent,
+                  int(single_wall), spacing, direction, static_cast<const void *>(tile.get()),
+                  plate.min.x(), plate.min.y(), plate.max.x(), plate.max.y());
+    const std::string key = std::string(key_buf) + "|" + svg_path;
+    if (key == m_svg_infill_preview_key)
+        return;
+    m_svg_infill_preview_key = key;
+
+    Polylines preview;
+    if (tile != nullptr && ! tile->empty()) {
+        double scale = FillSvg::tile_scale(*tile, density, spacing, scale_percent);
+        const double single_wall_width = single_wall ? FillSvg::kSingleWallMaxWidths * spacing : 0.;
+        const FillSvg::Art *art = &FillSvg::art(tile, scale, single_wall_width);
+        if (single_wall && scale_percent <= 0.) {
+            scale = FillSvg::tile_scale(*tile, density, spacing, 0., art->length_mm());
+            art   = &FillSvg::art(tile, scale, single_wall_width);
+        }
+        // Stamp over the plate in a frame rotated by the infill direction about the plate
+        // center, then rotate back, and keep what falls on the plate.
+        const Point  center = Point::new_scale(0.5 * (plate.min.x() + plate.max.x()), 0.5 * (plate.min.y() + plate.max.y()));
+        const double angle  = Geometry::deg2rad(direction);
+        Polygon plate_box({ Point::new_scale(plate.min.x(), plate.min.y()), Point::new_scale(plate.max.x(), plate.min.y()),
+                            Point::new_scale(plate.max.x(), plate.max.y()), Point::new_scale(plate.min.x(), plate.max.y()) });
+        Polygon rotated_box = plate_box;
+        rotated_box.rotate(-angle, center);
+        Polygons  loops;
+        Polylines lines;
+        FillSvg::stamp(*art, tile->size, scale, rotated_box.bounding_box(), loops, lines);
+        for (Polygon &poly : loops)
+            poly.rotate(angle, center);
+        for (Polyline &pl : lines)
+            pl.rotate(angle, center);
+        preview = intersection_pl(loops, Polygons{ plate_box });
+        append(preview, intersection_pl(lines, plate_box));
+    }
+    plater->set_svg_infill_preview(preview);
+}
+
 void TabPrint::toggle_options()
 {
     if (!m_active_page) return;
@@ -3209,6 +3407,22 @@ void TabPrint::toggle_options()
     }
 
     m_config_manipulation.toggle_print_fff_options(m_config, int(intptr_t(m_extruder_switch->GetClientData())), m_type < Preset::TYPE_COUNT);
+    update_svg_infill_preview();
+
+    // BELT_MOD -- the cut-plane contact group means nothing to a planar printer; keep it out of the
+    // way unless the printer has non-planar printing enabled or the user is in developer mode.
+    // Hiding every option line hides the group, heading included.
+    {
+        const DynamicPrintConfig &printer = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        const auto *nonplanar = printer.option<ConfigOptionBool>("enable_nonplanar");
+        const bool show = wxGetApp().get_mode() == comDevelop || (nonplanar != nullptr && nonplanar->value);
+        for (auto opt : {"object_contact_layers", "object_contact_fan_mode", "object_contact_fan_speed",
+                         "object_contact_speed", "object_contact_flow_ratio"})
+            toggle_line(opt, show);
+        // The belt slicing angle only exists on a belt printer.
+        const auto *belt = printer.option<ConfigOptionBool>("belt_printer");
+        toggle_line("belt_slice_rotation_angle", belt != nullptr && belt->value);
+    }
 
     Field *field = m_active_page->get_field("support_style");
     auto   support_type = m_config->opt_enum<SupportType>("support_type");
@@ -5487,10 +5701,47 @@ PageShp TabPrinter::build_kinematics_page()
     optgroup->append_single_option_line("nonplanar_nozzle_to_b_axis", "printer_motion_ability#non-planar-printing");
     // Hotend model for the post-slice collision check.
     optgroup->append_single_option_line("nonplanar_hotend_cone_height", "printer_motion_ability#non-planar-printing");
-    optgroup->append_single_option_line("nonplanar_hotend_cone_angle", "printer_motion_ability#non-planar-printing");
+    // Four sides, because a real toolhead is not round (HotendEnvelope, PrintConfig.hpp).
+    optgroup->append_single_option_line("nonplanar_hotend_angle_xpos", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_hotend_angle_xneg", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_hotend_angle_ypos", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_hotend_angle_yneg", "printer_motion_ability#non-planar-printing");
     // Virtual-only safety limits; hidden unless Printer type = Virtual (see toggle_line below).
+    // The gantry height comes first because it switches on the gantry term of the derived tilt
+    // limit; with it unset only the hotend envelope above and the two below limit the tilt.
+    optgroup->append_single_option_line("nonplanar_gantry_height", "printer_motion_ability#non-planar-printing");
     optgroup->append_single_option_line("nonplanar_virtual_max_angle", "printer_motion_ability#non-planar-printing");
     optgroup->append_single_option_line("nonplanar_virtual_max_z", "printer_motion_ability#non-planar-printing");
+    // What the geometry above actually works out to, so the limit that stops a cut-plane drag is
+    // legible here rather than only discoverable by hitting it. Refreshed in update_description_lines().
+    {
+        Line tilt_line = Line{ "", "" };
+        tilt_line.full_width = 1;
+        tilt_line.widget = [this](wxWindow* parent) {
+            return description_line_widget(parent, &m_virtual_tilt_limit_description_line);
+        };
+        optgroup->append_line(tilt_line);
+    }
+
+    // BELT_MOD -- belt printer section. "Enable belt printing" shows/hides the rest, like the
+    // non-planar master toggle above.
+    optgroup = page->new_optgroup(L("Belt printer"), "param_printable_space");
+    optgroup->append_single_option_line("belt_printer");
+    optgroup->append_single_option_line("belt_slice_rotation");
+    optgroup->append_single_option_line("belt_frame_tilt_angle");
+    optgroup->append_single_option_line("belt_slice_angle_tolerance");
+    optgroup->append_single_option_line("belt_printer_infinite_y");
+    {
+        Line line = { L("G-code axis remap"), L("Which bed-frame axis each emitted X/Y/Z word carries. The usual belt convention maps Y to +Z (tilted gantry) and Z to +Y (belt feed).") };
+        line.append_option(optgroup->get_option("gcode_remap_x"));
+        line.append_option(optgroup->get_option("gcode_remap_y"));
+        line.append_option(optgroup->get_option("gcode_remap_z"));
+        optgroup->append_line(line);
+    }
+    optgroup->append_single_option_line("belt_initial_temperature_length");
+    optgroup->append_single_option_line("first_layer_plane");
+    optgroup->append_single_option_line("first_layer_plane_offset");
+    optgroup->append_single_option_line("first_layer_plane_thickness");
 
     optgroup = page->new_optgroup(L("Advanced"), "param_advanced");
     optgroup->append_single_option_line("emit_machine_limits_to_gcode", "printer_motion_ability#emit-limits-to-g-code");
@@ -5696,6 +5947,10 @@ if (is_marlin_flavor)
         optgroup->append_single_option_line("tool_change_on_wipe_tower", "printer_multimaterial_wipe_tower#tool-change-on-wipe-tower");
         optgroup->append_single_option_line("wait_for_temp_on_wipe_tower", "printer_multimaterial_wipe_tower#wait-for-temperature-on-wipe-tower");
 
+
+        // BELT_MOD -- the belt replacement for the wipe tower; shown only for belt printers.
+        optgroup = page->new_optgroup(L("Belt purge tower"), "param_tower");
+        optgroup->append_single_option_line("enable_belt_purge_tower");
 
         optgroup = page->new_optgroup(L("Single extruder multi-material parameters"), "param_settings");
         optgroup->append_single_option_line("cooling_tube_retraction", "printer_multimaterial_semm_parameters#cooling-tube-position");
@@ -6023,6 +6278,21 @@ void TabPrinter::clear_pages()
 {
     Tab::clear_pages();
     m_reset_to_filament_color = nullptr;
+    // The widget is destroyed with the page; keeping the pointer would dangle on the next update.
+    m_virtual_tilt_limit_description_line = nullptr;
+}
+
+// UNLAYERED_MOD -- keep the derived tilt-limit line in step with the geometry it is derived from.
+// Runs on page activation and after a value change, which is exactly when the numbers can move.
+void TabPrinter::update_description_lines()
+{
+    Tab::update_description_lines();
+
+    if (m_active_page == nullptr || m_active_page->title() != "Motion ability" ||
+        m_virtual_tilt_limit_description_line == nullptr)
+        return;
+    m_virtual_tilt_limit_description_line->SetText(
+        from_u8(PresetHints::virtual_tilt_limit_explanation(*m_config)));
 }
 
 std::vector<InputShaperType> input_shaper_types_for_flavor(GCodeFlavor flavor)
@@ -6190,8 +6460,11 @@ void TabPrinter::toggle_options()
     }
 
     if (m_active_page->title() == L("Multimaterial")) {
+        // BELT_MOD -- a belt printer gets the purge prism instead of the classic wipe tower.
+        const bool is_belt_printer = m_config->opt_bool("belt_printer");
+        toggle_line("enable_belt_purge_tower", is_belt_printer);
         const bool supports_wipe_tower_2 = !is_BBL_printer && m_config->opt_enum<WipeTowerType>("wipe_tower_type") == WipeTowerType::Type2;
-        toggle_line("wipe_tower_type", !is_BBL_printer);
+        toggle_line("wipe_tower_type", !is_BBL_printer && !is_belt_printer);
         // SoftFever: hide specific settings for BBL printer
         for (auto el : {
                  "enable_filament_ramming",
@@ -6315,6 +6588,35 @@ void TabPrinter::toggle_options()
         // rest of the section (toggle_line, not toggle_option), per design feedback. This
         // includes "virtual 5-axis" -- it only makes sense while non-planar printing is on.
         bool enable_nonplanar = m_config->opt_bool("enable_nonplanar");
+        // BELT_MOD -- belt section: the master toggle shows/hides the rest.
+        {
+            const bool belt = m_config->opt_bool("belt_printer");
+            for (auto opt : {"belt_slice_rotation", "belt_frame_tilt_angle", "belt_slice_angle_tolerance",
+                             "belt_printer_infinite_y", "gcode_remap_x", "belt_initial_temperature_length"})
+                toggle_line(opt, belt);
+            // Only a gantry tilted about X (the belt feeding along Y) is a supported machine; the
+            // other tilt axes stay a developer-mode experiment.
+            if (Field *field = m_active_page->get_field("belt_slice_rotation"); auto choice = dynamic_cast<Choice*>(field)) {
+                auto def = print_config_def.get("belt_slice_rotation");
+                std::vector<int> enum_set_all = { int(BeltRotationAxis::None), int(BeltRotationAxis::X), int(BeltRotationAxis::Y), int(BeltRotationAxis::Z) };
+                std::vector<int> enum_set_x   = { int(BeltRotationAxis::X) };
+                auto &set = wxGetApp().get_mode() == comDevelop ? enum_set_all : enum_set_x;
+                auto &opt = const_cast<ConfigOptionDef &>(field->m_opt);
+                auto  cb  = dynamic_cast<ComboBox *>(choice->window);
+                if (int(opt.enum_values.size()) != int(set.size())) {
+                    auto n = cb->GetValue();
+                    opt.enum_values.clear();
+                    opt.enum_labels.clear();
+                    cb->Clear();
+                    for (auto i : set) {
+                        opt.enum_values.push_back(def->enum_values[i]);
+                        opt.enum_labels.push_back(def->enum_labels[i]);
+                        cb->Append(_(def->enum_labels[i]));
+                    }
+                    cb->SetValue(n);
+                }
+            }
+        }
         // Each axis's min/max/continuous share one Line, so toggling that line by any one
         // of its options hides/shows the whole row. Iterate the 3 axis-line anchors, the two
         // standalone lines, the 3 build-volume lines and the 3 inter-chunk travel lines rather
@@ -6322,7 +6624,10 @@ void TabPrinter::toggle_options()
         for (auto opt : {"axis_selection",
                          "axis_a_rotation_min", "axis_b_rotation_min", "axis_c_rotation_min",
                          "nonplanar_departure_distance", "nonplanar_approach_distance",
-                         "nonplanar_nozzle_to_b_axis", "nonplanar_hotend_cone_height", "nonplanar_hotend_cone_angle",
+                         "nonplanar_nozzle_to_b_axis", "nonplanar_hotend_cone_height",
+                         "nonplanar_hotend_angle_xpos", "nonplanar_hotend_angle_xneg",
+                         "nonplanar_hotend_angle_ypos", "nonplanar_hotend_angle_yneg",
+                         "nonplanar_gantry_height",
                          "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"})
             toggle_line(opt, enable_nonplanar);
 
@@ -6335,8 +6640,12 @@ void TabPrinter::toggle_options()
             // Virtual drives no rotary axis at all, so axis_{a,b,c}_active are all false and the
             // whole per-axis block greys out on its own. Its two limits take their place.
             const bool is_virtual = sel == AxisSelection::Virtual;
-            for (auto opt : {"nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"})
+            for (auto opt : {"nonplanar_gantry_height", "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"})
                 toggle_line(opt, is_virtual);
+            // The derived-limit line follows them: it has nothing to say for a real 5-axis machine,
+            // where the nozzle tilts with the plane and this whole model does not apply.
+            if (m_virtual_tilt_limit_description_line != nullptr)
+                m_virtual_tilt_limit_description_line->Show(is_virtual);
             // Grey what the selected printer type never reads, so the panel stops implying that
             // every box matters. Virtual keeps the nozzle upright and the transition explicitly
             // drops the B-arm term ("there is no arm to swing", GCode.cpp), so the arm length is
@@ -7424,8 +7733,11 @@ bool Tab::tree_sel_change_delayed(wxCommandEvent& event)
 
 void Tab::OnKeyDown(wxKeyEvent& event)
 {
-    if (event.GetKeyCode() == WXK_TAB)
+    if (event.GetKeyCode() == WXK_TAB) {
+        // The strip is one stop like any other control: Tab moves on to the page's first
+        // field, Shift+Tab back to the preset row (wxWANTS_CHARS keeps GTK from doing it).
         m_tabctrl->Navigate(event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward);
+    }
     else
         event.Skip();
 }

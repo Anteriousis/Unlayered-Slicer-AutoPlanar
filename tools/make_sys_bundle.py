@@ -18,6 +18,13 @@ Usage:
       --filaments path/to/filaments
       --notes-file CHANGES.md
       --include-machine-specific     # heightmap.csv and friends, normally left out
+      --min-firmware 3.7.0-beta.1+unlayered.15
+
+minFirmware, the oldest board firmware the files work on, is ENFORCED by the slicer: it refuses
+to install onto an older board, because a config.g using a command that firmware does not know
+stops at that line and the printer comes up with no heaters, fans or tool. Without
+--min-firmware it is worked out from the files: sys/config.g's own `var fwNeed = N` (the same
+number its first-boot firmware install tests), or +unlayered.12 for any M558 P12.
 
 Then attach the zip to a release in the configuration repository. Without a manifest the updater
 still works - it falls back to the release tag for the version and installs everything in the zip
@@ -30,6 +37,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import sys
 import zipfile
 
@@ -58,6 +66,16 @@ MACHINE_SPECIFIC = (
     "printerstats.json", "eventlog.txt", "piezolog.csv",
     # Written by the Duet configurator and by DWC to describe one installation.
     "configtool.json", "dwc-plugins.json",
+    # The ship card's OVERLAYS: files config.g loads over its own defaults, written on the machine
+    # by the panels, the setup wizard and calibration. Installing a copy would hand this machine
+    # another one's plate offsets, name, network, probe polarity or measured tilt - or mark it as
+    # set up when it never was. The printer's sys/factoryreset.g carries the full list.
+    "plates.g", "machinename.g", "panelnet.g", "display.g", "setupdone.g", "piezopol.g",
+    "callast.g", "cdefl.g", "filaments.csv", "panelfw.g", "fwflash.g",
+    # Describes the 4.3in panel image in THAT card's 0:/firmware (build.py generates it from the
+    # .bin). Installed onto another card it names an image that card may not hold, and daemon.g
+    # then pushes whatever panel binary is actually there - possibly an older one.
+    "panelimage.g",
 )
 
 
@@ -98,6 +116,33 @@ def collect(root_dir, card_root, include_machine_specific, skipped):
     return out
 
 
+def fork_number(version):
+    """N of '...+unlayered.N', or -1."""
+    m = re.search(r"\+unlayered\.(\d+)", version or "")
+    return int(m.group(1)) if m else -1
+
+
+def infer_min_firmware(files):
+    """The same rule as the slicer's sys_required_firmware(), plus config.g's declared fwNeed.
+    Returns (version, reason) or ("", "")."""
+    best, why = -1, ""
+    for card_path, abs_path in files:
+        with open(abs_path, "rb") as f:
+            data = f.read()
+        if b"\0" in data:
+            continue
+        for line in data.decode("utf-8", "replace").splitlines():
+            code = line.split(";", 1)[0].strip()
+            words = code.split()
+            if card_path == "sys/config.g":
+                m = re.match(r"var\s+fwNeed\s*=\s*(\d+)\s*$", code)
+                if m and int(m.group(1)) > best:
+                    best, why = int(m.group(1)), "sys/config.g declares fwNeed"
+            if words and words[0].upper() == "M558" and any(w.upper() == "P12" for w in words[1:]) and best < 12:
+                best, why = 12, "%s uses M558 P12, the differential Z probe" % card_path
+    return ("+unlayered.%d" % best, why) if best >= 0 else ("", "")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sys", help="Folder to install as 0:/sys")
@@ -110,6 +155,7 @@ def main():
     ap.add_argument("--notes-file", help="Read the notes from a file")
     ap.add_argument("--include-machine-specific", action="store_true",
                     help="Include heightmap.csv, config-override.g and the like")
+    ap.add_argument("--min-firmware", help="Oldest board firmware these files work on; inferred from the files when omitted")
     ap.add_argument("--out", default=os.path.join("dist", "sys.zip"), help="Output zip")
     args = ap.parse_args()
 
@@ -133,6 +179,14 @@ def main():
         with open(args.notes_file, "r", encoding="utf-8", errors="replace") as f:
             notes = f.read()
 
+    inferred, why = infer_min_firmware(files)
+    if args.min_firmware:
+        min_firmware = args.min_firmware
+        if fork_number(inferred) > fork_number(min_firmware):
+            sys.exit("error: --min-firmware %s is older than the files need (%s: %s)" % (min_firmware, inferred, why))
+    else:
+        min_firmware = inferred
+
     manifest = {
         "version": args.version,
         "date": args.date or datetime.date.today().strftime("%Y-%m-%d"),
@@ -140,6 +194,8 @@ def main():
         "notes": notes,
         "files": [{"path": card_path, "sha256": sha256_of(abs_path)} for card_path, abs_path in files],
     }
+    if min_firmware:
+        manifest["minFirmware"] = min_firmware
 
     out_path = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -155,6 +211,10 @@ def main():
 
     print("\nwrote %s" % out_path)
     print("version %s (%s), %d file(s)" % (manifest["version"], manifest["date"], len(files)))
+    if min_firmware:
+        print("minFirmware %s (%s)" % (min_firmware, why if not args.min_firmware else "--min-firmware"))
+    else:
+        print("minFirmware: none - nothing in these files needs a particular firmware")
 
 
 if __name__ == "__main__":

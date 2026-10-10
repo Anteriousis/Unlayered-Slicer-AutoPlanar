@@ -50,13 +50,19 @@ ComboBox::ComboBox(wxWindow *parent,
 
     if (style & wxCB_READONLY) {
         GetTextCtrl()->Hide();
+        // The combo itself is the keyboard stop (keyDown opens the list and moves the selection).
+        // With its entry hidden, wx would otherwise treat it as a container that never takes
+        // focus and it would drop out of the Tab order entirely.
+        m_keyboard_stop = true;
+        SetWindowStyleFlag(GetWindowStyleFlag() | wxWANTS_CHARS);
+        SetCanFocus(true);
         TextInput::SetFont(Label::Body_14);
         TextInput::SetBorderColor(StateColor(std::make_pair(0xDBDBDB, (int) StateColor::Disabled),
             std::make_pair(0x767676, (int) StateColor::Hovered),
             std::make_pair(0xDBDBDB, (int) StateColor::Normal)));
         TextInput::SetBackgroundColor(StateColor(std::make_pair(0xF0F0F1, (int) StateColor::Disabled),
             std::make_pair(0xECECEC, (int) StateColor::Focused), // ORCA updated background color for focused item
-            std::make_pair(*wxWHITE, (int) StateColor::Normal)));
+            std::make_pair(wxColour("#FFFEFF"), (int) StateColor::Normal))); // the input-background theme key
         TextInput::SetLabelColor(StateColor(
             std::make_pair(0x6B6B6B, (int) StateColor::Disabled), // ORCA: Use same color for disabled text on combo boxes
             std::make_pair(0x262E30, (int) StateColor::Normal)));

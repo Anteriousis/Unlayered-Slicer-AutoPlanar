@@ -23,6 +23,8 @@
 #include "GUI_Preview.hpp"
 #include "OpenGLManager.hpp"
 #include "Plater.hpp"
+#include "CameraUtils.hpp"
+#include "FocusRing.hpp"
 #include "MsgDialog.hpp"
 #include "libslic3r/CutPlaneSegmentation.hpp"
 #include "MainFrame.hpp"
@@ -105,6 +107,18 @@ void GLCanvas3D::update_render_colors()
 void GLCanvas3D::load_render_colors()
 {
     RenderColor::colors[RenderCol_3D_Background] = ImGuiWrapper::to_ImVec4(DEFAULT_BG_LIGHT_COLOR);
+}
+
+static std::optional<Slic3r::ColorRGBA> s_bg_override[2]; // [dark theme]
+
+void GLCanvas3D::set_background_color_override(bool dark, const std::optional<Slic3r::ColorRGBA>& color)
+{
+    s_bg_override[dark ? 1 : 0] = color;
+}
+
+Slic3r::ColorRGBA GLCanvas3D::view_background_color(bool dark)
+{
+    return s_bg_override[dark ? 1 : 0].value_or(dark ? DEFAULT_BG_LIGHT_COLOR_DARK : DEFAULT_BG_LIGHT_COLOR);
 }
 
 //static constexpr const float AXES_COLOR[3][3] = { { 1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f } };
@@ -1052,7 +1066,6 @@ wxDEFINE_EVENT(EVT_GLCANVAS_UPDATE_GEOMETRY, Vec3dsEvent<2>);
 wxDEFINE_EVENT(EVT_GLCANVAS_MOUSE_DRAGGING_STARTED, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_MOUSE_DRAGGING_FINISHED, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_UPDATE_BED_SHAPE, SimpleEvent);
-wxDEFINE_EVENT(EVT_GLCANVAS_TAB, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_RESETGIZMOS, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_MOVE_SLIDERS, wxKeyEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_EDIT_COLOR_CHANGE, wxKeyEvent);
@@ -1061,7 +1074,6 @@ wxDEFINE_EVENT(EVT_GLCANVAS_UNDO, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_REDO, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_SWITCH_TO_OBJECT, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_SWITCH_TO_GLOBAL, SimpleEvent);
-wxDEFINE_EVENT(EVT_GLCANVAS_COLLAPSE_SIDEBAR, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_RELOAD_FROM_DISK, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_RENDER_TIMER, wxTimerEvent/*RenderTimerEvent*/);
 wxDEFINE_EVENT(EVT_GLCANVAS_TOOLBAR_HIGHLIGHTER_TIMER, wxTimerEvent);
@@ -1194,7 +1206,6 @@ GLCanvas3D::GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed)
     , m_dynamic_background_enabled(false)
     , m_multisample_allowed(false)
     , m_moving(false)
-    , m_tab_down(false)
     , m_camera_movement(false)
     , m_cursor_type(Standard)
     , m_color_by("volume")
@@ -2086,11 +2097,13 @@ void GLCanvas3D::render(bool only_init)
         _render_sla_slices();
         _render_selection();
         _render_objects(GLVolumeCollection::ERenderType::Transparent, !m_gizmos.is_running());
+        _render_svg_infill_preview(camera.get_view_matrix(), camera.get_projection_matrix());
         // Per-chunk usable build-volume overlay (editor only). Drawn after transparent objects so
         // it blends over geometry.
         // UNLAYERED_MOD: disabled - the translucent blue cylinder was too distracting while working
         // on multiplanar parts. _render_chunk_build_volumes() is intact; uncomment to bring it back.
         //_render_chunk_build_volumes(camera.get_view_matrix(), camera.get_projection_matrix());
+        _render_support_direction_arrows(camera.get_view_matrix(), camera.get_projection_matrix());
         _render_wireframe_overlay();
     }
     /* preview render */
@@ -2882,7 +2895,13 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
             need_wipe_tower |= dynamic_cast<const ConfigOptionBool*>(dconfig.option("enable_wrapping_detection"))->value;
         }
 
-        if (wt && (need_wipe_tower || filaments_count > 1) && !wxGetApp().plater()->only_gcode_mode() && !wxGetApp().plater()->is_gcode_3mf()) {
+        // BELT_MOD -- a belt printer replaces the classic wipe tower with the purge prism, a real
+        // model object, so the tower widget is never drawn there.
+        bool is_belt_printer = false;
+        if (const auto *belt_opt = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionBool>("belt_printer"))
+            is_belt_printer = belt_opt->value;
+
+        if (wt && !is_belt_printer && (need_wipe_tower || filaments_count > 1) && !wxGetApp().plater()->only_gcode_mode() && !wxGetApp().plater()->is_gcode_3mf()) {
             // The tower size estimate reads printer- and filament-scope keys, which the print preset
             // does not carry; built once here rather than per plate.
             const DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
@@ -2950,6 +2969,24 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
     }
 
     update_volumes_colors_by_extruder();
+
+    // BELT_MOD -- render the belt purge prism like a wipe tower: translucent, in its filament
+    // colour, so it reads as a purge tower rather than a part. update_colors_by_extruder() keeps
+    // the alpha when it is not updating alpha, so lowering it once sticks across recolours.
+    if (m_model != nullptr) {
+        for (GLVolume *volume : m_volumes.volumes) {
+            if (volume == nullptr || volume->volume_idx() < 0)
+                continue;
+            const int obj_idx = volume->object_idx();
+            if (obj_idx < 0 || obj_idx >= (int) m_model->objects.size())
+                continue;
+            const ConfigOption *opt = m_model->objects[obj_idx]->config.option("belt_purge_tower_object");
+            if (opt != nullptr && opt->getBool()) {
+                volume->color.a(0.66f);
+                volume->force_transparent = true;
+            }
+        }
+    }
     // The volumes were rebuilt (a new object, a filament change, a plate switch...): re-evaluate
     // whether to offer switching cut chunk colours off on the next frame.
     m_cut_chunk_prompt_check_pending = true;
@@ -3179,6 +3216,7 @@ void GLCanvas3D::bind_event_handlers()
         m_canvas->Bind(wxEVT_PAINT, &GLCanvas3D::on_paint, this);
         m_canvas->Bind(wxEVT_SET_FOCUS, &GLCanvas3D::on_set_focus, this);
         m_canvas->Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent& evt) {
+            _keyboard_tool_clear();
                 ImGui::SetWindowFocus(nullptr);
                 render();
                 evt.Skip();
@@ -3542,6 +3580,17 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
             }
         //case 'B':
         //case 'b': { zoom_to_bed(); break; }
+        case 'B':
+        case 'b': {
+            // BELT_MOD: G-code preview of a belt file -- upright view vs raw machine-frame G-code.
+            if (m_canvas_type == ECanvasType::CanvasPreview && m_gcode_viewer.is_belt_view()) {
+                m_gcode_viewer.toggle_belt_show_designed();
+                if (Plater *plater = wxGetApp().plater())
+                    plater->CallAfter([plater]() { plater->refresh_belt_view(); });
+                m_dirty = true;
+            }
+            break;
+        }
         case 'C':
         case 'c': { wxGetApp().toggle_show_gcode_window(); m_dirty = true; request_extra_frame(); break; }
         //case 'G':
@@ -3741,15 +3790,6 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
                     wxGetApp().plater()->toggle_show_wireframe();
                     m_dirty = true;
                 }
-                else if (m_tab_down && keyCode == WXK_TAB && !evt.HasAnyModifiers()) {
-                    // Enable switching between 3D and Preview with Tab
-                    // m_canvas->HandleAsNavigationKey(evt);   // XXX: Doesn't work in some cases / on Linux
-                    post_event(SimpleEvent(EVT_GLCANVAS_TAB));
-                }
-                else if (keyCode == WXK_TAB && evt.ShiftDown() && !evt.ControlDown() && ! wxGetApp().is_gcode_viewer()) {
-                    // Collapse side-panel with Shift+Tab
-                    post_event(SimpleEvent(EVT_GLCANVAS_COLLAPSE_SIDEBAR));
-                }
                 else if (keyCode == WXK_SHIFT) {
                     translationProcessor.process(evt);
 
@@ -3839,8 +3879,38 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
                 }
             }
             else if (evt.GetEventType() == wxEVT_KEY_DOWN) {
-                m_tab_down = keyCode == WXK_TAB && !evt.HasAnyModifiers();
-                if (keyCode == WXK_SHIFT) {
+                if (m_kbd_tool >= 0 && (keyCode == WXK_RETURN || keyCode == WXK_NUMPAD_ENTER || keyCode == WXK_SPACE)) {
+                    _keyboard_tool_activate();
+                    return;
+                }
+                else if (m_kbd_tool >= 0 && keyCode == WXK_ESCAPE) {
+                    _keyboard_tool_clear();
+                    return;
+                }
+                else if (keyCode == WXK_TAB && !evt.ControlDown()) {
+                    // Tab steps through the toolbar and gizmo icons after the view itself, then
+                    // moves keyboard focus on as in any other control. Ctrl+Tab (main tab
+                    // switching) is taken by MainFrame's char hook before this.
+                    if (!_keyboard_tool_step(evt.ShiftDown() ? -1 : 1))
+                        m_canvas->Navigate(evt.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward);
+                }
+                else if (keyCode == WXK_MENU || (keyCode == WXK_F10 && evt.ShiftDown())) {
+                    // Keyboard equivalent of a right click: the context menu for the selection,
+                    // anchored at its centre, or the empty-space menu when nothing is selected.
+                    const bool empty = m_selection.is_empty();
+                    const Size size  = get_canvas_size();
+                    Vec2d      pos(0.5 * size.get_width(), 0.5 * size.get_height());
+                    if (!empty) {
+                        const Point center = CameraUtils::project(wxGetApp().plater()->get_camera(), m_selection.get_bounding_box().center());
+                        pos = Vec2d(std::clamp(double(center.x()), 0.0, double(size.get_width())),
+                                    std::clamp(double(center.y()), 0.0, double(size.get_height())));
+#if ENABLE_RETINA_GL
+                        pos /= double(m_retina_helper->get_scale_factor());
+#endif
+                    }
+                    post_event(RBtnEvent(EVT_GLCANVAS_RIGHT_CLICK, { pos, empty }));
+                }
+                else if (keyCode == WXK_SHIFT) {
                     translationProcessor.process(evt);
 
                     if (m_picking_enabled /*&& (m_gizmos.get_current_type() != GLGizmosManager::SlaSupports)*/)
@@ -4177,8 +4247,71 @@ void GLCanvas3D::on_gesture(wxGestureEvent &evt)
     m_dirty = true;
 }
 
+// Keyboard access to the toolbar and gizmo icons: Tab steps through them (after the 3D view
+// itself), Enter/Space activates, Esc or the pointer drops the highlight.
+// Gizmo icons Tab can step to: the toolbar ones that are not greyed out right now.
+static std::vector<size_t> keyboard_gizmo_icons(const GLGizmosManager& gizmos)
+{
+    std::vector<size_t> out;
+    if (!gizmos.is_enabled())
+        return out;
+    for (size_t idx : gizmos.get_icon_gizmo_idxs())
+        if (const GLGizmoBase* gizmo = gizmos.get_gizmo(GLGizmosManager::EType(idx)); gizmo != nullptr && gizmo->is_activable())
+            out.push_back(idx);
+    return out;
+}
+
+bool GLCanvas3D::_keyboard_tool_step(int direction)
+{
+    const std::vector<int>    main_ids  = m_main_toolbar.get_keyboard_item_ids();
+    const std::vector<size_t> gizmo_ids = keyboard_gizmo_icons(m_gizmos);
+    const int                 total     = int(main_ids.size() + gizmo_ids.size());
+    const int                 next      = m_kbd_tool + direction;
+    if (next >= total || next < -1) {
+        _keyboard_tool_clear();
+        return false;
+    }
+    m_kbd_tool = next;
+    const bool on_main = m_kbd_tool >= 0 && m_kbd_tool < int(main_ids.size());
+    m_main_toolbar.set_keyboard_hover(on_main ? main_ids[m_kbd_tool] : -1);
+    m_gizmos.set_icon_hover(m_kbd_tool >= int(main_ids.size()) ? GLGizmosManager::EType(gizmo_ids[m_kbd_tool - main_ids.size()]) : GLGizmosManager::Undefined);
+    // The focus ring outlines the whole view; while an icon is highlighted it only distracts.
+    if (m_kbd_tool >= 0)
+        FocusRing::get().hide();
+    else
+        FocusRing::get().on_focus(m_canvas);
+    set_as_dirty();
+    request_extra_frame();
+    return true;
+}
+
+void GLCanvas3D::_keyboard_tool_activate()
+{
+    const std::vector<int>    main_ids  = m_main_toolbar.get_keyboard_item_ids();
+    const std::vector<size_t> gizmo_ids = keyboard_gizmo_icons(m_gizmos);
+    if (m_kbd_tool >= 0 && m_kbd_tool < int(main_ids.size()))
+        m_main_toolbar.force_left_action(main_ids[m_kbd_tool], *this);
+    else if (m_kbd_tool >= int(main_ids.size()) && m_kbd_tool < int(main_ids.size() + gizmo_ids.size()))
+        m_gizmos.open_gizmo(GLGizmosManager::EType(gizmo_ids[m_kbd_tool - main_ids.size()]));
+    set_as_dirty();
+    request_extra_frame();
+}
+
+void GLCanvas3D::_keyboard_tool_clear()
+{
+    if (m_kbd_tool < 0)
+        return;
+    m_kbd_tool = -1;
+    m_main_toolbar.set_keyboard_hover(-1);
+    m_gizmos.set_icon_hover(GLGizmosManager::Undefined);
+    set_as_dirty();
+    request_extra_frame();
+}
+
 void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 {
+    if (m_kbd_tool >= 0 && (evt.Moving() || evt.Dragging() || evt.ButtonDown()))
+        _keyboard_tool_clear();
     if (!m_initialized || !_set_current())
         return;
 
@@ -7941,7 +8074,7 @@ void GLCanvas3D::_render_background()
     // Draws a bottom to top gradient over the complete screen.
     glsafe(::glDisable(GL_DEPTH_TEST));
 
-    ColorRGBA background_color = m_is_dark ? DEFAULT_BG_LIGHT_COLOR_DARK : DEFAULT_BG_LIGHT_COLOR;
+    ColorRGBA background_color = GLCanvas3D::view_background_color(m_is_dark);
     ColorRGBA error_background_color = m_is_dark ? ERROR_BG_LIGHT_COLOR_DARK : ERROR_BG_LIGHT_COLOR;
     const ColorRGBA bottom_color = use_error_color ? error_background_color : background_color;
 
@@ -7976,6 +8109,54 @@ void GLCanvas3D::_render_background()
     }
 
     glsafe(::glEnable(GL_DEPTH_TEST));
+}
+
+void GLCanvas3D::set_svg_infill_preview(const Polylines& lines, double z)
+{
+    m_svg_infill_preview.reset();
+    GLModel::Geometry geometry;
+    geometry.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+    size_t n_vertices = 0;
+    for (const Polyline &pl : lines)
+        n_vertices += pl.points.size();
+    geometry.reserve_vertices(n_vertices);
+    geometry.reserve_indices(2 * n_vertices);
+    unsigned int id = 0;
+    for (const Polyline &pl : lines) {
+        if (pl.points.size() < 2)
+            continue;
+        const unsigned int first = id;
+        for (const Point &p : pl.points) {
+            geometry.add_vertex(Vec3f(float(unscaled<double>(p.x())), float(unscaled<double>(p.y())), float(z)));
+            if (id > first)
+                geometry.add_line(id - 1, id);
+            ++ id;
+        }
+    }
+    if (id > 0)
+        m_svg_infill_preview.init_from(std::move(geometry));
+    set_as_dirty();
+    request_extra_frame();
+}
+
+void GLCanvas3D::_render_svg_infill_preview(const Transform3d& view_matrix, const Transform3d& projection_matrix)
+{
+    if (! m_svg_infill_preview.is_initialized())
+        return;
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+    shader->start_using();
+    shader->set_uniform("view_model_matrix", view_matrix);
+    shader->set_uniform("projection_matrix", projection_matrix);
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glLineWidth(1.5f));
+    m_svg_infill_preview.set_color(ColorRGBA(0.92f, 0.47f, 0.78f, 0.9f)); // sparse infill's preview pink
+    m_svg_infill_preview.render();
+    glsafe(::glDisable(GL_BLEND));
+    shader->stop_using();
 }
 
 void GLCanvas3D::_render_bed(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_axes)
@@ -8124,6 +8305,86 @@ void GLCanvas3D::_render_chunk_build_volumes(const Transform3d& view_matrix, con
         glsafe(::glEnable(GL_CULL_FACE));
     glsafe(::glDepthMask(prev_depth_mask));
     glsafe(::glDisable(GL_BLEND));
+}
+
+// UNLAYERED_MOD -- support direction arrows, see the declaration.
+void GLCanvas3D::_render_support_direction_arrows(const Transform3d& view_matrix, const Transform3d& projection_matrix)
+{
+    if (m_model == nullptr || m_selection.is_empty())
+        return;
+    const auto* preset_bundle = wxGetApp().preset_bundle;
+    if (preset_bundle == nullptr)
+        return;
+    const DynamicPrintConfig& print_cfg = preset_bundle->prints.get_edited_preset().config;
+
+    // The object's own override wins over the process preset, exactly as the slicer resolves it.
+    auto option = [&print_cfg](const ModelObject& obj, const char* key) -> const ConfigOption* {
+        return obj.config.has(key) ? obj.config.option(key) : print_cfg.option(key);
+    };
+
+    // Collect (instance world box, world direction) first so nothing is set up for an empty pass.
+    std::vector<std::pair<BoundingBoxf3, Vec3d>> arrows;
+    for (const auto& [obj_idx, inst_idxs] : m_selection.get_content()) {
+        if (obj_idx < 0 || obj_idx >= int(m_model->objects.size()))
+            continue;
+        const ModelObject* obj = m_model->objects[obj_idx];
+        if (obj == nullptr)
+            continue;
+        const ConfigOption* enable = option(*obj, "enable_support");
+        const ConfigOption* mode   = option(*obj, "support_direction");
+        if (enable == nullptr || mode == nullptr || ! enable->getBool())
+            continue;
+        Vec3d dir;
+        switch (static_cast<SupportDirection>(mode->getInt())) {
+        case sdVertical: dir = Vec3d::UnitZ(); break;
+        case sdCustom: {
+            const ConfigOption* b = option(*obj, "support_direction_b");
+            const ConfigOption* c = option(*obj, "support_direction_c");
+            dir = Geometry::build_normal_from_bc(b != nullptr ? b->getFloat() : 0., c != nullptr ? c->getFloat() : 0.);
+            break;
+        }
+        default: continue;
+        }
+        if (dir.squaredNorm() < EPSILON)
+            continue;
+        for (int inst_idx : inst_idxs)
+            if (inst_idx >= 0 && size_t(inst_idx) < obj->instances.size())
+                arrows.emplace_back(obj->instance_bounding_box(size_t(inst_idx)), dir.normalized());
+    }
+    if (arrows.empty())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    if (! m_support_direction_arrow.is_initialized()) {
+        // A unit arrow along +Z: shaft from 0 to 0.75, head from 0.75 to 1.
+        const double        fa    = 2. * PI / 24.;
+        indexed_triangle_set arrow = its_make_cylinder(0.03, 0.75, fa);
+        indexed_triangle_set head  = its_make_cone(0.1, 0.25, fa);
+        for (Vec3f& v : head.vertices)
+            v.z() += 0.75f;
+        its_merge(arrow, head);
+        m_support_direction_arrow.init_from(arrow);
+    }
+    if (! m_support_direction_arrow.is_initialized())
+        return;
+    m_support_direction_arrow.set_color(ColorRGBA(1.0f, 0.55f, 0.1f, 1.0f));
+
+    shader->start_using();
+    shader->set_uniform("projection_matrix", projection_matrix);
+    for (const auto& [box, dir] : arrows) {
+        // Start a little above the instance and size the arrow to it, within reason.
+        const double length = std::clamp(0.4 * box.size().maxCoeff(), 10., 40.);
+        const Vec3d  origin = Vec3d(box.center().x(), box.center().y(), box.max.z() + 2.);
+        const Transform3d model = Geometry::translation_transform(origin)
+            * Transform3d(Eigen::Quaterniond::FromTwoVectors(Vec3d::UnitZ(), dir))
+            * Geometry::scale_transform(length);
+        shader->set_uniform("view_model_matrix", view_matrix * model);
+        m_support_direction_arrow.render();
+    }
+    shader->stop_using();
 }
 
 void GLCanvas3D::_render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body, int hover_id, bool render_cali, bool show_grid)
@@ -8998,6 +9259,8 @@ void GLCanvas3D::_render_overlays()
     }
     m_labels.render(sorted_instances);
 
+    _render_bed_mesh_legend();
+
     _render_3d_navigator();
 
     _render_canvas_toolbar();
@@ -9330,7 +9593,9 @@ void GLCanvas3D::_render_imgui_select_plate_toolbar()
     float window_height      = std::min(window_height_calc, window_height_max);
     float window_width       = button_width + (margin_size + button_margin + ImGui::GetStyle().WindowPadding.x) * 2 + (show_scroll ? scrollbar_size : 0);
 
-    ImVec4 window_bg     = m_is_dark ? ImVec4(.13f, .13f, .15f, .5f) : ImVec4(1.f, 1.f, 1.f, .7f);
+    ImVec4 window_bg     = m_is_dark && ImGuiWrapper::COL_WINDOW_BACKGROUND_THEMED // the themed dark window colour, else the shipped strip
+                               ? ImVec4(ImGuiWrapper::COL_WINDOW_BG_DARK.x, ImGuiWrapper::COL_WINDOW_BG_DARK.y, ImGuiWrapper::COL_WINDOW_BG_DARK.z, .5f)
+                               : m_is_dark ? ImVec4(.13f, .13f, .15f, .5f) : ImVec4(1.f, 1.f, 1.f, .7f);
     ImVec4 button_active = ImGuiWrapper::COL_ORCA; // ORCA: Use orca color for selected sliced plate border
     ImVec4 button_hover  = ImVec4(0.67f, 0.67f, 0.67, m_is_dark ? .6f : 1.0f);
     ImVec4 orca_active   = m_is_dark ? ImGuiWrapper::COL_ORCA_DARK       : ImGuiWrapper::COL_ORCA;
@@ -9827,6 +10092,19 @@ void GLCanvas3D::_render_canvas_toolbar()
             ImGui::TextColored(enable ? ImVec4(1,1,1,1) : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled), "%s", into_u8(condition ? ImGui::VisibleIcon : ImGui::HiddenIcon).c_str());
         };
 
+        // BELT_MOD: same state as hotkey B and the legend checkbox.
+        if (m_canvas_type == ECanvasType::CanvasPreview && m_gcode_viewer.is_belt_view()) {
+            create_menu_item( _utf8(L("Show raw machine G-code (belt)")),
+                true,
+                ! m_gcode_viewer.is_belt_show_designed(),
+                [this, p]{
+                    m_gcode_viewer.toggle_belt_show_designed();
+                    p->CallAfter([p]{ p->refresh_belt_view(); });
+                }
+            );
+            ImGui::Separator();
+        }
+
         create_menu_item( _utf8(L("3D Navigator")),
             m_canvas_type != ECanvasType::CanvasAssembleView, // not work on assembly
             wxGetApp().show_3d_navigator(),
@@ -9897,6 +10175,12 @@ void GLCanvas3D::_render_canvas_toolbar()
             m_canvas_type != ECanvasType::CanvasAssembleView, // not work on assembly
             wxGetApp().show_plate_gridlines(),
             []{wxGetApp().toggle_show_plate_gridlines();}
+        );
+
+        create_menu_item( _utf8(L("Bed Mesh")),
+            m_canvas_type != ECanvasType::CanvasAssembleView,
+            wxGetApp().show_bed_mesh(),
+            []{ wxGetApp().plater()->toggle_bed_mesh(); }
         );
 
         ImGui::Separator();
@@ -10290,6 +10574,36 @@ void GLCanvas3D::_render_assemble_control()
         GLVolume::explosion_ratio = m_explosion_ratio;
     }
 }
+void GLCanvas3D::_render_bed_mesh_legend()
+{
+    if (m_canvas_type == ECanvasType::CanvasAssembleView || !wxGetApp().show_bed_mesh())
+        return;
+    BedMeshOverlay& overlay = wxGetApp().plater()->get_partplate_list().bed_mesh_overlay();
+    // The Preview tab's vertical layer slider owns the right edge; sit beside it.
+    float right = float(get_canvas_size().get_width());
+    if (m_canvas_type == ECanvasType::CanvasPreview && m_gcode_viewer.has_data())
+        right -= IMSlider::vertical_slider_window_width() * get_scale();
+    if (!overlay.has_mesh()) {
+        // The toggle persists across sessions but the mesh does not: say so instead of showing
+        // a checked item with nothing on the plate. Fetching is left to the user (View menu).
+        ImGuiWrapper* imgui  = wxGetApp().imgui();
+        const float   margin = 10.0f * get_scale();
+        imgui->set_next_window_pos(right - margin, m_main_toolbar.get_height() + margin, ImGuiCond_Always, 1.0f, 0.0f);
+        ImGuiWrapper::push_common_window_style(get_scale());
+        imgui->begin(_L("Bed Mesh"), ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize);
+        imgui->text(_u8L("No bed mesh loaded. Use View > Reload Bed Mesh from Printer."));
+        imgui->end();
+        ImGuiWrapper::pop_common_window_style();
+        return;
+    }
+    // Coverage is judged against the printable area in printer coordinates, as the mesh is.
+    BoundingBoxf bed;
+    if (const auto* area = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionPoints>("printable_area"))
+        for (const Vec2d& p : area->values)
+            bed.merge(p);
+    overlay.render_legend(bed, right, m_main_toolbar.get_height(), get_scale());
+}
+
 void GLCanvas3D::_render_assemble_info() const
 {
     if (m_canvas_type != ECanvasType::CanvasAssembleView) {
@@ -10707,11 +11021,20 @@ void GLCanvas3D::_set_warning_notification_if_needed(EWarning warning)
         if (wxGetApp().is_editor()) {
             if (current_printer_technology() != ptSLA) {
                 unsigned int max_z_layer = m_gcode_viewer.get_layers_z_range().back();
+                // BELT_MOD: a belt file's layers run along the tilted gantry, so "the last layer's Z"
+                // is the length of the print, not a height. In the upright view the toolpath
+                // bounding box is in the bed frame and its top is the height above the belt, which
+                // is what printable_height limits; the raw machine-frame view cannot be judged.
+                const bool  judgeable = m_gcode_viewer.has_data() && m_gcode_viewer.positions_in_bed_frame();
+                // Only read a Z once there is data: with nothing loaded the layer list is empty.
+                const float max_z     = ! judgeable ? 0.f
+                                      : m_gcode_viewer.is_belt_view() ? float(m_gcode_viewer.get_paths_bounding_box().max.z())
+                                                                      : float(m_gcode_viewer.get_layers_zs()[max_z_layer]);
                 if (warning == EWarning::ToolHeightOutside) // check if max z_layer height exceed max print height
-                    show = m_gcode_viewer.has_data() && (m_gcode_viewer.get_layers_zs()[max_z_layer] - m_gcode_viewer.get_max_print_height() >= 1e-6);
+                    show = judgeable && (max_z - m_gcode_viewer.get_max_print_height() >= 1e-6);
                 else if (warning == EWarning::ToolpathOutside) { // check if max x,y coords exceed bed area
-                    show = m_gcode_viewer.has_data() && !m_gcode_viewer.is_contained_in_bed() &&
-                           (m_gcode_viewer.get_max_print_height() -m_gcode_viewer.get_layers_zs()[max_z_layer] >= 1e-6);
+                    show = judgeable && !m_gcode_viewer.is_contained_in_bed() &&
+                           (m_gcode_viewer.get_max_print_height() - max_z >= 1e-6);
                 }
                 else if (warning == EWarning::GCodeConflict)
                     show = m_gcode_viewer.has_data() && m_gcode_viewer.is_contained_in_bed() && m_gcode_viewer.m_conflict_result.has_value();

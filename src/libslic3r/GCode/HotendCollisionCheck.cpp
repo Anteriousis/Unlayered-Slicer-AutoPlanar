@@ -17,24 +17,6 @@ namespace Slic3r {
 
 namespace {
 
-// Rotation R with R * n == +Z (Rodrigues); identity when n already points up.
-Eigen::Matrix3d rotation_to_z(const Vec3d &axis)
-{
-    const Vec3d n = axis.normalized();
-    const Vec3d z = Vec3d::UnitZ();
-    const Vec3d v = n.cross(z);
-    const double s = v.norm();
-    const double c = n.dot(z);
-    if (s < 1e-12)
-        return c > 0. ? Eigen::Matrix3d::Identity() : Eigen::DiagonalMatrix<double, 3>(1., -1., -1.).toDenseMatrix();
-    const Vec3d k = v / s;
-    Eigen::Matrix3d K;
-    K << 0., -k.z(), k.y(),
-         k.z(), 0., -k.x(),
-        -k.y(), k.x(), 0.;
-    return Eigen::Matrix3d::Identity() + s * K + (1. - c) * (K * K);
-}
-
 struct Sample
 {
     Vec3d        p;        // bed frame
@@ -60,49 +42,57 @@ void sample_segment(const Vec3d &a, const Vec3d &b, double step, unsigned int gc
         out.push_back({a + d * (double(i) / double(n - 1)), gcode_id});
 }
 
-// Octagonal iterated dilation: D[cell] = number of steps until reached from an occupied cell
-// (max_r + 1 = never). Alternating 4- and 8-neighbour steps approximates the Euclidean distance to
-// within ~8%, on the conservative side.
-struct DistanceField
+// Summed-area table of a 0/1 grid: count() is the number of set cells in an inclusive rectangle
+// of cells, in O(1), with out-of-range bounds clipped to the grid.
+struct CellCounts
 {
     int                  nu = 0, nv = 0;
-    std::vector<int16_t> d;
-    int at(int u, int v) const { return (u < 0 || v < 0 || u >= nu || v >= nv) ? INT16_MAX : d[size_t(u) * nv + v]; }
+    std::vector<int32_t> s;   // (nu + 1) x (nv + 1), s[u][v] = set cells in [0, u) x [0, v)
+
+    void build(const std::vector<char> &occ, int nu_, int nv_)
+    {
+        nu = nu_; nv = nv_;
+        s.assign(size_t(nu + 1) * (nv + 1), 0);
+        for (int u = 0; u < nu; ++ u) {
+            int32_t row = 0;
+            for (int v = 0; v < nv; ++ v) {
+                row += occ[size_t(u) * nv + v] ? 1 : 0;
+                s[size_t(u + 1) * (nv + 1) + v + 1] = s[size_t(u) * (nv + 1) + v + 1] + row;
+            }
+        }
+    }
+    int32_t at(int u, int v) const { return s[size_t(u) * (nv + 1) + v]; }
+    int32_t count(int u_lo, int u_hi, int v_lo, int v_hi) const
+    {
+        u_lo = std::max(u_lo, 0); v_lo = std::max(v_lo, 0);
+        u_hi = std::min(u_hi, nu - 1); v_hi = std::min(v_hi, nv - 1);
+        if (u_lo > u_hi || v_lo > v_hi) return 0;
+        return at(u_hi + 1, v_hi + 1) - at(u_lo, v_hi + 1) - at(u_hi + 1, v_lo) + at(u_lo, v_lo);
+    }
 };
 
-DistanceField distance_field(const std::vector<char> &occ, int nu, int nv, int max_r)
+// How far a material cell may sit from a tip cell, per face, at one height: the pyramid's
+// half-widths plus the margin, in cells (1 cell = 1 mm). Tip cell (tu, tv) reaches material cell
+// (u, v) iff u - tu lies in [-xneg, xpos] and v - tv in [-yneg, ypos], i.e. the tip lies in
+// tip_rect(u, v) -- cell centres against a continuous pyramid, as the old distance field did.
+struct Reach
 {
-    DistanceField out;
-    out.nu = nu; out.nv = nv;
-    out.d.assign(size_t(nu) * nv, int16_t(max_r + 1));
-    std::vector<char> cur = occ, nxt;
-    for (size_t i = 0; i < cur.size(); ++ i)
-        if (cur[i]) out.d[i] = 0;
-    for (int r = 1; r <= max_r; ++ r) {
-        nxt = cur;
-        bool any = false;
-        const bool diag = (r % 2 == 0);
-        for (int u = 0; u < nu; ++ u)
-            for (int v = 0; v < nv; ++ v) {
-                const size_t i = size_t(u) * nv + v;
-                if (cur[i]) continue;
-                bool reach = (u > 0 && cur[i - nv]) || (u + 1 < nu && cur[i + nv]) || (v > 0 && cur[i - 1]) || (v + 1 < nv && cur[i + 1]);
-                if (! reach && diag)
-                    reach = (u > 0 && v > 0 && cur[i - nv - 1]) || (u > 0 && v + 1 < nv && cur[i - nv + 1]) ||
-                            (u + 1 < nu && v > 0 && cur[i + nv - 1]) || (u + 1 < nu && v + 1 < nv && cur[i + nv + 1]);
-                if (reach) { nxt[i] = 1; out.d[i] = int16_t(r); any = true; }
-            }
-        if (! any) break;
-        cur.swap(nxt);
+    double xpos, xneg, ypos, yneg;
+    Reach inset(double s) const { return { xpos - s, xneg - s, ypos - s, yneg - s }; }
+    bool  tip_rect(int u, int v, int &u_lo, int &u_hi, int &v_lo, int &v_hi) const
+    {
+        u_lo = int(std::ceil(u - xpos)); u_hi = int(std::floor(u + xneg));
+        v_lo = int(std::ceil(v - ypos)); v_hi = int(std::floor(v + yneg));
+        return u_lo <= u_hi && v_lo <= v_hi;
     }
-    return out;
-}
+};
 
 } // namespace
 
 std::optional<ConflictResult> check_hotend_collisions(const GCodeProcessorResult &result, const HotendCollisionParams &params)
 {
-    if (params.cone_angle_deg <= 0. || params.cone_height <= 0.)
+    const HotendEnvelope &env = params.envelope;
+    if (! env.enabled())
         return std::nullopt;
     if (result.tool_axes.size() <= 1 || result.moves.size() < 2)
         return std::nullopt;   // planar print: nothing above the tip can have been printed yet
@@ -136,12 +126,22 @@ std::optional<ConflictResult> check_hotend_collisions(const GCodeProcessorResult
     if (episodes.size() < 2)
         return std::nullopt;
 
-    const double tan_half = std::tan(0.5 * params.cone_angle_deg * M_PI / 180.);
-    const double H        = params.cone_height;
-    const double band     = 0.2;
-    const int    max_r    = int(std::ceil(H * tan_half + params.margin)) + 1;
+    // The envelope is the four-face pyramid clipped by a sphere of radius H about the tip (the
+    // preview draws the same shape): at height h no part of it stands further out than the sphere's
+    // half-chord sqrt(H^2 - h^2), however shallow a face is. So each face's reach is capped there,
+    // and a hit the rectangle query finds is confirmed against the true distance (below).
+    const double H    = env.height;
+    const double band = 0.2;
+    const double sp[4] = { env.spread(HotendEnvelope::XPos), env.spread(HotendEnvelope::XNeg),
+                           env.spread(HotendEnvelope::YPos), env.spread(HotendEnvelope::YNeg) };
+    auto chord_at = [&](double h) { return std::sqrt(std::max(0., H * H - h * h)); };
+    auto reach_at = [&](double h) -> Reach {
+        const double c = chord_at(h);
+        return { std::min(h * sp[0], c) + params.margin, std::min(h * sp[1], c) + params.margin,
+                 std::min(h * sp[2], c) + params.margin, std::min(h * sp[3], c) + params.margin };
+    };
 
-    struct Hit { double pen = -1.; size_t episode = 0, source = 0; Sample tip; Sample mat; double height = 0., dist = 0.; size_t count = 0; };
+    struct Hit { double pen = -1.; size_t episode = 0, source = 0; Sample tip; Sample mat; double height = 0.; HotendEnvelope::Side face = HotendEnvelope::XPos; };
     Hit worst;
     size_t total_hits = 0;
 
@@ -151,8 +151,8 @@ std::optional<ConflictResult> check_hotend_collisions(const GCodeProcessorResult
     for (size_t ei = 0; ei < episodes.size(); ++ ei) {
         const Episode &e = episodes[ei];
         if (ei > 0 && ! earlier.empty() && ! e.tips.empty()) {
-            const Eigen::Matrix3d R = rotation_to_z(e.axis);
-            // tool frame: (u, v, a) = R * p
+            // head frame: (u, v, a) = R * p, with u / v along the head's own +X / +Y faces
+            const Eigen::Matrix3d R = params.upright ? Eigen::Matrix3d::Identity() : Eigen::Matrix3d(tool_head_frame(e.axis));
             std::vector<Vec3d> T(e.tips.size()), M(earlier.size());
             for (size_t i = 0; i < T.size(); ++ i) T[i] = R * e.tips[i].p;
             for (size_t i = 0; i < M.size(); ++ i) M[i] = R * earlier[i].p;
@@ -184,37 +184,71 @@ std::optional<ConflictResult> check_hotend_collisions(const GCodeProcessorResult
                         mv.push_back({u, v, M[i].z(), i});
                 }
             }
-            // per band: distance field of the tips, then test every material voxel in the cone's height range
+            auto tip_cell = [&](size_t ti, int &u, int &v) { u = int(std::floor(T[ti].x())) - u0; v = int(std::floor(T[ti].y())) - v0; };
+
+            // per band: a count table of the tip cells, then every material voxel in the pyramid's
+            // height range asks whether any tip sits inside its rectangle of reach
+            std::vector<char> occ;
+            CellCounts        counts;
             for (size_t bi = 0; bi < by_band.size(); ++ bi) {
                 if (by_band[bi].empty()) continue;
                 const double a_t = (double(int(bi) + bmin) + 0.5) * band;
                 bool any_candidate = false;
                 for (const MVox &q : mv) { const double h = q.a - a_t; if (h > params.eps && h <= H) { any_candidate = true; break; } }
                 if (! any_candidate) continue;
-                std::vector<char> occ(size_t(nu) * nv, 0);
+                occ.assign(size_t(nu) * nv, 0);
                 for (size_t ti : by_band[bi]) {
-                    const int u = int(std::floor(T[ti].x())) - u0, v = int(std::floor(T[ti].y())) - v0;
+                    int u, v; tip_cell(ti, u, v);
                     if (u >= 0 && v >= 0 && u < nu && v < nv) occ[size_t(u) * nv + v] = 1;
                 }
-                const DistanceField D = distance_field(occ, nu, nv, max_r);
+                counts.build(occ, nu, nv);
                 for (const MVox &q : mv) {
                     const double h = q.a - a_t;
                     if (h <= params.eps || h > H) continue;
-                    const double d = double(D.at(q.u, q.v));
-                    const double reach = h * tan_half + params.margin;
-                    if (d > reach) continue;
-                    ++ total_hits;
-                    const double pen = reach - d;
-                    if (pen > worst.pen) {
-                        // nearest tip of this band to the voxel, for the report
-                        size_t best = by_band[bi].front(); double bestd = 1e300;
+                    const Reach r = reach_at(h);
+                    int ul, uh, vl, vh;
+                    if (! r.tip_rect(q.u, q.v, ul, uh, vl, vh) || counts.count(ul, uh, vl, vh) == 0)
+                        continue;
+                    // The rectangle is the cap's bounding square; its corners lie outside the sphere.
+                    {
+                        const double lim = chord_at(h) + params.margin;
+                        bool         inside = false;
                         for (size_t ti : by_band[bi]) {
-                            const double du = T[ti].x() - (q.u + u0 + 0.5), dv = T[ti].y() - (q.v + v0 + 0.5);
-                            const double dd = du * du + dv * dv;
-                            if (dd < bestd) { bestd = dd; best = ti; }
+                            int tu, tv; tip_cell(ti, tu, tv);
+                            if (tu < ul || tu > uh || tv < vl || tv > vh) continue;
+                            const double du = q.u - tu, dv = q.v - tv;
+                            if (du * du + dv * dv <= lim * lim) { inside = true; break; }
                         }
+                        if (! inside)
+                            continue;
+                    }
+                    ++ total_hits;
+                    // Depth: the largest uniform inset of all four faces that still leaves a tip
+                    // inside -- how far, laterally, the material sits from the nearest face.
+                    double lo = 0., hi = std::max({ r.xpos, r.xneg, r.ypos, r.yneg });
+                    for (int it = 0; it < 12; ++ it) {
+                        const double mid = 0.5 * (lo + hi);
+                        if (r.inset(mid).tip_rect(q.u, q.v, ul, uh, vl, vh) && counts.count(ul, uh, vl, vh) > 0) lo = mid; else hi = mid;
+                    }
+                    const double pen = lo;
+                    if (pen > worst.pen) {
+                        // For the report: the tip the material lies deepest inside, and the side of the
+                        // head it is on -- the face whose reach it fills the largest fraction of, i.e.
+                        // the one that would have to slim the least to let it out.
+                        double best_slack = -1e300;
+                        size_t best = by_band[bi].front();
+                        int    best_du = 0, best_dv = 0;
+                        for (size_t ti : by_band[bi]) {
+                            int tu, tv; tip_cell(ti, tu, tv);
+                            const int    du = q.u - tu, dv = q.v - tv;
+                            const double slack[4] = { r.xpos - du, r.xneg + du, r.ypos - dv, r.yneg + dv };
+                            const double least = *std::min_element(slack, slack + 4);
+                            if (least > best_slack) { best_slack = least; best = ti; best_du = du; best_dv = dv; }
+                        }
+                        const double fill[4] = { best_du / r.xpos, -best_du / r.xneg, best_dv / r.ypos, -best_dv / r.yneg };
+                        const HotendEnvelope::Side best_face = HotendEnvelope::Side(std::max_element(fill, fill + 4) - fill);
                         worst.pen = pen; worst.episode = ei; worst.source = earlier_episode[q.sample];
-                        worst.tip = e.tips[best]; worst.mat = earlier[q.sample]; worst.height = h; worst.dist = d;
+                        worst.tip = e.tips[best]; worst.mat = earlier[q.sample]; worst.height = h; worst.face = best_face;
                     }
                 }
             }
@@ -233,14 +267,17 @@ std::optional<ConflictResult> check_hotend_collisions(const GCodeProcessorResult
         name += (boost::format(", tool axis %.2f,%.2f,%.2f") % e.axis.x() % e.axis.y() % e.axis.z()).str();
         return name;
     };
+    auto deg = [](double a) { return (boost::format("%.0f") % a).str(); };
     ConflictResult res(chunk_name(worst.episode), chunk_name(worst.source), worst.tip.p.z(), nullptr, nullptr);
-    res.message = (boost::format(_u8L("Hotend collision: modelled as a %1%° cone %2% mm tall, the hotend enters material printed earlier while printing %3% "
-                                       "(G-code line %4%, tip at X%5% Y%6% Z%7%): material of %8% (G-code line %9%) sits %10% mm up the tool axis and %11% mm off it, "
-                                       "%12% mm inside the cone; %13% hits in total. Re-orient the chunk, add clearance, or shorten the hotend model."))
-                   % int(std::lround(params.cone_angle_deg)) % int(std::lround(H)) % res._objName1 % worst.tip.gcode_id
+    res.message = (boost::format(_u8L("Hotend collision: modelled as a pyramid capped by a %1% mm sphere about the tip (sides +X %2%°, -X %3%°, +Y %4%°, -Y %5%° from the bed), "
+                                       "the hotend enters material printed earlier while printing %6% (G-code line %7%, tip at X%8% Y%9% Z%10%): "
+                                       "material of %11% (G-code line %12%) sits %13% mm up the tool axis on the hotend's %15% side, %14% mm inside the envelope; "
+                                       "%16% hits in total. Re-orient the chunk, add clearance, or correct the hotend side angles."))
+                   % int(std::lround(H)) % deg(env.angle[0]) % deg(env.angle[1]) % deg(env.angle[2]) % deg(env.angle[3])
+                   % res._objName1 % worst.tip.gcode_id
                    % (boost::format("%.1f") % worst.tip.p.x()).str() % (boost::format("%.1f") % worst.tip.p.y()).str() % (boost::format("%.2f") % worst.tip.p.z()).str()
-                   % res._objName2 % worst.mat.gcode_id % (boost::format("%.1f") % worst.height).str() % (boost::format("%.0f") % worst.dist).str()
-                   % (boost::format("%.1f") % worst.pen).str() % total_hits).str();
+                   % res._objName2 % worst.mat.gcode_id % (boost::format("%.1f") % worst.height).str()
+                   % (boost::format("%.1f") % worst.pen).str() % HotendEnvelope::side_name(worst.face) % total_hits).str();
     BOOST_LOG_TRIVIAL(error) << "hotend collision check: " << res.message;
     return res;
 }

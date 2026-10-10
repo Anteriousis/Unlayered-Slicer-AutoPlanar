@@ -125,12 +125,17 @@ SCENARIO("Print::apply emits one PrintObject per cut-plane segment", "[cutplanes
         Model model;
         make_cut_cube_model(model, mid_plane_stack(), 2);
         print.apply(model, cut_plane_config());
-        THEN("instances share segment PrintObjects: 2 segments, each with 2 instances") {
-            // The two instances differ only by XY shift, so they merge into one trafo,
-            // multiplied by the two segments.
-            REQUIRE(print.objects().size() == 2);
-            for (const PrintObject *object : print.objects())
-                CHECK(object->instances().size() == 2);
+        THEN("each copy gets its own segment PrintObjects: 2 copies x 2 segments, one instance each") {
+            // The two instances differ only by XY shift, but a segment's G-code is un-rotated about
+            // its instance placement, so copies of a cut-plane object cannot share a PrintObject
+            // (they used to, and the second copy landed off its footprint).
+            REQUIRE(print.objects().size() == 4);
+            size_t segments = 0;
+            for (const PrintObject *object : print.objects()) {
+                CHECK(object->instances().size() == 1);
+                segments += object->is_segment() ? 1 : 0;
+            }
+            CHECK(segments == 4);
         }
     }
 }
@@ -160,10 +165,17 @@ SCENARIO("Cut-plane segments slice as complementary geometry", "[cutplanes][slic
             CHECK_THAT(root->segment()->build_z_min,  Catch::Matchers::WithinAbs(0.,    1e-9));
             CHECK_THAT(upper->segment()->build_z_min, Catch::Matchers::WithinAbs(cut_z, 1e-6));
 
-            // Root: bed to the cut, in a frame where those are the same numbers.
+            // Root: bed to the cut, in a frame where those are the same numbers. Its MATERIAL ends
+            // at the cut; the schedule may run a few empty layers past it, kept so support carrying
+            // the upper segment can end flush under the cut face (segment_slice_top()).
             CHECK(root->layers().front()->print_z <= 0.3);
-            CHECK(root->layers().back()->print_z <= cut_z + 0.3);
-            CHECK(root->layers().back()->print_z >= cut_z - 0.3);
+            double root_material_top = 0.;
+            for (const Layer *layer : root->layers())
+                if (! layer->lslices.empty())
+                    root_material_top = std::max(root_material_top, layer->print_z);
+            CHECK(root_material_top <= cut_z + 0.3);
+            CHECK(root_material_top >= cut_z - 0.3);
+            CHECK(root->layers().back()->print_z <= cut_z + 1.);
 
             // Commit 0's acceptance condition: a non-root segment's first object layer sits at its
             // configured first-layer height in its own frame -- NOT at the world cut height. The
@@ -197,7 +209,12 @@ SCENARIO("Cut-plane segments slice as complementary geometry", "[cutplanes][slic
         THEN("only the root gets a brim/skirt footprint") {
             CHECK(root->is_root_segment());
             CHECK(! upper->is_root_segment());
-            // has_brim() is the gate all brim generation runs through.
+            // has_brim() is the per-object CONTRACT, not a gate brim generation runs through:
+            // Print::has_brim() only decides whether make_brim() is called at all, and
+            // outer_inner_brim_area() used to consult neither, which is how an untilted non-root
+            // segment came to carve the root's collar. The geometric assertion that pins that
+            // lives in test_skirt_brim.cpp ("A cut-plane segment off the build plate must not
+            // carve the root's brim") -- this check only pins the predicate itself.
             CHECK(! upper->has_brim());
         }
 

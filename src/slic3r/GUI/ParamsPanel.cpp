@@ -257,6 +257,9 @@ ParamsPanel::ParamsPanel( wxWindow* parent, wxWindowID id, const wxPoint& pos, c
         m_top_panel->SetBackgroundColor2(0xF1F1F1);
 
         m_process_icon = new ScalableButton(m_top_panel, wxID_ANY, "process");
+        // Decorative, not a Tab stop (see the printer and filament title icons).
+        m_process_icon->DisableFocusFromKeyboard();
+        m_process_icon->SetCanFocus(false);
 
         m_title_label = new Label(m_top_panel, _L("Process"));
 
@@ -466,6 +469,16 @@ void ParamsPanel::create_layout()
     }
 
     //m_left_sizer->Add( m_printer_sizer, 1, wxEXPAND, 1 );
+
+    // The tabs are created after m_page_view, so wx's tab order (creation order, not sizer
+    // order) would reach a tab's preset row and page strip only after every settings field.
+    for (wxPanel* tab : {m_tab_print, m_tab_print_plate, m_tab_print_object, m_tab_print_part, m_tab_print_layer, m_tab_filament, m_tab_printer})
+        if (tab)
+#if __WXOSX__
+            tab->MoveBeforeInTabOrder(m_tmp_panel);
+#else
+            tab->MoveBeforeInTabOrder(m_page_view);
+#endif
 
     //m_button_sizer = new wxBoxSizer( wxHORIZONTAL );
 

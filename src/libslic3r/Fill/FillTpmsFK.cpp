@@ -1,6 +1,7 @@
 #include "../ClipperUtils.hpp"
 #include "../MarchingSquares.hpp"
 #include "FillTpmsFK.hpp"
+#include "Implicits.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -32,15 +33,11 @@ struct ScalarField
     {}
 
     // Get the scalar field value at x,y,z in coordf_t coordinates.
+    // Shared with the mesh-backed generator (Implicits.hpp) so the two
+    // implementations cannot drift.
     float get_scalar(coordf_t x, coordf_t y, coordf_t z) const
     {
-        const float fx = freq * x;
-        const float fy = freq * y;
-        const float fz = freq * z;
-
-        // Fischer - Koch S equation:
-        // cos(2x)sin(y)cos(z) + cos(2y)sin(z)cos(x) + cos(2z)sin(x)cos(y) = 0
-        return cosf(2 * fx) * sinf(fy) * cosf(fz) + cosf(2 * fy) * sinf(fz) * cosf(fx) + cosf(2 * fz) * sinf(fx) * cosf(fy);
+        return fischer_koch_s_freq(Vec3f(float(x), float(y), float(z)), freq);
     }
 
     // Get the scalar field value at a Coord for the current z value.

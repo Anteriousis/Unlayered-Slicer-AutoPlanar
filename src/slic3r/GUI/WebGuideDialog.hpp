@@ -97,6 +97,11 @@ public:
     bool apply_config(AppConfig *app_config, PresetBundle *preset_bundle, const PresetUpdater *updater, bool& apply_keeped_changes);
     bool run();
 
+    // Unlayered: true when the "Stealth mode & Bambu Lab printers" page (guide 4unlayered) was shown
+    // and its network plug-in box was left ticked while the plug-in is not installed yet. The caller
+    // (GUI_App::run_wizard) starts the same download as Preferences > Online after the wizard closes.
+    bool network_plugin_requested() const { return m_netplugin_answered && InstallNetplugin; }
+
     void        StrReplace(std::string &strBase, std::string strSrc, std::string strDes);
     std::string w2s(wxString sSrc);
     void        GetStardardFilePath(std::string &FilePath);
@@ -134,6 +139,9 @@ private:
 
     bool InstallNetplugin;
     bool network_plugin_ready {false};
+    // Set only by the page itself: an answer the user never saw must not be written back.
+    bool m_stealth_answered {false};
+    bool m_netplugin_answered {false};
 
     json m_OrcaFilaList;
     std::string m_OrcaFilaLibPath;

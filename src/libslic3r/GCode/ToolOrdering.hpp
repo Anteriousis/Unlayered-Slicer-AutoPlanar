@@ -169,6 +169,9 @@ public:
     // Due to the support layers possibly interleaving the object layers,
     // wipe tower will be disabled for some support only layers.
     bool 						has_wipe_tower = false;
+    // BELT_MOD -- does this layer carry belt brim (an apron band or a coincident band)? Kept
+    // separate from has_object so skirt marking and wiping overrides are unaffected.
+    bool                        has_belt_brim = false;
     // Number of wipe tower partitions to support the required number of tool switches
     // and to support the wipe tower partitions above this one.
     size_t                      wipe_tower_partitions = 0;

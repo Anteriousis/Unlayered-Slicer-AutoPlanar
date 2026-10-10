@@ -1,4 +1,5 @@
 #include "2DBed.hpp"
+#include "Widgets/StateColor.hpp"
 #include "GUI_App.hpp"
 
 #include "3DBed.hpp"
@@ -97,7 +98,7 @@ void Bed_2D::repaint(const std::vector<Vec2d>& shape)
 		// Fill DC with the background on Windows & Linux / GTK.
 		wxColour color;
 		if (is_dark) {// SetBackgroundColour
-			color = wxColour(45, 45, 49);
+			color = StateColor::darkModeColorFor(wxColour("#FFFFFF")); // the dark window colour, user override included
 		}
 		else {
 			color = *wxWHITE;

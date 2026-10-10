@@ -196,8 +196,13 @@ void KBShortcutsDialog::fill_shortcuts()
             { ctrl + "M", L("Show/Hide 3Dconnexion devices settings dialog") },
 #endif // __APPLE
 
-            // Switch table page
-            { ctrl + L("Tab"), L("Switch table page")},
+            // Main tabs and layout
+            { ctrl + L("Tab"), L("Next tab") },
+            { ctrl + shift + L("Tab"), L("Previous tab") },
+            { ctrl + "B", L("Collapse/Expand the sidebar") },
+#ifndef __APPLE__
+            { std::string(L_CONTEXT("Alt", "Keyboard Shortcut")) + " / F10", L("Highlight the menu bar: arrows move, Enter opens, Esc leaves") },
+#endif
             //DEL
             #ifdef __APPLE__
                 {"fn+⌫", L("Delete Selected")},
@@ -227,7 +232,6 @@ void KBShortcutsDialog::fill_shortcuts()
             { "Q", L("Auto orients selected objects or all objects. If there are selected objects, it just orients the selected ones. Otherwise, it will orient all objects in the current project.") },
             { shift + "Q", L("Auto orients all objects on the active plate.") },
 
-            {shift + L("Tab"), L("Collapse/Expand the sidebar")},
             {ctrl + L("Any arrow"), L("Movement in camera space")},
             {alt + L("Left mouse button"), L("Select a part")},
             {ctrl + L("Left mouse button"), L("Select multiple objects")},
@@ -246,6 +250,7 @@ void KBShortcutsDialog::fill_shortcuts()
             {ctrl + "4", L("Camera view - Behind")},
             {ctrl + "5", L("Camera Angle - Left side")},
             {ctrl + "6", L("Camera Angle - Right side")},
+            {ctrl + "7", L("Camera view - Selected plate")},
 
             {ctrl + "A", L("Select all objects")},
             {ctrl + "D", L("Delete All")},
@@ -267,7 +272,7 @@ void KBShortcutsDialog::fill_shortcuts()
             { "I", L("Zoom in") },
             { "O", L("Zoom out") },
             { "V", L("Toggle printable for object/part") },
-            { L_CONTEXT("Tab", "Keyboard Shortcut"), L("Switch between Prepare/Preview") },
+            { std::string(L_CONTEXT("Menu", "Keyboard Shortcut")) + " / " + shift + "F10", L("Open the context menu for the selection") },
             { L_CONTEXT("Space", "Keyboard Shortcut"), L("Open actions speed dial") },
 
         };
@@ -305,7 +310,6 @@ void KBShortcutsDialog::fill_shortcuts()
         { L_CONTEXT("Arrow Right", "Keyboard Shortcut"), L("Horizontal slider - Move active thumb Right")},
         { "L", L("On/Off one layer mode of the vertical slider")},
         { "C", L("On/Off G-code window")},
-        { L_CONTEXT("Tab", "Keyboard Shortcut"), L("Switch between Prepare/Preview")},
         {shift + L("Any arrow"), L("Move slider 5x faster")},
         {shift + L("Mouse wheel"), L("Move slider 5x faster")},
         {ctrl + L("Any arrow"), L("Move slider 5x faster")},

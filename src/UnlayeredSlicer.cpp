@@ -71,6 +71,7 @@ using namespace nlohmann;
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BlacklistedLibraryCheck.hpp"
 #include "libslic3r/SkeletonBuild.hpp"
+#include "libslic3r/CutPlaneSegmentation.hpp"
 #include "libslic3r/FlushVolCalc.hpp"
 
 #include "libslic3r/Orient.hpp"
@@ -1815,7 +1816,10 @@ int CLI::run(int argc, char **argv)
                         old_printable_width = static_cast<int>(old_printable_bbox.size().x());
                         old_printable_depth = static_cast<int>(old_printable_bbox.size().y());
                     }
-                    old_printable_height = (int)(config.opt_float("printable_height"));
+                    // UNLAYERED_MOD -- a BBS-style 3mf without Metadata/project_settings.config has no
+                    // printable_height (found by fuzzing: this was a silent segfault).
+                    if (const auto *ph = config.option<ConfigOptionFloat>("printable_height"))
+                        old_printable_height = (int) ph->value;
 
                     if (config.option<ConfigOptionFloat>("extruder_clearance_height_to_rod"))
                         old_height_to_rod = config.opt_float("extruder_clearance_height_to_rod");
@@ -3248,9 +3252,14 @@ int CLI::run(int argc, char **argv)
                 max_self_index = std::max(max_self_index, v);
                 min_self_index = std::min(min_self_index, v);
             }
-            if (max_self_index > filament_count || min_self_index < 1) {
-                BOOST_LOG_TRIVIAL(warning) << boost::format("filament_self_index range [%1%, %2%] is invalid for filament_count %3%, regenerating")
-                        % min_self_index % max_self_index % filament_count;
+            // UNLAYERED_MOD -- and a project saved with FEWER filaments than are now loaded (a
+            // one-filament project sliced with two --load-filaments) leaves the tables half filled:
+            // the variant matching below then reads past filament_extruder_variant and
+            // set_with_restore_2 throws an uncaught size error. Regenerate in that case too.
+            if (max_self_index > filament_count || min_self_index < 1 || max_self_index < filament_count
+                || (int) filament_self_index_opt->values.size() < filament_count) {
+                BOOST_LOG_TRIVIAL(warning) << boost::format("filament_self_index range [%1%, %2%] (size %4%) is invalid for filament_count %3%, regenerating")
+                        % min_self_index % max_self_index % filament_count % filament_self_index_opt->values.size();
                 need_regenerate_self_index = true;
             }
         }
@@ -3321,6 +3330,10 @@ int CLI::run(int argc, char **argv)
                 std::vector<string>& filament_variants = curr_variant_opt->values;
                 filament_variants.resize(filament_count, get_extruder_variant_string(etDirectDrive, nvtStandard));
             }
+            // UNLAYERED_MOD -- see the filament_self_index note above: one variant per filament for
+            // the filaments the project did not know about.
+            if ((int) curr_variant_opt->values.size() < filament_count)
+                curr_variant_opt->values.resize(filament_count, get_extruder_variant_string(etDirectDrive, nvtStandard));
             const ConfigOptionStrings *new_variant_opt = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_extruder_variant", true));
 
             std::vector<int> new_variant_indice;
@@ -3329,7 +3342,7 @@ int CLI::run(int argc, char **argv)
 
             for (int i = 0; i < new_variant_count; i++)
             {
-                for (int j = old_start_indice[filament_index - 1]; j < old_start_indice[filament_index - 1] + old_variant_count; j++)
+                for (int j = old_start_indice[filament_index - 1]; j < old_start_indice[filament_index - 1] + old_variant_count && j < (int) curr_variant_opt->values.size(); j++)
                 {
                     if (curr_variant_opt->values[j] == new_variant_opt->values[i]) {
                         new_variant_indice[i] = j;
@@ -3381,7 +3394,18 @@ int CLI::run(int argc, char **argv)
                                 ConfigOptionVectorBase* opt_vec_dst = static_cast<ConfigOptionVectorBase*>(opt);
                                 const ConfigOptionVectorBase* opt_vec_src = static_cast<const ConfigOptionVectorBase*>(source_opt);
                                 //set with index
-                                opt_vec_dst->set_with_restore_2(opt_vec_src, new_variant_indice, old_start_indice[filament_index - 1], old_variant_count);
+                                try {
+                                    // UNLAYERED_MOD -- a project with fewer filaments than are loaded: grow the
+                                    // destination to the filament's slot first (set_with_restore_2 only restores).
+                                    if (opt_vec_src->size() > 0 && opt_vec_dst->size() < size_t(old_start_indice[filament_index - 1] + old_variant_count))
+                                        opt_vec_dst->resize(size_t(old_start_indice[filament_index - 1] + old_variant_count), opt_vec_src);
+                                    opt_vec_dst->set_with_restore_2(opt_vec_src, new_variant_indice, old_start_indice[filament_index - 1], old_variant_count);
+                                } catch (const std::exception &ex) {   // UNLAYERED_MOD -- was an uncaught abort
+                                    BOOST_LOG_TRIVIAL(error) << boost::format("filament %1%: option %2% could not be applied: %3%") % filament_index % opt_key % ex.what();
+                                    boost::nowide::cerr << "filament " << filament_index << ": option " << opt_key << " could not be applied: " << ex.what() << std::endl;
+                                    record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
+                                    flush_and_exit(CLI_CONFIG_FILE_ERROR);
+                                }
                             }
 
                             continue;
@@ -3427,7 +3451,16 @@ int CLI::run(int argc, char **argv)
                     if (filament_options_with_variant.find(opt_key) != filament_options_with_variant.end()) {
                         std::vector<int> temp_variant_indice;
                         temp_variant_indice.resize(new_variant_count, -1);
-                        opt_vec_dst->set_with_restore_2(opt_vec_src, temp_variant_indice, old_start_indice[filament_index - 1], old_variant_count, true);
+                        try {
+                            if (opt_vec_src->size() > 0 && opt_vec_dst->size() < size_t(old_start_indice[filament_index - 1] + old_variant_count))   // UNLAYERED_MOD, see above
+                                opt_vec_dst->resize(size_t(old_start_indice[filament_index - 1] + old_variant_count), opt_vec_src);
+                            opt_vec_dst->set_with_restore_2(opt_vec_src, temp_variant_indice, old_start_indice[filament_index - 1], old_variant_count, true);
+                        } catch (const std::exception &ex) {   // UNLAYERED_MOD -- was an uncaught abort
+                            BOOST_LOG_TRIVIAL(error) << boost::format("filament %1%: option %2% could not be applied: %3%") % filament_index % opt_key % ex.what();
+                            boost::nowide::cerr << "filament " << filament_index << ": option " << opt_key << " could not be applied: " << ex.what() << std::endl;
+                            record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
+                            flush_and_exit(CLI_CONFIG_FILE_ERROR);
+                        }
 
                         if (opt_key == "filament_extruder_variant")
                             new_variant_counts[filament_index - 1] = opt_vec_src->size();
@@ -5830,6 +5863,42 @@ int CLI::run(int argc, char **argv)
                         << res.convergence_nodes.size() << " convergence, genus " << res.genus
                         << ", cycles " << res.cycles_raw << "->" << res.cycles_final
                         << ", " << res.note << std::endl;
+
+                    // The cut itself, headlessly: the planes perform_skeleton_cut() would author,
+                    // partitioned by the same derive_cut_segments() Print::apply runs. The aim is
+                    // one chunk per plane; a plane listed as "no chunk" had everything on its far
+                    // side claimed by later planes, i.e. its chunk was folded into a neighbour's.
+                    std::vector<CutPlane> skel_planes;
+                    for (const auto& [par, child] : res.cut_edges) {
+                        const SkeletonCutPlane sp = skeleton_edge_cut_plane(res.dag, res.tangents, par, child);
+                        CutPlane cp;
+                        cp.point  = sp.point;
+                        cp.normal = sp.normal;
+                        skel_planes.push_back(cp);
+                    }
+                    if (!skel_planes.empty()) {
+                        CutSegmentationStatus status = CutSegmentationStatus::Ok;
+                        // 0.2 mm stands in for initial_layer_print_height, the bound Print::apply uses.
+                        const std::vector<CutSegmentDescriptor> segs = derive_cut_segments(
+                            mesh.its, skel_planes, world, 0.2, false, &status, nullptr, stem);
+                        static const char* status_names[] = { "Ok", "StackInactive", "NoGeometry", "TooManyPlanes",
+                                                              "NoSplit", "NoRootCell", "SegmentTooThin" };
+                        std::vector<bool> has_chunk(skel_planes.size(), false);
+                        for (const CutSegmentDescriptor& s : segs)
+                            if (s.base_plane >= 0 && s.base_plane < (int) has_chunk.size())
+                                has_chunk[s.base_plane] = true;
+                        std::string chunkless;
+                        int n_chunkless = 0;
+                        for (size_t i = 0; i < has_chunk.size(); ++i)
+                            if (!has_chunk[i]) {
+                                chunkless += (n_chunkless++ ? "," : "") + std::to_string(i);
+                            }
+                        boost::nowide::cout << "[partition] " << stem << ": " << status_names[int(status)] << ", "
+                                            << segs.size() << " segment(s) from " << skel_planes.size()
+                                            << " plane(s), " << res.planes_reaimed << " re-aimed (max "
+                                            << res.max_reaim_deg << " deg); planes with no chunk: "
+                                            << (n_chunkless ? chunkless : std::string("none")) << std::endl;
+                    }
                 }
             }
         } else if (opt_key == "export_obj") {
@@ -6557,7 +6626,7 @@ int CLI::run(int argc, char **argv)
                                     BOOST_LOG_TRIVIAL(info) << "process finished, will export gcode temporarily to " << outfile << std::endl;
                                     temp_time = (long long)Slic3r::Utils::get_current_time_utc();
                                     outfile = print_fff->export_gcode(outfile, gcode_result, nullptr);
-                                    // UNLAYERED_MOD: the hotend-cone collision check runs on the exported toolpaths, so a
+                                    // UNLAYERED_MOD: the hotend-envelope collision check runs on the exported toolpaths, so a
                                     // conflict can first appear here, after the path-conflict check above already passed.
                                     if (std::string late_conflict = print_fff->get_conflict_string(); !late_conflict.empty()) {
                                         BOOST_LOG_TRIVIAL(error) << "plate " << index+1 << ": conflict found after G-code export: " << late_conflict;

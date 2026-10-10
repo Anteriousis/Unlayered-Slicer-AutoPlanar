@@ -53,11 +53,13 @@
 #include "../Utils/PrintHost.hpp"
 
 #include "GUI_App.hpp"
+#include "AutoUpdater.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "PublishSettingsDialog.hpp"
 #include "MsgDialog.hpp"
 #include "Notebook.hpp"
 #include "GUI_Factories.hpp"
+#include "MenuMnemonics.hpp"
 #include "GUI_ObjectList.hpp"
 #include "NotificationManager.hpp"
 #include "MarkdownTip.hpp"
@@ -352,7 +354,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     m_topbar         = new BBLTopbar(this);
 #else
     auto panel_topbar = new wxPanel(this, wxID_ANY);
-    panel_topbar->SetBackgroundColour(wxColour(38, 46, 48));
+    panel_topbar->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#262E31"))); // the "Top bar" theme role
     auto sizer_tobar = new wxBoxSizer(wxVERTICAL);
     panel_topbar->SetSizer(sizer_tobar);
     panel_topbar->Layout();
@@ -574,6 +576,10 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     // declare events
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": mainframe received close_widow event";
+        if (event.CanVeto() && wxGetApp().is_recreating_gui()) {
+            event.Veto(); // the frame is being replaced; closing it now would free what the rebuild is using
+            return;
+        }
         if (event.CanVeto() && m_plater->get_view3D_canvas3D()->get_gizmos_manager().is_in_editing_mode(true)) {
             // prevents to open the save dirty project dialog
             event.Veto();
@@ -701,6 +707,22 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
                 ShowFullScreen(true);
             }
             return;}
+#endif
+        // RawControlDown: the physical Ctrl key on every platform, so Ctrl+Tab is Ctrl+Tab on macOS too.
+        if (evt.RawControlDown() && evt.GetKeyCode() == WXK_TAB) {
+            select_adjacent_tab(evt.ShiftDown() ? -1 : 1);
+            return;
+        }
+        if (evt.CmdDown() && evt.GetKeyCode() == 'B') {
+            if (m_plater && is_prepare_or_preview_tab())
+                m_plater->collapse_sidebar(!m_plater->is_sidebar_collapsed());
+            return;
+        }
+#ifndef __APPLE__
+        if (evt.GetKeyCode() == WXK_F10 && !evt.HasAnyModifiers()) {
+            m_topbar->ToggleKeyboardMode();
+            return;
+        }
 #endif
         if (evt.CmdDown() && evt.GetKeyCode() == 'R') { if (m_slice_enable) { wxGetApp().plater()->update(true, true); wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE)); this->m_tabpanel->SelectPageByName(TAB_ID_PREVIEW); } return; }
         if (evt.CmdDown() && evt.ShiftDown() && evt.GetKeyCode() == 'G') {
@@ -2177,23 +2199,9 @@ wxBoxSizer* MainFrame::create_side_tools()
             m_slice_option_pop_up->append_button(slice_all_btn);
             m_slice_option_pop_up->append_button(slice_plate_btn);
 
-            // Only when a service address is configured -- with none, the feature does not exist
-            // as far as the UI is concerned (NONPLANAR_SLICE_SERVICE.md).
-            if (NonplanarSliceClient::is_configured()) {
-                SideButton* slice_nonplanar_btn = new SideButton(m_slice_option_pop_up, _L("Slice nonplanar"), "");
-                slice_nonplanar_btn->SetCornerRadius(0);
-                slice_nonplanar_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                    m_slice_btn->SetLabel(_L("Slice nonplanar"));
-                    m_slice_select = eSliceNonplanar;
-                    m_slice_enable = get_enable_slice_status();
-                    m_slice_btn->Enable(m_slice_enable);
-                    this->Layout();
-                    fit_tab_labels(); // ORCA on label change
-                    if (m_slice_option_pop_up)
-                        m_slice_option_pop_up->Dismiss();
-                    });
-                m_slice_option_pop_up->append_button(slice_nonplanar_btn);
-            }
+            // Unlayered: the "Slice nonplanar" dropdown entry (external slice service) was removed
+            // from the UI at the user's request. The eSliceNonplanar handling elsewhere is left
+            // dormant -- nothing can select it now that the button is gone.
             m_slice_option_pop_up->Popup(m_slice_btn);
         }
     );
@@ -2843,6 +2851,33 @@ static wxMenu* generate_help_menu()
             return true;
         });
 
+    // The Unlayered account, which in-app updates are downloaded with (AutoUpdater). Separate from
+    // the Universe tab's sign-in, which lives inside that web page.
+    append_menu_item(helpMenu, wxID_ANY, _L("Restart to Update"), _L("Install the downloaded update now"),
+        [](wxCommandEvent&) {
+            if (auto *u = wxGetApp().auto_updater())
+                u->restart_to_update();
+        }, "", nullptr, []() {
+            auto *u = wxGetApp().auto_updater();
+            return u && u->update_ready();
+        });
+    append_menu_item(helpMenu, wxID_ANY, _L("Sign in to Unlayered..."), _L("Sign in so the slicer can update itself"),
+        [](wxCommandEvent&) {
+            if (auto *u = wxGetApp().auto_updater())
+                u->sign_in(wxGetApp().mainframe);
+        }, "", nullptr, []() {
+            auto *u = wxGetApp().auto_updater();
+            return u && !u->account().signed_in();
+        });
+    append_menu_item(helpMenu, wxID_ANY, _L("Sign out of Unlayered"), _L("Sign out of your Unlayered account"),
+        [](wxCommandEvent&) {
+            if (auto *u = wxGetApp().auto_updater())
+                u->sign_out();
+        }, "", nullptr, []() {
+            auto *u = wxGetApp().auto_updater();
+            return u && u->account().signed_in();
+        });
+
     // About
 #ifndef __APPLE__
     wxString about_title = wxString::Format(_L("&About %s"), SLIC3R_APP_FULL_NAME);
@@ -3292,6 +3327,14 @@ void MainFrame::init_menubar_as_editor()
         viewMenu = new wxMenu();
         add_common_view_menu_items(viewMenu, this, std::bind(&MainFrame::can_change_view, this));
         viewMenu->AppendSeparator();
+        // Orca: research/mesh-infill — generate the TPMS infill mesh for the
+        // selected object and add it to the scene as a non-printable preview.
+        append_menu_item(viewMenu, wxID_ANY, _L("Preview Mesh Infill"),
+            _L("Generate the mesh-backed infill structure of the selected object as a modifier volume "
+               "(follows the object; run again to refresh after changing settings)"),
+            [this](wxCommandEvent&) { m_plater->preview_mesh_infill(); },
+            "", nullptr, [this]() { return can_change_view(); }, this);
+        viewMenu->AppendSeparator();
 
         //BBS perspective view
         wxWindowID camera_id_base = wxWindow::NewControlId(int(wxID_CAMERA_COUNT));
@@ -3345,6 +3388,17 @@ void MainFrame::init_menubar_as_editor()
             }, this,
             [this]() { return is_prepare_or_preview_tab(); },
             []() { return wxGetApp().show_plate_gridlines(); }, this);
+
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Show Bed Mesh"),
+            _L("Draw the bed mesh the printer currently has loaded as a height map on the plate. Read from the printer's host: Moonraker (Klipper), OctoPrint (Marlin) or Duet/Unlayered (RepRapFirmware)."),
+            [this](wxCommandEvent&) { m_plater->toggle_bed_mesh(); }, this,
+            [this]() { return is_prepare_or_preview_tab(); },
+            []() { return wxGetApp().show_bed_mesh(); }, this);
+
+        append_menu_item(viewMenu, wxID_ANY, _L("Reload Bed Mesh from Printer"),
+            _L("Read the bed mesh again, e.g. after re-probing or after an adaptive mesh changed."),
+            [this](wxCommandEvent&) { m_plater->fetch_bed_mesh(); }, "", this,
+            [this]() { return is_prepare_or_preview_tab(); }, this);
 
         append_menu_check_item(viewMenu, wxID_ANY, _L("Color Cut Chunks"),
             _L("Draw each chunk of an object with cut planes in its own color in the Prepare view."),
@@ -3675,6 +3729,10 @@ void MainFrame::init_menubar_as_editor()
     append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Calibration Guide"), _L("Calibration Guide"), [](wxCommandEvent &)
                      { wxLaunchDefaultBrowser("https://www.orcaslicer.com/wiki/calibration_guide", wxBROWSER_NEW_WINDOW); }, "", nullptr, [this]()
                      {return m_plater->is_view3D_shown();; }, this);
+
+    // Mnemonics are generated from the translated labels rather than placed by translators.
+    for (wxMenu* menu : { fileMenu, m_topbar->GetTopMenu(), m_topbar->GetCalibMenu() })
+        assign_menu_mnemonics(menu);
 
 #else
     // On Mac, the Apple menu ignores non-standard custom items, so add Preset Bundle to the File menu
@@ -4320,6 +4378,15 @@ void MainFrame::select_tab(const wxString& id/* = wxString()*/)
     select(false);
 }
 
+void MainFrame::select_adjacent_tab(int direction)
+{
+    const int count = int(m_tabpanel->GetPageCount());
+    if (count < 2)
+        return;
+    const int idx = ((m_tabpanel->GetSelection() + direction) % count + count) % count;
+    select_tab(m_tabpanel->GetPageName(size_t(idx)));
+}
+
 void MainFrame::request_select_tab(const wxString& id)
 {
     wxCommandEvent* evt = new wxCommandEvent(EVT_SELECT_TAB);
@@ -4639,6 +4706,12 @@ void MainFrame::RunScript(wxString js)
 {
     if (m_webview != nullptr)
         m_webview->RunScript(js);
+}
+
+void MainFrame::retheme_home_page()
+{
+    if (m_webview != nullptr)
+        m_webview->apply_theme_style();
 }
 
 void MainFrame::technology_changed()

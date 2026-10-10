@@ -55,6 +55,15 @@ public:
         Bind(wxEVT_ENTER_WINDOW, [this](wxMouseEvent& e) { m_hovered = true;  Refresh(); e.Skip(); });
         Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent& e) { m_hovered = false; Refresh(); e.Skip(); });
         Bind(wxEVT_PAINT, &RatioLabelPanel::on_paint, this);
+        // Keyboard: Space/Enter edit the ratio like a click does.
+        Bind(wxEVT_KEY_DOWN, [this](wxKeyEvent& e) {
+            if (e.GetKeyCode() == WXK_SPACE || e.GetKeyCode() == WXK_RETURN) {
+                wxMouseEvent click(wxEVT_LEFT_DOWN);
+                click.SetEventObject(this);
+                ProcessWindowEvent(click);
+            } else
+                e.Skip();
+        });
     }
 
     void SetLabel(const wxString& text) override
@@ -838,8 +847,24 @@ wxBoxSizer* MixedFilamentDialog::create_ratio_slider()
     ratio_label->SetFont(::Label::Body_12);
     sizer->Add(ratio_label, 0, wxBOTTOM, FromDIP(4));
 
-    m_ratio_bar = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(27)));
+    // wxWANTS_CHARS keeps the bar a keyboard stop (an empty panel is skipped otherwise).
+    m_ratio_bar = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(27)), wxTAB_TRAVERSAL | wxWANTS_CHARS);
     m_ratio_bar->SetMinSize(wxSize(-1, FromDIP(27)));
+    m_ratio_bar->SetToolTip(_L("Drag, or use Left/Right (Shift: 5%), Home/End"));
+    m_ratio_bar->Bind(wxEVT_KEY_DOWN, [this](wxKeyEvent& e) {
+        const int step = e.ShiftDown() ? 5 : 1;
+        int a = ratio(0);
+        switch (e.GetKeyCode()) {
+        case WXK_LEFT: case WXK_DOWN:  a -= step; break;
+        case WXK_RIGHT: case WXK_UP:   a += step; break;
+        case WXK_HOME: a = MIN_COMPONENT_RATIO; break;
+        case WXK_END:  a = 100 - MIN_COMPONENT_RATIO; break;
+        default: e.Skip(); return;
+        }
+        if (m_ratio_editor_panel && m_ratio_editor_panel->IsShown())
+            commit_ratio_editor(true);
+        on_ratio_changed(std::max(MIN_COMPONENT_RATIO, std::min(100 - MIN_COMPONENT_RATIO, a)));
+    });
     m_ratio_bar->SetBackgroundStyle(wxBG_STYLE_PAINT);
 
     m_ratio_bar->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {

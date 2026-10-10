@@ -10,6 +10,8 @@
 #include "Polygon.hpp"
 #include "PrintConfig.hpp"
 #include "GCode/CoolingBuffer.hpp"
+#include "GCode/MachineKinematics.hpp"
+#include <memory>
 
 namespace Slic3r {
 
@@ -29,7 +31,8 @@ public:
         m_lifted(0),
         m_to_lift(0),
         m_to_lift_type(LiftType::NormalLift),
-        m_current_speed(3600), m_is_first_layer(true)
+        m_current_speed(3600), m_is_first_layer(true),
+        m_kinematics(std::make_unique<CartesianKinematics>())
         {}
     Extruder* filament(size_t extruder_id) { assert(extruder_id < m_curr_filament_extruder.size()); return m_curr_filament_extruder[extruder_id]; }
     const Extruder* filament(size_t extruder_id) const { assert(extruder_id < m_curr_filament_extruder.size()); return m_curr_filament_extruder[extruder_id]; }
@@ -86,6 +89,9 @@ public:
     std::string extrude_to_xy(const Vec2d &point, double dE, const std::string &comment = std::string(), bool force_no_extrusion = false);
     //BBS: generate G2 or G3 extrude which moves by arc
     std::string extrude_arc_to_xy(const Vec2d &point, const Vec2d &center_offset, double dE, const bool is_ccw, const std::string &comment = std::string(), bool force_no_extrusion = false);
+    // BELT_MOD -- linear approximation of an arc, used when the machine mapping cannot express a
+    // G2/G3. Must be called before m_pos is updated: center_offset is relative to the current position.
+    std::string extrude_arc_as_polyline(const Vec2d &point, const Vec2d &center_offset, double dE, const bool is_ccw, const std::string &comment = std::string(), bool force_no_extrusion = false);
     std::string extrude_to_xyz(const Vec3d &point, double dE, const std::string &comment = std::string(), bool force_no_extrusion = false, Transform3d trafo = Transform3d::Identity());
     std::string retract(bool before_wipe = false, double retract_length = 0);
     std::string retract_for_toolchange(bool before_wipe = false, double retract_length = 0);
@@ -101,6 +107,11 @@ public:
     Vec3d&       get_position() { return m_pos; }
     void        set_position(const Vec3d& in) { m_pos = in; }
     double      get_zhop() const { return m_lifted; }
+    // UNLAYERED_MOD -- the height below which an extruding move is refused ("GCode: very low z").
+    // 0.1 mm by default; GCode lowers it for thin first layers (a belt brim apron band is laid at
+    // about half the first layer height above the belt).
+    void        set_min_extrusion_z(double z) { m_min_extrusion_z = z; }
+    double      min_extrusion_z() const { return m_min_extrusion_z; }
     // UNLAYERED_MOD — highest MACHINE-frame Z at which this file has laid material so far. The
     // nozzle tip sits on top of the bead it is extruding, so this is an upper bound on the height
     // of everything printed, in the frame travels are emitted in. GCode::m_max_layer_z cannot serve
@@ -179,9 +190,38 @@ public:
     void set_is_bbl_machine(bool bval) {m_is_bbl_printers = bval;}
     const bool is_bbl_printers() const {return m_is_bbl_printers;}
     void set_is_first_layer(bool bval) { m_is_first_layer = bval; }
+    // BELT_MOD -- contact-aware first layer: when >= 0, a travel destination counts as first layer
+    // when its bed-frame z (m_pos is the bed frame) lies below this height, instead of the
+    // per-layer flag. -1 (default) keeps the flag.
+    void set_first_layer_band(double z_max) { m_first_layer_band = z_max; }
+    // Wave overhangs: XY/XYZ travel feedrate override in mm/s, 0 = none. GCode::_extrude() sets it around a
+    // wave-overhang path (RAII) so the travel INTO the path, and any travel it emits, uses the wave travel
+    // speed. Every XY travel emitter reads it through travel_xy_speed(), including the 5-axis ones;
+    // pure Z moves (travel_speed_z) are not affected.
+    void   set_travel_speed_override(double speed_mm_s) { m_travel_speed_override = speed_mm_s; }
+    double travel_speed_override() const { return m_travel_speed_override; }
     GCodeFlavor get_gcode_flavor() const { return config.gcode_flavor; }
     void invalidate_acceleration() { m_last_acceleration = 0; m_last_travel_acceleration = 0; }
     void invalidate_jerk() { m_last_jerk = 0; }
+
+    // Machine frame mapping (BELT_MOD, ported from OrcaSlicer's MachineKinematics seam).
+    // The writer produces points in the logical placed frame -- bed frame, plate offset
+    // subtracted -- and the installed MachineKinematics turns each one into the coordinates
+    // actually written. A CartesianKinematics at the identity remap (the default) reproduces the
+    // historical output byte for byte; the per-object segment trafo passed into the emitters
+    // runs BEFORE this stage and is never folded into it (Transform3d::rotation() would drop a
+    // shear silently).
+    void set_axis_remap(int rx, int ry, int rz);
+    void set_build_volume_max(const Vec3d &max);
+    // True when every move must emit X, Y and Z (kinematics()->must_emit_all_axes()).
+    bool has_axis_remap() const;
+    // Install the machine frame mapping. Any axis remap / build volume already configured is
+    // carried over, so install order does not matter.
+    void set_kinematics(std::unique_ptr<MachineKinematics> kinematics);
+    const MachineKinematics& kinematics() const { return *m_kinematics; }
+    // Force every lift to a plain vertical lift. Spiral and slope lifts compute their slope in
+    // the logical frame and do not account for a machine mapping that couples axes.
+    void set_force_normal_lift(bool force) { m_force_normal_lift = force; }
 
     // Returns whether this flavor supports separate print and travel acceleration.
     static bool supports_separate_travel_acceleration(GCodeFlavor flavor);
@@ -215,6 +255,7 @@ public:
     int             m_last_bed_temperature;
     bool            m_last_bed_temperature_reached;
     double          m_lifted;
+    double      m_min_extrusion_z { 0.1 };   // UNLAYERED_MOD, see set_min_extrusion_z()
 
     // BBS
     double          m_to_lift;
@@ -253,6 +294,22 @@ public:
     bool            m_is_bbl_printers = false;
     double          m_current_speed;
     bool            m_is_first_layer = true;
+    // BELT_MOD -- the machine frame mapping. Owns the axis-remap state; the setters forward to
+    // it. Never null. Declared after m_is_first_layer to keep the initialiser order.
+    std::unique_ptr<MachineKinematics> m_kinematics;
+    // Last configured remap / build volume, replayed onto a newly installed kinematics so
+    // set_kinematics() and the setters are order-independent.
+    int             m_remap_x = 0;  // RemapAxis: 0=+X, 1=+Y, 2=+Z, 3=-X, ... 6=rev X, ...
+    int             m_remap_y = 1;
+    int             m_remap_z = 2;
+    Vec3d           m_build_vol_max = Vec3d::Zero();
+    bool            m_force_normal_lift = false;
+    double          m_first_layer_band = -1.;
+    // BELT_MOD -- whether a bed-frame destination gets first-layer travel treatment.
+    bool point_on_first_layer(const Vec3d &bed_point) const
+        { return m_first_layer_band >= 0. ? bed_point.z() < m_first_layer_band : m_is_first_layer; }
+    // Wave overhangs: see set_travel_speed_override().
+    double          m_travel_speed_override = 0.;
 
     enum class Acceleration {
         Travel,
@@ -260,7 +317,17 @@ public:
     };
 
     std::string _travel_to_z(double z, const std::string &comment);
+    // BELT_MOD -- logical placed point -> emitted machine point (identity for the default
+    // Cartesian kinematics with no remap).
+    Vec3d apply_axis_remap(const Vec3d &pos) const;
+    // BELT_MOD -- true when a lift must be skipped because the mapping would emit the stored
+    // logical X/Y and that position is not yet known.
+    bool must_skip_lift_now() const;
     std::string _spiral_travel_to_z(double z, const Vec2d &ij_offset, const std::string &comment);
+    // Feedrate (mm/s) for an XY or XYZ travel: the wave-overhang override when one is set, otherwise the
+    // active extruder's travel_speed, or initial_layer_travel_speed on the first layer when
+    // first_layer_aware (a few emitters historically ignore the first-layer speed; they pass false).
+    double      travel_xy_speed(bool first_layer_aware = true, const Vec3d *bed_point = nullptr) const;
     // UNLAYERED_MOD — travel feedrate for a move that also swings B/C. The firmware finishes every
     // axis of a G1 together and interprets F over the linear distance (T = d / F), so bounding the
     // rotary speed to ROT_FEED deg/min means F <= d * ROT_FEED / d_bc.

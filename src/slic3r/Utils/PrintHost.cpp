@@ -29,6 +29,8 @@
 #include "ElegooLink.hpp"
 #include "3DPrinterOS.hpp"
 #include "Moonraker.hpp"
+#include "libslic3r/BedMesh.hpp"
+#include "../GUI/I18N.hpp"
 
 namespace fs = boost::filesystem;
 using boost::optional;
@@ -38,6 +40,12 @@ namespace Slic3r {
 
 
 PrintHost::~PrintHost() {}
+
+bool PrintHost::get_bed_mesh(BedMesh & /*mesh*/, wxString &error) const
+{
+    error = _L("This print host cannot report a bed mesh.");
+    return false;
+}
 
 PrintHost* PrintHost::get_print_host(DynamicPrintConfig *config)
 {

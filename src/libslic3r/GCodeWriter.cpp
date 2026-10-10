@@ -41,6 +41,49 @@ static inline Vec3d apply_test_rotation2(const Vec3d& v, const Transform3d& traf
 
 bool GCodeWriter::full_gcode_comment = true;
 
+// BELT_MOD -- a lift emitted through _travel_to_z() re-emits the stored logical X/Y under a
+// mapping that must emit every axis. While the position is unknown that X/Y is the
+// uninitialised origin, which maps to a real but wrong machine point, so the lift has to be
+// skipped rather than commanded.
+bool GCodeWriter::must_skip_lift_now() const
+{
+    return m_kinematics->suppress_lift_at_unknown_position() && ! this->is_current_position_clear();
+}
+
+void GCodeWriter::set_axis_remap(int rx, int ry, int rz)
+{
+    m_remap_x = rx;
+    m_remap_y = ry;
+    m_remap_z = rz;
+    m_kinematics->set_axis_remap(rx, ry, rz);
+}
+
+void GCodeWriter::set_build_volume_max(const Vec3d &max)
+{
+    m_build_vol_max = max;
+    m_kinematics->set_build_volume_max(max);
+}
+
+void GCodeWriter::set_kinematics(std::unique_ptr<MachineKinematics> kinematics)
+{
+    assert(kinematics);
+    m_kinematics = std::move(kinematics);
+    // Replay whatever was configured on the previous strategy so callers may install the
+    // kinematics before or after set_axis_remap/set_build_volume_max.
+    m_kinematics->set_axis_remap(m_remap_x, m_remap_y, m_remap_z);
+    m_kinematics->set_build_volume_max(m_build_vol_max);
+}
+
+bool GCodeWriter::has_axis_remap() const
+{
+    return m_kinematics->must_emit_all_axes();
+}
+
+Vec3d GCodeWriter::apply_axis_remap(const Vec3d &pos) const
+{
+    return m_kinematics->to_machine(pos);
+}
+
 bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 {
     return (flavor == gcfRepetier || flavor == gcfMarlinFirmware ||  flavor == gcfRepRapFirmware);
@@ -781,13 +824,29 @@ std::string GCodeWriter::travel_to_xy(const Vec2d &point, const std::string &com
     Vec2d point_on_plate = { point(0) - m_x_offset, point(1) - m_y_offset };
 
     GCodeG1Formatter w;
-    w.emit_xy(point_on_plate);
-    auto speed = m_is_first_layer
-        ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);
+    if (has_axis_remap()) {
+        // BELT_MOD: the mapping may couple XY with Z; emit full XYZ in machine coordinates.
+        w.emit_xyz(this->apply_axis_remap(Vec3d(point_on_plate.x(), point_on_plate.y(), m_pos.z())));
+    } else {
+        w.emit_xy(point_on_plate);
+    }
+    const Vec3d first_layer_probe(point.x(), point.y(), m_pos.z());
+    auto speed = this->travel_xy_speed(true, &first_layer_probe);
     w.emit_f(speed * 60.0);
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
     return w.string();
+}
+
+double GCodeWriter::travel_xy_speed(bool first_layer_aware, const Vec3d *bed_point) const
+{
+    if (m_travel_speed_override > 0.)
+        return m_travel_speed_override;
+    // BELT_MOD: with a bed-frame destination, the contact-aware first-layer band decides (it falls
+    // back to the per-layer flag when no band is set).
+    const bool first_layer = bed_point != nullptr ? this->point_on_first_layer(*bed_point) : m_is_first_layer;
+    return first_layer_aware && first_layer
+        ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);
 }
 //HEAVILY UNLAYERED_MOD
 
@@ -804,9 +863,9 @@ std::string GCodeWriter::lazy_lift(LiftType lift_type, bool spiral_vase)
     // Clamped here rather than in GCode::to_lift_type() because several sites pick SpiralLift or
     // SlopeLift directly and never consult z_hop_types (GCode.cpp ~1135, ~6022, ~7663, ~9613,
     // ~9900, ~9934, ~10407) -- lazy_lift/eager_lift are the only choke points every lift passes.
-    if (m_nonplanar)
+    // BELT_MOD: a kinematics mapping can force the same (m_force_normal_lift).
+    if (m_nonplanar || m_force_normal_lift)
         lift_type = LiftType::NormalLift;
-
     // check whether the above/below conditions are met
     double target_lift = 0;
     {
@@ -821,6 +880,10 @@ std::string GCodeWriter::lazy_lift(LiftType lift_type, bool spiral_vase)
     // BBS
     if (m_lifted == 0 && m_to_lift == 0 && target_lift > 0) {
         if (spiral_vase) {
+            if (this->must_skip_lift_now())
+                // Record no lift, so a later unlift() does not descend from a height that was
+                // never commanded.
+                return "";
             m_lifted = target_lift;
             return this->_travel_to_z(m_pos(2) + target_lift, "lift Z");
         }
@@ -834,9 +897,10 @@ std::string GCodeWriter::lazy_lift(LiftType lift_type, bool spiral_vase)
 
 // BBS: immediately execute an undelayed lift move with a spiral lift pattern
 // designed specifically for subsequent gcode injection (e.g. timelapse) 
-std::string GCodeWriter::eager_lift(const LiftType type_in) {
-    // UNLAYERED_MOD — see lazy_lift(): straight lift only when printing non-planar.
-    const LiftType type = m_nonplanar ? LiftType::NormalLift : type_in;
+std::string GCodeWriter::eager_lift(const LiftType type) {
+    // UNLAYERED_MOD — see lazy_lift(): straight lift only when printing non-planar (or when the
+    // kinematics mapping forces it, BELT_MOD).
+    const LiftType effective_type = (m_nonplanar || m_force_normal_lift) ? LiftType::NormalLift : type;
     std::string lift_move;
     double target_lift = 0;
     {
@@ -850,7 +914,7 @@ std::string GCodeWriter::eager_lift(const LiftType type_in) {
     }
 
     // BBS: spiral lift only safe with known position
-    if (type == LiftType::SpiralLift && this->is_current_position_clear()) {
+    if (effective_type == LiftType::SpiralLift && this->is_current_position_clear()) {
         double radius = target_lift / (2 * PI * atan(filament()->travel_slope()));
         // static spiral alignment when no move in x,y plane.
         // spiral centra is a radius distance to the right (y=0)
@@ -867,7 +931,12 @@ std::string GCodeWriter::eager_lift(const LiftType type_in) {
     }
     //BBS: if position is unknown use normal lift
     else if (target_lift > 0) {
-        lift_move = _travel_to_z(m_pos(2) + target_lift, "normal lift Z");
+        if (this->must_skip_lift_now())
+            // Skipped, not deferred: leave m_lifted at zero below so unlift() does not descend
+            // from a height that was never commanded.
+            target_lift = 0.;
+        else
+            lift_move = _travel_to_z(m_pos(2) + target_lift, "normal lift Z");
     }
     m_lifted = target_lift;
     m_to_lift = 0;
@@ -888,8 +957,7 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         // BBS
 
     Vec3d dest_point = apply_test_rotation2(point, trafo, this->extruder_offset_xy());
-    auto travel_speed =
-        m_is_first_layer ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);
+    auto travel_speed = this->travel_xy_speed(true, &dest_point);
     //BBS: a z_hop need to be handle when travel
     if (std::abs(m_to_lift) > EPSILON) {
         assert(std::abs(m_lifted) < EPSILON);
@@ -926,9 +994,10 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         // limits and abandons the print (3.6 silently clamped it, which is why this went unnoticed).
         // Skipping it is safe — the travel below rises to target + liftVec regardless, so the head
         // still clears the part. Same rule as eager_lift's "spiral lift only safe with known position".
+        // This also covers BELT_MOD's must_skip_lift_now() (a remap at an unknown position).
         if (this->is_current_position_clear()) {
             GCodeG1Formatter w0;
-            w0.emit_xyz(source + liftVec);
+            w0.emit_xyz(this->apply_axis_remap(source + liftVec));
             w0.emit_f(travel_speed * 60.0);
             // BBS
             w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
@@ -938,12 +1007,12 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         std::string xy_z_move;
         {
             GCodeG1Formatter w0;
-            w0.emit_xyz(target + liftVec);
+            w0.emit_xyz(this->apply_axis_remap(target + liftVec));
             w0.emit_f(travel_speed * 60.0);
             w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
 
             GCodeG1Formatter w1;
-            w1.emit_xyz(target);
+            w1.emit_xyz(this->apply_axis_remap(target));
             w1.emit_f(travel_speed * 60.0);
             w1.emit_comment(GCodeWriter::full_gcode_comment, comment);
 
@@ -1005,11 +1074,11 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
     }
     if (! approach_vec.isZero()) {
         GCodeG1Formatter w0;
-        w0.emit_xyz(point_on_plate + approach_vec);
+        w0.emit_xyz(this->apply_axis_remap(point_on_plate + approach_vec));
         w0.emit_f(travel_speed * 60.0);
         w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
         GCodeG1Formatter w1;
-        w1.emit_xyz(point_on_plate);
+        w1.emit_xyz(this->apply_axis_remap(point_on_plate));
         w1.emit_f(travel_speed * 60.0);
         w1.emit_comment(GCodeWriter::full_gcode_comment, comment);
         out_string = w0.string() + w1.string();
@@ -1019,17 +1088,23 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         return out_string;
     }
 
-    if (!this->is_current_position_clear())
+    if (has_axis_remap()) {
+        // BELT_MOD: the mapping may couple XY with Z; emit full XYZ in machine coordinates.
+        w.emit_xyz(this->apply_axis_remap(point_on_plate));
+        w.emit_f(this->config.travel_speed.get_at(m_cached_extruder_idx) * 60.0);
+        w.emit_comment(GCodeWriter::full_gcode_comment, comment);
+        out_string = w.string();
+    } else if (!this->is_current_position_clear())
     {
         //force to move xy first then z after filament change
         w.emit_xy(Vec2d(point_on_plate.x(), point_on_plate.y()));
-        w.emit_f(this->config.travel_speed.get_at(m_cached_extruder_idx) * 60.0);
+        w.emit_f(this->travel_xy_speed(false) * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
         out_string = w.string() + _travel_to_z(point_on_plate.z(), comment);
     } else {
         GCodeG1Formatter w;
         w.emit_xyz(point_on_plate);
-        w.emit_f(this->config.travel_speed.get_at(m_cached_extruder_idx) * 60.0);
+        w.emit_f(this->travel_xy_speed(false) * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
         out_string = w.string();
     }
@@ -1051,11 +1126,10 @@ double GCodeWriter::_clamp_feed_for_rotary(double linear_dist, double bc_angular
 // UNLAYERED_MOD — see header. The point is already in the bed frame; emit it verbatim.
 std::string GCodeWriter::travel_to_xyz_direct(const Vec3d &bed_point, const std::string &comment)
 {
-    const double travel_speed =
-        m_is_first_layer ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);
+    const double travel_speed = this->travel_xy_speed();
 
     GCodeG1Formatter w;
-    w.emit_xyz(Vec3d(bed_point(0) - m_x_offset, bed_point(1) - m_y_offset, bed_point(2)));
+    w.emit_xyz(this->apply_axis_remap(Vec3d(bed_point(0) - m_x_offset, bed_point(1) - m_y_offset, bed_point(2))));
     w.emit_f(travel_speed * 60.0);
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
 
@@ -1071,11 +1145,10 @@ std::string GCodeWriter::travel_to_xyz_direct(const Vec3d &bed_point, const std:
 std::string GCodeWriter::rapid_to_xyzbc(const Vec3d &bed_point, std::optional<double> angle_b_deg, std::optional<double> angle_c_deg,
                                         const std::string &comment)
 {
-    const double travel_speed =
-        m_is_first_layer ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);
+    const double travel_speed = this->travel_xy_speed();
 
     GCodeG0Formatter w;
-    w.emit_xyz(Vec3d(bed_point(0) - m_x_offset, bed_point(1) - m_y_offset, bed_point(2)));
+    w.emit_xyz(this->apply_axis_remap(Vec3d(bed_point(0) - m_x_offset, bed_point(1) - m_y_offset, bed_point(2))));
     if (angle_b_deg)
         w.emit_axis('B', *angle_b_deg, GCodeFormatter::XYZF_EXPORT_DIGITS);
     if (angle_c_deg)
@@ -1096,8 +1169,7 @@ std::string GCodeWriter::travel_to_xyz_high_then_down(const Vec3d &local_point, 
 {
     // Destination in machine coordinates (orientation already set by the caller's rotation gcode).
     Vec3d dest = apply_test_rotation2(local_point, trafo, this->extruder_offset_xy());
-    double travel_speed =
-        m_is_first_layer ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);
+    double travel_speed = this->travel_xy_speed(true, &dest);
     const double travel_feed = travel_speed * 60.0; // mm/min
 
     // Keep the current (lifted) machine Z for the XY traverse, then drop straight down. Coordinates
@@ -1117,7 +1189,7 @@ std::string GCodeWriter::travel_to_xyz_high_then_down(const Vec3d &local_point, 
         if (d_xy >= 1.0) {
             const double f = this->_clamp_feed_for_rotary(d_xy, bc_angular_dist_deg, travel_feed);
             GCodeG1Formatter w0;
-            w0.emit_xyz(over);
+            w0.emit_xyz(this->apply_axis_remap(over));
             w0.emit_axis('B', angle_b_deg, GCodeFormatter::XYZF_EXPORT_DIGITS);
             w0.emit_axis('C', angle_c_deg, GCodeFormatter::XYZF_EXPORT_DIGITS);
             w0.emit_f(f);
@@ -1133,21 +1205,21 @@ std::string GCodeWriter::travel_to_xyz_high_then_down(const Vec3d &local_point, 
             wr.emit_comment(GCodeWriter::full_gcode_comment, comment);
             out += wr.string();
             GCodeG1Formatter w0;
-            w0.emit_xyz(over);
+            w0.emit_xyz(this->apply_axis_remap(over));
             w0.emit_f(travel_feed);
             w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
             out += w0.string();
         }
     } else {
         GCodeG1Formatter w0;
-        w0.emit_xyz(over);
+        w0.emit_xyz(this->apply_axis_remap(over));
         w0.emit_f(travel_feed);
         w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
         out += w0.string();
     }
 
     GCodeG1Formatter w1;
-    w1.emit_xyz(target);
+    w1.emit_xyz(this->apply_axis_remap(target));
     w1.emit_f(travel_feed);
     w1.emit_comment(GCodeWriter::full_gcode_comment, comment);
     out += w1.string();
@@ -1189,7 +1261,13 @@ std::string GCodeWriter::_travel_to_z(double z, const std::string &comment)
     }
 
     GCodeG1Formatter w;
-    w.emit_z(z);
+    if (has_axis_remap()) {
+        // BELT_MOD: the mapping may make machine Z depend on logical X/Y, so a Z-only word is
+        // not enough; re-emit the current logical X/Y through the mapping.
+        w.emit_xyz(this->apply_axis_remap(Vec3d(m_pos.x() - m_x_offset, m_pos.y() - m_y_offset, z)));
+    } else {
+        w.emit_z(z);
+    }
     w.emit_f(speed * 60.0);
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
@@ -1198,6 +1276,10 @@ std::string GCodeWriter::_travel_to_z(double z, const std::string &comment)
 
 std::string GCodeWriter::_spiral_travel_to_z(double z, const Vec2d &ij_offset, const std::string &comment)
 {
+    // BELT_MOD: a spiral is planned in the logical XY plane; under a mapping that must emit
+    // every axis it cannot be expressed, so fall back to a plain lift.
+    if (has_axis_remap())
+        return this->_travel_to_z(z, comment);
     std::string output;
     double speed = this->config.travel_speed_z.get_at(m_cached_extruder_idx);
 
@@ -1299,7 +1381,12 @@ std::string GCodeWriter::extrude_to_xy(const Vec2d &point, double dE, const std:
     Vec2d point_on_plate = { point(0) - m_x_offset, point(1) - m_y_offset };
 
     GCodeG1Formatter w;
-    w.emit_xy(point_on_plate);
+    if (has_axis_remap()) {
+        // BELT_MOD: the mapping may couple XY with Z; emit full XYZ in machine coordinates.
+        w.emit_xyz(this->apply_axis_remap(Vec3d(point_on_plate.x(), point_on_plate.y(), m_pos.z())));
+    } else {
+        w.emit_xy(point_on_plate);
+    }
     if (!force_no_extrusion)
         w.emit_e(filament()->E());
     //BBS
@@ -1307,11 +1394,54 @@ std::string GCodeWriter::extrude_to_xy(const Vec2d &point, double dE, const std:
     return w.string();
 }
 
+// BELT_MOD -- approximate an arc with linear extrusions, for machine mappings that cannot
+// express a G2/G3 (see extrude_arc_to_xy). center_offset is I/J: the centre relative to the
+// CURRENT position, which is why this must run before m_pos is updated.
+std::string GCodeWriter::extrude_arc_as_polyline(const Vec2d &point, const Vec2d &center_offset,
+                                                 double dE, const bool is_ccw,
+                                                 const std::string &comment, bool force_no_extrusion)
+{
+    const Vec2d start  = Vec2d(m_pos.x(), m_pos.y());
+    const Vec2d centre = start + center_offset;
+    const double r     = (start - centre).norm();
+    if (r < EPSILON)
+        // Degenerate: no arc to speak of, so a single move is exact.
+        return this->extrude_to_xy(point, dE, comment, force_no_extrusion);
+
+    double a0 = std::atan2(start.y() - centre.y(), start.x() - centre.x());
+    double a1 = std::atan2(point.y() - centre.y(), point.x() - centre.x());
+    double sweep = a1 - a0;
+    if (is_ccw) { while (sweep <= 0.) sweep += 2. * PI; }
+    else        { while (sweep >= 0.) sweep -= 2. * PI; }
+
+    // Segment count from a chord-deviation bound: r*(1-cos(dtheta/2)) <= tol.
+    const double tol  = 0.005;                       // mm
+    const double dmax = (tol >= r) ? PI : 2. * std::acos(1. - tol / r);
+    const int    n    = std::max(2, int(std::ceil(std::abs(sweep) / std::max(dmax, EPSILON))));
+
+    std::string out;
+    for (int i = 1; i <= n; ++ i) {
+        const double a = a0 + sweep * (double(i) / double(n));
+        const Vec2d  p = (i == n) ? point
+                                  : Vec2d(centre.x() + r * std::cos(a), centre.y() + r * std::sin(a));
+        out += this->extrude_to_xy(p, dE / double(n), i == n ? comment : std::string(), force_no_extrusion);
+    }
+    return out;
+}
+
 //BBS: generate G2 or G3 extrude which moves by arc
 //point is end point which means X and Y axis
 //center_offset is I and J axis
 std::string GCodeWriter::extrude_arc_to_xy(const Vec2d& point, const Vec2d& center_offset, double dE, const bool is_ccw, const std::string& comment, bool force_no_extrusion)
 {
+    // BELT_MOD: arcs emit only X/Y/I/J, so a mapping that moves logical X or Y cannot be
+    // expressed as a G2/G3. GCode's arc-fitting gate normally stops arcs being generated at all
+    // for such a mapping, but this is public API, so define the behaviour rather than asserting.
+    // This check MUST precede every state mutation below: falling through to extrude_to_xy()
+    // after filament()->extrude(dE) would advance E twice.
+    if (! m_kinematics->supports_arc_moves())
+        return this->extrude_arc_as_polyline(point, center_offset, dE, is_ccw, comment, force_no_extrusion);
+
     m_pos(0) = point(0);
     m_pos(1) = point(1);
     if (!force_no_extrusion) {
@@ -1358,7 +1488,9 @@ std::string GCodeWriter::extrude_to_xyz(const Vec3d &point, double dE, const std
     // have been made, so a machine-only test turned every one of them into "GCode: very low z".
     // Planar prints are unchanged (both frames coincide), and a cut-plane segment's rebased frame
     // still passes a legitimately negative slice z as long as the nozzle really is above the bed.
-    if (! force_no_extrusion && m_pos.z() < 0.1 && point.z() < 0.1)
+    // UNLAYERED_MOD: the limit scales with a thin first layer (see set_min_extrusion_z); found by
+    // fuzzing, every belt print with a 0.1 mm first layer and a brim was refused here.
+    if (! force_no_extrusion && m_pos.z() < m_min_extrusion_z && point.z() < m_min_extrusion_z)
         throw RuntimeError("GCode: very low z");
     m_lifted = 0;
     if (!force_no_extrusion) {
@@ -1370,7 +1502,10 @@ std::string GCodeWriter::extrude_to_xyz(const Vec3d &point, double dE, const std
     Vec3d point_on_plate = { m_pos(0) - m_x_offset, m_pos(1) - m_y_offset, m_pos(2) };
 
     GCodeG1Formatter w;
-    if (z_changed)
+    if (has_axis_remap())
+        // BELT_MOD: the mapping may couple XY with Z; emit full XYZ in machine coordinates.
+        w.emit_xyz(this->apply_axis_remap(point_on_plate));
+    else if (z_changed)
         w.emit_xyz(point_on_plate);
     else
         w.emit_xy(Vec2d(point_on_plate.x(), point_on_plate.y()));

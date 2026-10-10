@@ -62,15 +62,13 @@ public:
         class Marker
         {
             GLModel m_model;
-            // UNLAYERED_MOD: translucent cone standing on the nozzle tip, sized from the same two
-            // config options HotendCollisionCheck reads, so what is drawn is the envelope actually
-            // being tested. It leaves out the check's 0.5 mm lateral margin, sub-millimetre against
-            // a 40 mm cone. Built lazily in render(): set_envelope() is called from load(), where
-            // there is no guarantee of a current GL context.
+            // UNLAYERED_MOD: translucent four-sided pyramid standing on the nozzle tip, sized from the
+            // same HotendEnvelope HotendCollisionCheck reads and turned by the same tool_head_frame(),
+            // so what is drawn is the envelope actually being tested. It leaves out the check's 0.5 mm
+            // lateral margin, sub-millimetre against a 40 mm envelope. Built lazily in render():
+            // set_envelope() is called from load(), where there is no guarantee of a current GL context.
             GLModel m_envelope;
-            float m_envelope_height{ 0.0f };
-            // full opening angle in degrees, as the config states it (90 = a 45 deg half-angle)
-            float m_envelope_angle{ 0.0f };
+            HotendEnvelope m_envelope_shape;
             bool m_envelope_enabled{ false };
             Vec3f m_world_position;
             // for seams, the position of the marker is on the last endpoint of the toolpath containing it
@@ -105,7 +103,7 @@ public:
             void set_tool_axis(const Vec3f& axis) { m_tool_axis = (axis.squaredNorm() > 0.0f) ? axis.normalized() : Vec3f::UnitZ(); }
             const Vec3f& get_tool_axis() const { return m_tool_axis; }
             // UNLAYERED_MOD
-            void set_envelope(bool enabled, float cone_height, float cone_angle_deg);
+            void set_envelope(bool enabled, const HotendEnvelope& envelope);
 
 #if ENABLE_ACTUAL_SPEED_DEBUG
             void set_actual_speed_y_range(const std::pair<float, float>& y_range) {
@@ -226,6 +224,15 @@ private:
     BoundingBoxf3 m_shell_bounding_box;
     float m_max_print_height{ 0.0f };
     float m_z_offset{ 0.0f };
+    // BELT_MOD: the loaded file was written for a belt printer (GCodeProcessorResult::belt_printer).
+    // The upright ("designed") view maps every vertex through belt_to_bed at load time, so the
+    // toolpaths sit on the model shells in the bed frame; the raw view shows the machine-frame
+    // coordinates as written, for checking the transform itself. The choice survives reloads.
+    bool m_belt_view_enabled{ false };
+    bool m_belt_show_designed{ true };
+    // See GCodeProcessorResult::tool_axis_fixed.
+    bool  m_tool_axis_fixed{ false };
+    Vec3f m_fixed_tool_axis{ Vec3f::UnitZ() };
 
     ConfigOptionMode m_user_mode;
     bool m_fold = {false};
@@ -284,6 +291,9 @@ public:
         const std::vector<std::string>& str_color_print_colors, const BuildVolume& build_volume,
         const std::vector<BoundingBoxf3>& exclude_bounding_box, ConfigOptionMode mode, bool only_gcode = false);
     void load_as_preview(libvgcode::GCodeInputData&& data);
+    // Preference "preview_color_vision": (re)applies the extrusion-role and range palettes for
+    // normal vision or one of the common deficiencies. Called on load and when the preference changes.
+    void apply_color_vision_palette();
     void update_shells_color_by_extruder(const DynamicPrintConfig* config);
     void set_shell_transparency(float alpha = 0.15f);
 
@@ -363,6 +373,13 @@ public:
     const libvgcode::PathVertex& get_gcode_vertex_at(size_t id) const { return m_viewer.get_vertex_at(id); }
 
     bool is_contained_in_bed() const { return m_contained_in_bed; }
+    // BELT_MOD: see m_belt_view_enabled. Toggling only takes effect once the preview is reloaded
+    // (Plater::refresh_belt_view), because the mapping is baked into the vertex positions.
+    bool is_belt_view() const { return m_belt_view_enabled; }
+    bool is_belt_show_designed() const { return m_belt_show_designed; }
+    void toggle_belt_show_designed() { if (m_belt_view_enabled) m_belt_show_designed = ! m_belt_show_designed; }
+    // Are the loaded positions in the bed frame, so that heights and bed bounds mean what they say?
+    bool positions_in_bed_frame() const { return ! m_belt_view_enabled || m_belt_show_designed; }
     //BBS: add only gcode mode
     bool is_only_gcode_in_preview() const { return m_only_gcode_in_preview; }
 

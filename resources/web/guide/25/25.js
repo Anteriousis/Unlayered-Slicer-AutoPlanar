@@ -21,13 +21,9 @@ function ReturnFilamentPage()
 	document.location.href="../22/index.html";
 }
 
+// Unlayered 2026-10-09: no longer the last page. Finish/Skip go on to the one-page "Privacy and
+// printer connections" question (stealth mode + Bambu Lab network plug-in), which finishes the guide.
 function FinishGuide()
 {
-	var tSend={};
-	tSend['sequence_id']=Math.round(new Date() / 1000);
-	tSend['command']="user_guide_finish";
-	tSend['data']={};
-	tSend['data']['action']="finish";
-
-	SendWXMessage( JSON.stringify(tSend) );
+	window.location.href="../4unlayered/index.html";
 }

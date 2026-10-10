@@ -5,6 +5,7 @@
 #include "GUI_App.hpp"
 #include "wxExtensions.hpp"
 #include "Widgets/Button.hpp"
+#include "Widgets/StateColor.hpp"
 
 //BBS set font size
 #include "Widgets/Label.hpp"
@@ -21,14 +22,9 @@ ButtonsListCtrl::ButtonsListCtrl(wxWindow *parent, wxBoxSizer* side_tools) :
     SetDoubleBuffered(true);
 #endif //__WINDOWS__
 
-    wxColour default_btn_bg;
-#ifdef __APPLE__
-    default_btn_bg = wxColour("#3B4446"); // Gradient #414B4E
-#else
-    default_btn_bg = wxColour("#2D2D30"); // Gradient #414B4E
-#endif
-
-   
+    // The tab row is the "Tab bar" theme role (#3B4446, dark row #1E1E21): resolved through the
+    // table so it follows the mode and a theme override, like the Slice/Print pills that sit on it.
+    const wxColour default_btn_bg = StateColor::darkModeColorFor(wxColour("#3B4446"));
     SetBackgroundColour(default_btn_bg);
 
     int em = em_unit(this);// Slic3r::GUI::wxGetApp().em_unit();

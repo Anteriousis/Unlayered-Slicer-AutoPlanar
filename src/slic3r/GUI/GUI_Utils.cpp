@@ -1,9 +1,11 @@
+#include <typeinfo>
 #include "GUI.hpp"
 #include "GUI_Utils.hpp"
 #include "GUI_App.hpp"
 #include "I18N.hpp"
 
 #include <algorithm>
+#include <vector>
 #include <boost/lexical_cast.hpp>
 #include <boost/format.hpp>
 
@@ -311,10 +313,95 @@ void update_dark_ui(wxWindow* window)
 }
 #endif
 
+void order_tab_stops_by_position(wxWindow* win)
+{
+    std::vector<wxWindow*> shown;
+    for (wxWindow* child : win->GetChildren()) {
+        if (child->IsTopLevel())
+            continue;
+        order_tab_stops_by_position(child);
+        const wxRect r = child->GetRect();
+        if (child->IsShown() && r.width > 0 && r.height > 0)
+            shown.push_back(child);
+    }
+    if (shown.size() < 2)
+        return;
+    // Rows: sorted by top edge, a child joins the current row while its vertical centre lies
+    // inside the row's extent; then each row goes left to right.
+    std::vector<wxWindow*> sorted = shown;
+    std::stable_sort(sorted.begin(), sorted.end(), [](wxWindow* a, wxWindow* b) { return a->GetRect().y < b->GetRect().y; });
+    std::vector<std::vector<wxWindow*>> rows;
+    int row_bottom = 0;
+    for (wxWindow* child : sorted) {
+        const wxRect r = child->GetRect();
+        if (rows.empty() || r.y + r.height / 2 >= row_bottom) {
+            rows.emplace_back();
+            row_bottom = r.y + r.height;
+        } else
+            row_bottom = std::max(row_bottom, r.y + r.height);
+        rows.back().push_back(child);
+    }
+    std::vector<wxWindow*> desired;
+    for (auto& row : rows) {
+        std::stable_sort(row.begin(), row.end(), [](wxWindow* a, wxWindow* b) { return a->GetRect().x < b->GetRect().x; });
+        desired.insert(desired.end(), row.begin(), row.end());
+    }
+    if (desired == shown)
+        return;
+    for (size_t i = 1; i < desired.size(); ++i)
+        desired[i]->MoveAfterInTabOrder(desired[i - 1]);
+    // wxGTK rebuilds the native focus chain at idle; do it now so this Tab already uses it.
+    win->OnInternalIdle();
+}
+
+bool drop_focus_from_decorative_containers(wxWindow* win)
+{
+    bool focusable_descendant = false;
+    bool has_children         = false;
+    for (wxWindow* child : win->GetChildren()) {
+        if (child->IsTopLevel()) // a popup parented to a control does not make it a container
+            continue;
+        has_children         = true;
+        focusable_descendant = drop_focus_from_decorative_containers(child) || focusable_descendant;
+    }
+
+    if (!has_children) {
+        // A bare wxPanel with nothing in it is a spacer or separator line, never a control.
+        if (!win->HasFlag(wxWANTS_CHARS) && typeid(*win) == typeid(wxPanel)) {
+            win->SetCanFocus(false);
+            win->DisableFocusFromKeyboard();
+            return false;
+        }
+        return win->AcceptsFocusFromKeyboard() && win->IsEnabled() && win->IsShown(); // a leaf control: leave it alone
+    }
+    if (win->IsTopLevel())
+        return focusable_descendant;
+    if (focusable_descendant) {
+        // A container never competes with its own children for focus, even one that asked for
+        // raw key events (the settings page holder does): Tab looped between it and the tab strip.
+        win->SetCanFocus(false);
+        return true;
+    }
+    if (win->HasFlag(wxWANTS_CHARS)) {
+        // A container that handles keys itself and has nothing focusable inside (the page-tab
+        // strip): it is the keyboard stop. wx switched its focus off when its children were
+        // added, so switch it back on.
+        if (win->AcceptsFocus()) {
+            win->SetCanFocus(true);
+            return true;
+        }
+        return false;
+    }
+    win->SetCanFocus(false);            // wxGTK native traversal
+    win->DisableFocusFromKeyboard();    // generic traversal (wxMSW)
+    return false;
+}
+
 void update_dark_config()
 {
-    wxSystemAppearance app = wxSystemSettings::GetAppearance();
-    GUI::wxGetApp().app_config->set("dark_color_mode", app.IsDark() ? "1" : "0");
+    // Re-derive from the user's colour-scheme choice: a desktop theme change only matters
+    // while that choice is "system".
+    wxGetApp().resolve_color_scheme();
     wxGetApp().Update_dark_mode_flag();
 }
 

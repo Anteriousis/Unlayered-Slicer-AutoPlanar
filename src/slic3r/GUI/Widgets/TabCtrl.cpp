@@ -23,7 +23,9 @@ END_EVENT_TABLE()
 #define TAB_BUTTON_PADDING TAB_BUTTON_PADDING_X, TAB_BUTTON_PADDING_Y
 
 TabCtrl::TabCtrl(wxWindow* parent, wxWindowID id, const wxPoint& pos, const wxSize& size, long style)
-    : StaticBox(parent, id, pos, size, style)
+    // One keyboard stop for the whole strip (wxWANTS_CHARS keeps it focusable): arrows change the
+    // page, Tab moves on; the page buttons themselves are not keyboard stops.
+    : StaticBox(parent, id, pos, size, style | wxWANTS_CHARS)
 {
 #if 0
     radius = 5;
@@ -89,6 +91,7 @@ bool TabCtrl::SetFont(wxFont const& font)
 int TabCtrl::AppendItem(const wxString& item, int image, int selImage, void* clientData)
 {
     Button* btn = new Button();
+    btn->SetCanFocus(false);
     btn->Create(this, item, "", wxBORDER_NONE);
     btn->SetFont(GetFont());
     btn->SetTextColor(

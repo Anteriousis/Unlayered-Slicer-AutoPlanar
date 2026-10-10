@@ -124,6 +124,14 @@ void GLGizmoCutPlanes::commit_gizmo_to_active_plane()
     if (mo == nullptr || m_active_plane < 0 || m_active_plane >= int(mo->cut_planes.planes.size()))
         return;
 
+    // UNLAYERED_MOD -- the authority on the tilt limit for stored planes: every authoring path ends
+    // here. It clamps the POSE rather than just the value written, so the plane is stored at the
+    // angle it is drawn at -- a stored-only clamp would leave the viewport showing a steeper plane
+    // until something resynced it, which is the "print something the viewport never showed" failure
+    // this design forbids. Usually a no-op, because a rotation drag has already been held at the
+    // limit frame by frame.
+    clamp_rotation_to_tilt_limit();
+
     const Transform3d m            = instance_matrix();
     const Vec3d       normal_world = (m_rotation_m * Vec3d::UnitZ()).normalized();
 
@@ -133,6 +141,100 @@ void GLGizmoCutPlanes::commit_gizmo_to_active_plane()
     m_contours_dirty = true;
     m_preview_valid = false;
     schedule_background_process();
+}
+
+// UNLAYERED_MOD -- the tilt limit for one stored plane. The reach comes from the last preview
+// rebuild; 0 (not yet derived) yields the hotend term alone, which is the looser of the two,
+// so a plane whose chunk has not been measured yet is never over-restricted.
+double GLGizmoCutPlanes::plane_tilt_limit_deg(int plane_index, std::optional<double> azimuth) const
+{
+    const double reach = (plane_index >= 0 && plane_index < int(m_plane_reach.size()))
+                       ? m_plane_reach[plane_index] : 0.;
+    return virtual_max_tilt_deg(reach, azimuth);
+}
+
+std::optional<double> GLGizmoCutPlanes::tilt_azimuth(const Vec3d &n_world)
+{
+    if (std::hypot(n_world.x(), n_world.y()) < 1e-6)
+        return std::nullopt;
+    return std::atan2(n_world.y(), n_world.x());
+}
+
+std::optional<double> GLGizmoCutPlanes::tilt_azimuth_bc(double b_deg, double c_deg)
+{
+    return tilt_azimuth(Geometry::build_normal_from_bc(b_deg, c_deg));
+}
+
+// The whole-object (or whole-part) build direction prints the object as ONE tilted piece, so the
+// run the gantry has to clear is the object's own footprint.
+double GLGizmoCutPlanes::object_tilt_limit_deg(std::optional<double> azimuth) const
+{
+    const ModelObject *mo = selected_model_object();
+    if (mo == nullptr)
+        return virtual_max_tilt_deg(0., azimuth);
+    const BoundingBoxf3 bb = mo->raw_mesh_bounding_box().transformed(instance_matrix());
+    return virtual_max_tilt_deg(std::hypot(bb.size().x(), bb.size().y()), azimuth);
+}
+
+Vec3d GLGizmoCutPlanes::clamp_build_normal_to_tilt(const Vec3d &n_world, double limit_deg)
+{
+    if (limit_deg <= 0.)
+        return n_world;
+    // Go through B/C rather than trigonometry on the vector: B IS the tilt from vertical and C the
+    // azimuth, so capping |B| leans the normal back up while leaving the direction it leans in
+    // alone -- and it keeps this in the same convention as the typed field and Print::validate().
+    double b = 0., c = 0.;
+    Geometry::bc_from_build_normal(n_world.normalized(), b, c);
+    if (std::abs(b) <= limit_deg)
+        return n_world;
+    return Geometry::build_normal_from_bc(b < 0. ? -limit_deg : limit_deg, c).normalized();
+}
+
+bool GLGizmoCutPlanes::clamp_rotation_to_tilt_limit()
+{
+    // The limit for the way this pose leans. Clamping keeps that azimuth, so the clamped normal is
+    // held to the same limit it was measured against.
+    const Vec3d  n     = (m_rotation_m * Vec3d::UnitZ()).normalized();
+    const double limit = plane_tilt_limit_deg(m_active_plane, tilt_azimuth(n));
+    if (limit <= 0.)
+        return false;
+    const Vec3d clamped = clamp_build_normal_to_tilt(n, limit);
+    if (clamped.isApprox(n))
+        return false;
+    m_tilt_limit_hit_deg   = limit;
+    m_tilt_limit_hit_plane = m_active_plane;
+    // Same idiom as sync_gizmo_from_active_plane(): a cut plane has no meaningful spin about its
+    // own normal, so rebuilding the pose from the normal alone loses nothing.
+    m_rotation_m               = Transform3d(Eigen::Quaterniond::FromTwoVectors(Vec3d::UnitZ(), clamped));
+    m_transformed_bounding_box = transformed_bounding_box(m_plane_center, m_rotation_m);
+    return true;
+}
+
+void GLGizmoCutPlanes::on_dragging(const UpdateData &data)
+{
+    GLGizmoCut3D::on_dragging(data);
+    // After the base has moved the pose, not instead of it: the plane then renders at the limit for
+    // the rest of the drag, so the user sees it stop rather than watching it follow the cursor and
+    // jump back on release.
+    //
+    // Only on the two TILT grabbers, because they are the only ones whose motion this can oppose.
+    // A move, a spin about Z or a connector drag does not change how far the plane leans, so
+    // clamping there would do nothing per frame and only cost the check.
+    //
+    // It does NOT follow that an over-steep plane survives being moved: commit_gizmo_to_active_plane
+    // clamps whatever ends up being stored, so a plane inherited from a project made before this
+    // printer was characterised straightens the first time it is edited at all. That is the "block
+    // the plane outright" rule doing its job; the panel states the limit so the change is
+    // attributable rather than mysterious.
+    if ((m_hover_id == X || m_hover_id == Y) && ! clamp_rotation_to_tilt_limit()) {
+        // Back inside the limit (by a hair more than rounding): the red line goes away.
+        const Vec3d n = (m_rotation_m * Vec3d::UnitZ()).normalized();
+        double      b = 0., c = 0.;
+        Geometry::bc_from_build_normal(n, b, c);
+        const double limit = plane_tilt_limit_deg(m_active_plane, tilt_azimuth(n));
+        if (limit <= 0. || std::abs(b) < limit - 0.05)
+            m_tilt_limit_hit_deg = 0.;
+    }
 }
 
 const ModelVolume *GLGizmoCutPlanes::scoped_volume() const
@@ -414,6 +516,11 @@ void GLGizmoCutPlanes::align_plane_to_hovered_face()
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Align cut plane to face"), UndoRedo::SnapshotType::GizmoAction);
     m_plane_center = point_world;
     m_rotation_m   = Transform3d(Eigen::Quaterniond::FromTwoVectors(Vec3d::UnitZ(), normal_world));
+    // UNLAYERED_MOD -- picking a face is a third way to pose a plane, so it obeys the tilt limit as
+    // the drag does. Clamped here, before the bookkeeping below captures the pose, so the plane is
+    // stored and drawn at the same angle; on a steep face it lands short of the face it was aimed
+    // at, which is the honest outcome when that face cannot be printed.
+    clamp_rotation_to_tilt_limit();
     // Keep the base class's archived state in step so its drag/undo bookkeeping starts here, and
     // refresh the bounding box before anything consults set_center_pos()'s range check.
     m_ar_plane_center          = m_plane_center;
@@ -1225,7 +1332,12 @@ void GLGizmoCutPlanes::render_cut_plane_input_window(CutConnectors &connectors, 
                 ImGui::SetTooltip("%s", _u8L("Reorder: the first plane in the list prints last. Switches Automatic order off.").c_str());
             ImGui::SameLine();
 
-            if (ImGui::RadioButton("##active", int(i) == m_active_plane))
+            // Same radio style as the Cut/Emboss/SVG gizmos: the bare ImGui radio inherits the
+            // toolbar style's white check mark, which vanished on the light theme.
+            ImGuiWrapper::push_radio_style(m_parent.get_scale());
+            const bool toggle_active = ImGui::RadioButton("##active", int(i) == m_active_plane);
+            ImGuiWrapper::pop_radio_style();
+            if (toggle_active)
                 set_active_plane(int(i) == m_active_plane ? -1 : int(i));
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", _u8L("Edit this plane with the grabbers (click again to release)").c_str());
@@ -1367,7 +1479,12 @@ void GLGizmoCutPlanes::render_object_build_direction()
                                       part != nullptr ? _u8L("Set part build direction") : _u8L("Set object build direction"),
                                       UndoRedo::SnapshotType::GizmoAction);
         const bool  first_directed_part = part != nullptr && ! object_has_directed_parts(*mo);
-        const Vec3d n_w                 = (m_rotation_m * Vec3d::UnitZ()).normalized();
+        // UNLAYERED_MOD -- the object (or part) prints as one tilted piece, so its own footprint is
+        // the run the gantry has to clear, not the active plane's chunk. In practice the pose is
+        // already inside the plane limit, but the two limits differ whenever the object is larger
+        // than the chunk seated on that plane, which is the usual case.
+        const Vec3d n_pose              = (m_rotation_m * Vec3d::UnitZ()).normalized();
+        const Vec3d n_w                 = clamp_build_normal_to_tilt(n_pose, object_tilt_limit_deg(tilt_azimuth(n_pose)));
         double      new_b = 0., new_c = 0.;
         Geometry::bc_from_build_normal(n_w, new_b, new_c);
         config.set_key_value("layer_rotation_b", new ConfigOptionFloat(new_b));
@@ -1406,9 +1523,13 @@ void GLGizmoCutPlanes::render_object_build_direction()
     if (part != nullptr && (has_b || has_c))
         m_imgui->text_colored(ImGuiWrapper::COL_GREY_DARK, _L("This part prints as its own section; the cut planes apply to the other parts."));
     if (virtual_5axis_enabled()) {
-        const double cap = virtual_max_tilt_deg();
-        if (cap > 0. && std::abs(b) > cap)
-            m_imgui->warning_text(GUI::format_wxstr(_L("Warning: B exceeds the printer\'s tilt limit of %1%°; slicing will refuse it."), cap));
+        const double cap = object_tilt_limit_deg(tilt_azimuth_bc(b, c));
+        if (cap > 0. && std::abs(b) > cap + EPSILON)
+            // Still possible despite the clamp above: the direction may predate the printer being
+            // characterised, or have arrived with the project or a pasted config.
+            m_imgui->warning_text(GUI::format_wxstr(
+                _L("Warning: B is %1%°, past the %2%° this printer can build; slicing will refuse it."),
+                wxString::Format("%.1f", std::abs(b)), wxString::Format("%.1f", cap)));
     }
 }
 
@@ -1455,14 +1576,19 @@ void GLGizmoCutPlanes::render_build_direction_editor(CutPlaneStack &stack)
     ImGui::InputDouble("B##build_b", &m_edit_b, 0.0, 0.0, "%.2f");
     if (ImGui::IsItemDeactivatedAfterEdit()) {
         m_edit_b = std::clamp(m_edit_b, -180.0, 0.0);
-        // UNLAYERED_MOD -- deliberately NOT clamped to the printer's virtual-mode tilt cap here.
-        // This typed field is only one of three ways a build direction is authored (the others are
-        // dragging the plane's rotation grabbers, and GLGizmoCutChunks), and the other two cannot be
-        // clamped safely: the plane normal IS the cut geometry, so silently reducing it would store a
-        // shallower partition than the rendered plane and the section colours show -- the "print
-        // something the viewport never showed" failure this design forbids elsewhere. Clamping only
-        // here would make one path quietly disagree with the other two. Print::validate() is the
-        // single enforcement point and refuses the slice instead.
+        // UNLAYERED_MOD -- and then to the printer's virtual-mode tilt limit, so a typed angle
+        // cannot reach past what the drag grabbers now refuse to go to. This used to be deliberately
+        // unclamped, on the reasoning that the plane normal IS the cut geometry and quietly reducing
+        // it would store a shallower partition than the viewport shows. That objection was about
+        // clamping at SLICE time; at authoring time every path -- this field, the rotation grabbers,
+        // face picking -- clamps the pose it draws as well as the value it stores, so what is shown
+        // and what is stored still agree. Print::validate() remains the backstop for a direction
+        // that arrives some other way (an old project, a pasted config, the skeleton gizmo).
+        if (const double cap = plane_tilt_limit_deg(m_active_plane, tilt_azimuth_bc(m_edit_b, m_edit_c)); cap > 0.) {
+            m_tilt_limit_hit_deg   = m_edit_b < -cap ? cap : 0.;
+            m_tilt_limit_hit_plane = m_active_plane;
+            m_edit_b = std::clamp(m_edit_b, -cap, 0.0);
+        }
         commit_bc(m_edit_b, m_edit_c);
     }
     if (ImGui::IsItemHovered())
@@ -1493,6 +1619,36 @@ void GLGizmoCutPlanes::render_build_direction_editor(CutPlaneStack &stack)
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", _u8L("Track the cut plane's normal again").c_str());
     m_imgui->disabled_end();
+
+    // UNLAYERED_MOD -- say what the limit is and where it came from, so a drag that refuses to go
+    // further is explained rather than merely felt. Shown whenever there is a limit, not only when
+    // it bites: finding out why the plane stopped is exactly the moment the number is wanted.
+    if (virtual_5axis_enabled()) {
+        // One short line -- red while the plane is held at the limit (the drag, typed angle or
+        // picked face asked for more tilt than the printer can build), grey otherwise -- and the
+        // why in a tooltip. The panel does not wrap, so a sentence here runs off its edge.
+        const bool   held  = m_tilt_limit_hit_deg > 0. && m_tilt_limit_hit_plane == m_active_plane;
+        // For the way the plane leans now: the hotend is not round, so another azimuth can differ.
+        const double cap   = plane_tilt_limit_deg(m_active_plane, tilt_azimuth_bc(m_edit_b, m_edit_c));
+        const double limit = held ? m_tilt_limit_hit_deg : cap;
+        if (limit > 0.) {
+            const double reach = (m_active_plane >= 0 && m_active_plane < int(m_plane_reach.size()))
+                               ? m_plane_reach[m_active_plane] : 0.;
+            const wxString deg = wxString::Format("%.1f", limit);
+            if (held)
+                m_imgui->text_colored(ImGuiWrapper::COL_RED, GUI::format_wxstr(_L("Stopped at the tilt limit: %1%°"), deg));
+            else
+                m_imgui->text_colored(ImGuiWrapper::COL_GREY_DARK, GUI::format_wxstr(_L("Max tilt this way: %1%°"), deg));
+            if (ImGui::IsItemHovered()) {
+                wxString why = _L("Any steeper and the hotend or the gantry would hit the part, or the plane would pass "
+                                  "the printer's max tilt angle. The limit depends on which way the plane leans");
+                why += reach > 0. ? GUI::format_wxstr(_L(" and on the chunk's size (%1% mm across)."), wxString::Format("%.0f", reach))
+                                  : wxString(".");
+                why += " " + _L("On a virtual 5-axis printer the nozzle stays upright.");
+                m_imgui->tooltip(why, ImGui::GetFontSize() * 20.0f);
+            }
+        }
+    }
 }
 
 std::vector<Slic3r::CutPlane> GLGizmoCutPlanes::effective_planes(bool *provisional) const
@@ -1557,10 +1713,25 @@ void GLGizmoCutPlanes::rebuild_segment_preview()
     m_preview_status = CutSegmentationStatus::StackInactive;
     m_preview_valid  = true;
     m_plane_splits.assign(m_preview_planes.size(), false);
+    m_plane_reach.assign(m_preview_planes.size(), 0.);
 
     const ModelObject *mo = selected_model_object();
     if (mo == nullptr || m_preview_planes.empty())
         return;
+
+    // The filament the chunks fade from: the scoped part's, or the object's first part's -- the
+    // same part whose colour GLVolume::render_cut_chunks() fades from in the Prepare view.
+    const ColorRGBA filament = [this, mo]() {
+        const ModelVolume *mv = m_merged_scope;
+        for (const ModelVolume *v : mo->volumes)
+            if (mv == nullptr && v->is_model_part())
+                mv = v;
+        const std::vector<ColorRGBA> colors = wxGetApp().plater()->get_extruders_colors();
+        int extruder = (mv != nullptr ? mv->extruder_id() : 1) - 1;
+        if (extruder < 0 || extruder >= int(colors.size()))
+            extruder = 0;
+        return colors.empty() ? ColorRGBA::WHITE() : colors[extruder];
+    }();
 
     const indexed_triangle_set &merged = merged_mesh();
     if (merged.vertices.empty()) {
@@ -1584,7 +1755,7 @@ void GLGizmoCutPlanes::rebuild_segment_preview()
                 if (m_preview_chunks && seg.index < int(all_pieces.size()) && ! all_pieces[seg.index].indices.empty()) {
                     m_segment_models.resize(1);
                     m_segment_models[0].init_from(all_pieces[seg.index]);
-                    m_segment_models[0].set_color(cut_segment_color(seg.index));
+                    m_segment_models[0].set_color(cut_segment_color(seg.index, all.size(), filament));
                 }
                 return;
             }
@@ -1603,10 +1774,17 @@ void GLGizmoCutPlanes::rebuild_segment_preview()
         return;
 
     m_plane_splits.assign(m_preview_planes.size(), false);
-    for (const CutSegmentDescriptor &seg : segs)
+    m_plane_reach.assign(m_preview_planes.size(), 0.);
+    for (const CutSegmentDescriptor &seg : segs) {
         for (const CutSegmentClip &clip : seg.clips)
             if (clip.plane_index >= 0 && clip.plane_index < int(m_plane_splits.size()))
                 m_plane_splits[clip.plane_index] = true;
+        // A chunk is built along the plane it is seated on, so that plane's tilt limit is set by
+        // the largest chunk sitting on it. Several can, when one plane cuts a part into disjoint
+        // pieces, and then the biggest governs -- the limit has to hold for all of them.
+        if (seg.base_plane >= 0 && seg.base_plane < int(m_plane_reach.size()))
+            m_plane_reach[seg.base_plane] = std::max(m_plane_reach[seg.base_plane], seg.build_reach_max);
+    }
 
     if (! m_preview_chunks)
         return; // descriptors and plane annotations only; no GPU upload while the preview is off
@@ -1616,7 +1794,7 @@ void GLGizmoCutPlanes::rebuild_segment_preview()
         if (pieces[i].indices.empty())
             continue;
         m_segment_models[i].init_from(pieces[i]);
-        m_segment_models[i].set_color(cut_segment_color(i));
+        m_segment_models[i].set_color(cut_segment_color(i, pieces.size(), filament));
     }
 }
 

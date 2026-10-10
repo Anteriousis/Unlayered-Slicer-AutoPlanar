@@ -6,6 +6,7 @@
 #include "Print.hpp"
 #include "SLA/IndexedMesh.hpp"
 #include "libslic3r.h"
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <initializer_list>
@@ -13,7 +14,37 @@
 
 namespace Slic3r {
 
-static void contour_extrusion_entity(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionEntity *extr);
+// What a layer is contoured against: the mesh, bounded further by a cut-plane segment's clips.
+struct ContourZSurface
+{
+    const sla::IndexedMesh                    &mesh;
+    const std::vector<Layer::ContourZCeiling> &ceilings;
+
+    struct Hit
+    {
+        bool   is_hit;
+        double distance;
+        Vec3d  normal;
+    };
+
+    // Where an upward ray from inside the material first leaves  mesh ∩ every ceiling.
+    Hit query_up(const Vec3d &origin) const
+    {
+        const sla::IndexedMesh::hit_result mesh_hit = mesh.query_ray_hit(origin, Vec3d::UnitZ());
+        Hit hit{mesh_hit.is_hit(), mesh_hit.distance(), mesh_hit.is_hit() ? mesh_hit.normal() : Vec3d::UnitZ()};
+        for (const Layer::ContourZCeiling &ceiling : ceilings) {
+            // A downward-facing plane (a segment's floor) is never left through going up.
+            if (ceiling.normal.z() < EPSILON)
+                continue;
+            const double t = std::max(0., (ceiling.offset - ceiling.normal.dot(origin)) / ceiling.normal.z());
+            if (!hit.is_hit || t < hit.distance)
+                hit = {true, t, ceiling.normal};
+        }
+        return hit;
+    }
+};
+
+static void contour_extrusion_entity(LayerRegion *region, const ContourZSurface &surface, ExtrusionEntity *extr);
 
 static double follow_slope_down(double angle_rad, double dist)
 {
@@ -30,7 +61,7 @@ static double slope_from_normal(const Eigen::Vector3d& normal)
 	return angle_rad;
 }
 
-static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionPath &path)
+static bool contour_extrusion_path(LayerRegion *region, const ContourZSurface &surface, ExtrusionPath &path)
 {
 
 	    //BOOST_LOG_TRIVIAL(info) << "contour_extrusion_path: role=" << path.role();
@@ -42,8 +73,8 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
 	}
 	
 	Layer *layer = region->layer();
-	coordf_t mesh_slice_z = layer->slice_z + mesh.ground_level();
-    BOOST_LOG_TRIVIAL(info) << "contour_extrusion_path: mesh_slice_z=" << mesh_slice_z << " ground_level=" << mesh.ground_level();
+	coordf_t mesh_slice_z = layer->slice_z + surface.mesh.ground_level();
+    BOOST_LOG_TRIVIAL(info) << "contour_extrusion_path: mesh_slice_z=" << mesh_slice_z << " ground_level=" << surface.mesh.ground_level();
 
 	coordf_t min_z = region->region().config().zaa_min_z;
 
@@ -81,11 +112,11 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
             coordf_t x = p.x();
 			coordf_t y = p.y();
 
-			sla::IndexedMesh::hit_result hit_up = mesh.query_ray_hit({x, y, mesh_slice_z}, {0.0, 0.0, 1.0});
-            //BOOST_LOG_TRIVIAL(info) << "contour_extrusion_path: hit=" << hit_up.is_hit() << " distance=" << hit_up.distance();
+			ContourZSurface::Hit hit_up = surface.query_up({x, y, mesh_slice_z});
+            //BOOST_LOG_TRIVIAL(info) << "contour_extrusion_path: hit=" << hit_up.is_hit << " distance=" << hit_up.distance;
 
 
-			double d = hit_up.distance() - (layer->print_z - layer->slice_z);
+			double d = hit_up.distance - (layer->print_z - layer->slice_z);
 
 			double max_up = min_z;
 			double min_down = -(height - min_z);
@@ -95,8 +126,8 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
 				min_down = -(height + 0.1);
 			}
 
-            if (is_perimeter(path.role()) && hit_up.is_hit()) {
-				const Vec3d &normal = hit_up.normal();
+            if (is_perimeter(path.role()) && hit_up.is_hit) {
+				const Vec3d &normal = hit_up.normal;
                 double slope_rad     = slope_from_normal(normal);
                 double slope_degrees = slope_rad * 180.0 / M_PI;
 
@@ -168,28 +199,28 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
 	return true;
 }
 
-static void contour_extrusion_multipath(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionMultiPath &multipath) 
+static void contour_extrusion_multipath(LayerRegion *region, const ContourZSurface &surface, ExtrusionMultiPath &multipath) 
 {
 	for (ExtrusionPath &path : multipath.paths) {
-		contour_extrusion_path(region, mesh, path);
+		contour_extrusion_path(region, surface, path);
 	}
 }
 
-static void contour_extrusion_loop(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionLoop &loop) 
+static void contour_extrusion_loop(LayerRegion *region, const ContourZSurface &surface, ExtrusionLoop &loop) 
 {
 	for (ExtrusionPath &path : loop.paths) {
-		contour_extrusion_path(region, mesh, path);
+		contour_extrusion_path(region, surface, path);
 	}
 }
 
-static void contour_extrusion_entitiy_collection(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionEntityCollection &collection)
+static void contour_extrusion_entitiy_collection(LayerRegion *region, const ContourZSurface &surface, ExtrusionEntityCollection &collection)
 {
 	for (ExtrusionEntity *entity : collection.entities) {
-		contour_extrusion_entity(region, mesh, entity);
+		contour_extrusion_entity(region, surface, entity);
 	}
 }
 
-static void contour_extrusion_entity(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionEntity *extr)
+static void contour_extrusion_entity(LayerRegion *region, const ContourZSurface &surface, ExtrusionEntity *extr)
 {
 	const ExtrusionPathSloped *sloped = dynamic_cast<const ExtrusionPathSloped*>(extr);
 	if (sloped != nullptr) {
@@ -199,19 +230,19 @@ static void contour_extrusion_entity(LayerRegion *region, const sla::IndexedMesh
 
 	ExtrusionMultiPath *multipath = dynamic_cast<ExtrusionMultiPath*>(extr);
 	if (multipath != nullptr) {
-		contour_extrusion_multipath(region, mesh, *multipath);
+		contour_extrusion_multipath(region, surface, *multipath);
 		return;
 	}
 
 	ExtrusionPath *path = dynamic_cast<ExtrusionPath*>(extr);
 	if (path != nullptr) {
-		contour_extrusion_path(region, mesh, *path);
+		contour_extrusion_path(region, surface, *path);
 		return;
 	}
 
 	ExtrusionLoop *loop = dynamic_cast<ExtrusionLoop*>(extr);
 	if (loop != nullptr) {
-		contour_extrusion_loop(region, mesh, *loop);
+		contour_extrusion_loop(region, surface, *loop);
 		return;
 	}
 
@@ -223,7 +254,7 @@ static void contour_extrusion_entity(LayerRegion *region, const sla::IndexedMesh
 
 	ExtrusionEntityCollection *collection = dynamic_cast<ExtrusionEntityCollection*>(extr);
 	if (collection != nullptr) {
-		contour_extrusion_entitiy_collection(region, mesh, *collection);
+		contour_extrusion_entitiy_collection(region, surface, *collection);
 		return;
 	}
 
@@ -231,24 +262,25 @@ static void contour_extrusion_entity(LayerRegion *region, const sla::IndexedMesh
 	return;
 }
 
-static void handle_extrusion_collection(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionEntityCollection &collection, std::initializer_list<ExtrusionRole> roles) {
+static void handle_extrusion_collection(LayerRegion *region, const ContourZSurface &surface, ExtrusionEntityCollection &collection, std::initializer_list<ExtrusionRole> roles) {
     for (ExtrusionEntity* extr : collection.entities) {
         if (!contains(roles, extr->role())) {
 			continue;
 		}
 
-		contour_extrusion_entity(region, mesh, extr);
+		contour_extrusion_entity(region, surface, extr);
     }
 }
 
-void Layer::make_contour_z(const sla::IndexedMesh &mesh)
+void Layer::make_contour_z(const sla::IndexedMesh &mesh, const std::vector<ContourZCeiling> &ceilings)
 {
+    const ContourZSurface surface{mesh, ceilings};
 	for (LayerRegion *region : this->regions()) {
         if (!region->region().config().zaa_enabled)
             continue;
 
-        handle_extrusion_collection(region, mesh, region->fills, {erTopSolidInfill, erIroning, erPerimeter, erExternalPerimeter, erMixed});
-        handle_extrusion_collection(region, mesh, region->perimeters, {erPerimeter, erExternalPerimeter, erMixed});
+        handle_extrusion_collection(region, surface, region->fills, {erTopSolidInfill, erIroning, erPerimeter, erExternalPerimeter, erMixed});
+        handle_extrusion_collection(region, surface, region->perimeters, {erPerimeter, erExternalPerimeter, erMixed});
     }
 }
 } // namespace Slic3r

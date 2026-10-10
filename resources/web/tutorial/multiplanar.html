@@ -114,14 +114,16 @@
   </table>
   <p class="muted">A plane that does not actually split the object is listed but produces no cut.</p>
 
-  <h2>4 &nbsp;Cut by Skeleton</h2>
-  <p>For branching organic shapes, the <span class="ui">Skeleton Cut</span> tool can place the
-  planes for you:</p>
+  <h2>4 &nbsp;Pipe Cut</h2>
+  <p>For a bent pipe, duct or tube, the <span class="ui">Pipe Cut</span> tool places the planes
+  for you. It finds the centreline of the bore and cuts the part into short chunks along it, so
+  each chunk prints square to the pipe. It is for hollow, tube-shaped parts only — a solid or
+  boxy model (a Benchy, a bracket) gets nothing useful from it.</p>
   <ol class="steps">
-    <li>Open the <span class="ui">Skeleton Cut</span> tool and generate a skeleton. Edit it if
-        needed — move, delete, or connect nodes.</li>
-    <li>Click <span class="ui">Cut by Skeleton</span>: one cut plane is added per skeleton edge
-        (at the edge midpoint, facing along the branch), and you land in the Cut Planes tool with
+    <li>Open the <span class="ui">Pipe Cut</span> tool. The centreline is found automatically;
+        edit it if needed — move, delete, or connect nodes.</li>
+    <li>Click <span class="ui">Cut along pipe</span>: one cut plane is added per centreline step
+        (at the step midpoint, facing along the pipe), and you land in the Cut Planes tool with
         the full list ready to review and edit.</li>
     <li>Prefer manual control? Use <span class="ui">Step</span> to walk the proposed cuts one by
         one and <span class="ui">Cut here</span> to add only the planes you want.</li>

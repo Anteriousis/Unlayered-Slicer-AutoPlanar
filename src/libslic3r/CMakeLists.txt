@@ -74,6 +74,8 @@ set(lisbslic3r_sources
     ArcFitter.hpp
     Arrange.cpp
     Arrange.hpp
+    BedMesh.cpp
+    BedMesh.hpp
     BlacklistedLibraryCheck.cpp
     BlacklistedLibraryCheck.hpp
     BoundingBox.cpp
@@ -130,6 +132,11 @@ set(lisbslic3r_sources
     ExtrusionEntityCollection.hpp
     ExtrusionEntity.cpp
     ExtrusionEntity.hpp
+    WaveOverhangs/WaveOverhangs.cpp
+    WaveOverhangs/WaveOverhangs.hpp
+    WaveOverhangs/IGenerator.hpp
+    WaveOverhangs/AndersonsGenerator.cpp
+    WaveOverhangs/AndersonsGenerator.hpp
     ExtrusionSimulator.cpp
     ExtrusionSimulator.hpp
     FaceDetector.cpp
@@ -163,10 +170,18 @@ set(lisbslic3r_sources
     Fill/FillHoneycomb.cpp
     Fill/FillHoneycomb.hpp
     Fill/Fill.hpp
+    Fill/Implicits.hpp
     Fill/FillLightning.cpp
     Fill/FillLightning.hpp
     Fill/FillLine.cpp
     Fill/FillLine.hpp
+    Fill/FillMeshBacked.hpp
+    Fill/FillSvg.cpp
+    Fill/FillSvg.hpp
+    Fill/InfillMeshTiling.cpp
+    Fill/InfillMeshTiling.hpp
+    Fill/MeshGenerator.cpp
+    Fill/MeshGenerator.hpp
     Fill/FillPlanePath.cpp
     Fill/FillPlanePath.hpp
     Fill/FillRectilinear.cpp
@@ -272,12 +287,23 @@ set(lisbslic3r_sources
     GCode/ToolOrdering.hpp
     GCode/OrderingStrategies.cpp
     GCode/OrderingStrategies.hpp
+    GCode/BeltKinematics.cpp
+    GCode/BeltKinematics.hpp
+    BeltPurge.cpp
+    BeltBrim.cpp
+    BeltBrim.hpp
+    GCode/MachineFrameTransform.cpp
+    GCode/MachineFrameTransform.hpp
+    GCode/MachineKinematics.cpp
+    GCode/MachineKinematics.hpp
     GCode/WipeTower2.cpp
     GCode/WipeTower2.hpp
     GCode/WipeTower.cpp
     GCode/WipeTower.hpp
     GCode/WipeTowerEstimate.cpp
     GCode/WipeTowerEstimate.hpp
+    BeltTransform.cpp
+    BeltTransform.hpp
     GCodeWriter.cpp
     GCodeWriter.hpp
     Geometry/ArcWelder.hpp
@@ -376,6 +402,7 @@ set(lisbslic3r_sources
     Preset.hpp
     PrincipalComponents2D.cpp
     PrincipalComponents2D.hpp
+    PreSliceInfillStructures.hpp
     PublishSettings.cpp
     PublishSettings.hpp
     PrintApply.cpp
@@ -448,6 +475,8 @@ set(lisbslic3r_sources
     Slicing.hpp
     Support/SegmentSupportBounds.cpp
     Support/SegmentSupportBounds.hpp
+    Support/SupportDirection.cpp
+    Support/SupportDirection.hpp
     Support/SupportCommon.cpp
     Support/SupportCommon.hpp
     Support/SupportLayer.hpp

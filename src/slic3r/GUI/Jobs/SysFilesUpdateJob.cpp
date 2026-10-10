@@ -262,6 +262,10 @@ void SysFilesUpdateJob::process(Ctl &ctl)
     for (const auto &f : pkg.files)
         m_result.available_files.push_back({f.path, uint64_t(f.data.size())});
 
+    m_result.required_firmware = sys_required_firmware(pkg, &m_result.required_firmware_reason);
+    m_result.firmware_too_old  = m_result.board_known &&
+                                 !sys_firmware_satisfies(m_result.board.firmware_version, m_result.required_firmware);
+
     if (m_options.query_only) {
         m_result.outcome = Outcome::QueryOk;
         update_status(ctl, 100, _u8L("Ready"));
@@ -290,6 +294,27 @@ void SysFilesUpdateJob::process(Ctl &ctl)
     if (pkg.files.empty()) {
         fail(ctl, _u8L("There are no files selected to install."));
         return;
+    }
+
+    // Configuration newer than the firmware is worse than no update: config.g stops at the first
+    // command the board does not know and skips the rest, so the machine comes up with no heaters,
+    // fans or tool (a customer hit exactly this with M558 P12 on +unlayered.9, 2026-09-27). Judged
+    // on the ticked files, so leaving the offending file out is a way through. Not overridable by
+    // force: the fix is always to update the firmware first, and that is always possible.
+    {
+        std::string       reason;
+        const std::string need = sys_required_firmware(pkg, &reason);
+        if (!m_result.board_known) {
+            if (!need.empty())
+                BOOST_LOG_TRIVIAL(warning) << "SysFilesUpdateJob: these files need firmware " << need
+                                           << " (" << reason << ") and the board's version could not be read";
+        } else if (!sys_firmware_satisfies(m_result.board.firmware_version, need)) {
+            fail(ctl, (boost::format(_u8L("These files need printer firmware %1% or newer (%2%), and the printer is "
+                                          "running %3%. Nothing has been changed. Update the firmware first with "
+                                          "the Firmware button, then install the configuration."))
+                       % need % reason % m_result.board.firmware_version).str());
+            return;
+        }
     }
 
     // A package that states no version is never "already installed" - the same rule the firmware

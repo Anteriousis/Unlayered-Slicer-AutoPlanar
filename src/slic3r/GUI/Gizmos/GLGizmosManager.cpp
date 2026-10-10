@@ -1,6 +1,7 @@
 #include "libslic3r/libslic3r.h"
 #include "GLGizmosManager.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
+#include "slic3r/GUI/GLToolbar.hpp"
 #include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -1143,6 +1144,8 @@ void GLGizmosManager::update_after_undo_redo(const UndoRedo::Snapshot& snapshot)
 
 void GLGizmosManager::render_background(float left, float top, float right, float bottom, float border_w, float border_h) const
 {
+    if (GLToolbar::render_background_override(left, top, right, bottom)) // the theme's "3D view toolbars" colour
+        return;
     const unsigned int tex_id = m_background_texture.texture.get_id();
     const float tex_width = float(m_background_texture.texture.get_width());
     const float tex_height = float(m_background_texture.texture.get_height());
@@ -1566,7 +1569,7 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
     case GLGizmosManager::EType::FuzzySkin:
         return "Fuzzy Skin Painting";
     case GLGizmosManager::EType::Skeleton:
-        return "Skeleton Cut";
+        return "Pipe Cut";
     case GLGizmosManager::EType::CutPlanes:
         return "Cut Planes";
     default:

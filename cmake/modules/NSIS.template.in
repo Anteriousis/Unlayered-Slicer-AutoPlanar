@@ -19,10 +19,22 @@
   Var ADD_TO_PATH_CURRENT_USER
   Var INSTALL_DESKTOP
   Var IS_DEFAULT_INSTALLDIR
+  Var BAMBU_PLUGIN_CHECKBOX
+  Var BAMBU_PLUGIN_OPTIN
+  ; Unlayered self-update (src/slic3r/Utils/AppUpdater.cpp, launch_silent_update). The running
+  ; slicer starts this installer as
+  ;   /S /UPDATE /WAITPID=<its pid> [/RELAUNCH] /D=<its install folder>
+  ; and exits; see .onInit and .onInstSuccess.
+  Var UPDATE_MODE
+  Var RELAUNCH
+  Var DESKTOP_LINK_EXISTED
 ;--------------------------------
 ;Include Modern UI
 
   !include "MUI.nsh"
+  !include "nsDialogs.nsh"
+  !include "LogicLib.nsh"
+  !include "FileFunc.nsh"
 
   ;Default installation folder
   InstallDir "@CPACK_NSIS_INSTALL_ROOT@\@CPACK_PACKAGE_INSTALL_DIRECTORY@"
@@ -567,6 +579,42 @@ vidw_denied:
 vidw_done:
 FunctionEnd
 
+; Unlayered: optional Bambu Lab network plug-in. It is Bambu Lab's closed-source
+; binary, so the installer never bundles or downloads it. A ticked box only
+; records InstallBambuNetworkPlugin=1 under the app's registry key, and the
+; slicer runs its own plug-in download (the same one as Preferences > Online)
+; on its next launch. Unticked by default and an unticked box changes nothing,
+; so a reinstall never removes a plug-in the user already has. Silent installs
+; skip the page and so never opt in.
+Function BambuPluginPage
+  !insertmacro MUI_HEADER_TEXT "Bambu Lab printers" "Optional: printing to Bambu Lab printers"
+  nsDialogs::Create 1018
+  Pop $0
+  ${If} $0 == error
+    Abort
+  ${EndIf}
+
+  ${NSD_CreateLabel} 0 0 100% 72u "Sending prints to Bambu Lab printers, over your network or Bambu Cloud, needs Bambu Lab's network plug-in.$\r$\n$\r$\nThe plug-in is closed-source software from Bambu Lab. If you tick the box below, Unlayered Slicer downloads it from Bambu Lab's servers the first time it starts.$\r$\n$\r$\nYou can turn it on or off later in Preferences > Online."
+  Pop $0
+
+  ${NSD_CreateCheckbox} 0 80u 100% 12u "Install the Bambu Lab network plug-in"
+  Pop $BAMBU_PLUGIN_CHECKBOX
+  ${If} $BAMBU_PLUGIN_OPTIN == "1"
+    ${NSD_Check} $BAMBU_PLUGIN_CHECKBOX
+  ${EndIf}
+
+  nsDialogs::Show
+FunctionEnd
+
+Function BambuPluginPageLeave
+  ${NSD_GetState} $BAMBU_PLUGIN_CHECKBOX $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $BAMBU_PLUGIN_OPTIN "1"
+  ${Else}
+    StrCpy $BAMBU_PLUGIN_OPTIN "0"
+  ${EndIf}
+FunctionEnd
+
 ;--------------------------------
 ;Pages
   @CPACK_NSIS_INSTALLER_WELCOME_TITLE_CODE@
@@ -591,6 +639,8 @@ FunctionEnd
   !insertmacro MUI_PAGE_STARTMENU Application $STARTMENU_FOLDER
 
   @CPACK_NSIS_PAGE_COMPONENTS@
+
+  Page custom BambuPluginPage BambuPluginPageLeave
 
   !insertmacro MUI_PAGE_INSTFILES
   @CPACK_NSIS_INSTALLER_FINISH_TITLE_CODE@
@@ -775,6 +825,11 @@ Section "-Core installation"
   Push "$INSTALL_DESKTOP"
   Call ConditionalAddToRegistry
 
+  ; Read once by the slicer on its next launch; see BambuPluginPage.
+  ${If} $BAMBU_PLUGIN_OPTIN == "1"
+    WriteRegDWORD SHCTX "Software\@CPACK_PACKAGE_VENDOR@\@CPACK_PACKAGE_INSTALL_REGISTRY_KEY@" "InstallBambuNetworkPlugin" 1
+  ${EndIf}
+
   !insertmacro MUI_STARTMENU_WRITE_END
 
 @CPACK_NSIS_EXTRA_INSTALL_COMMANDS@
@@ -788,6 +843,15 @@ Section "-Add to path"
     Call AddToPath
   doNotAddToPath:
 SectionEnd
+
+;--------------------------------
+; Unlayered self-update: bring the slicer straight back up after "Restart to update". Without
+; /RELAUNCH (the person closed the app and the update installed on the way out) nothing starts.
+Function .onInstSuccess
+  ${If} $RELAUNCH == "1"
+    Exec '"$INSTDIR\unlayered-slicer.exe"'
+  ${EndIf}
+FunctionEnd
 
 ;--------------------------------
 ; Create custom pages
@@ -959,6 +1023,44 @@ SectionEnd
 ; "Program Files" for AllUsers, "My Documents" for JustMe...
 
 Function .onInit
+  ; --- Unlayered self-update switches -------------------------------------------
+  ${GetParameters} $R9
+  ClearErrors
+  ${GetOptions} $R9 "/UPDATE" $R8
+  ${IfNot} ${Errors}
+    StrCpy $UPDATE_MODE "1"
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $R9 "/RELAUNCH" $R8
+  ${IfNot} ${Errors}
+    StrCpy $RELAUNCH "1"
+  ${EndIf}
+
+  ; Wait for the slicer that launched us to be gone. It starts this installer as the last thing it
+  ; does before exiting, and every one of its DLLs is locked until it has: removing or overwriting
+  ; them earlier fails half-way through. Bounded at two minutes so a hung process cannot leave an
+  ; invisible installer waiting forever; the install then simply goes ahead.
+  ClearErrors
+  ${GetOptions} $R9 "/WAITPID=" $R8
+  ${IfNot} ${Errors}
+    ; 0x00100000 = SYNCHRONIZE, the only right WaitForSingleObject needs.
+    System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $R8) p .R7'
+    StrCmp $R7 "0" upd_waited
+      System::Call 'kernel32::WaitForSingleObject(p $R7, i 120000) i .R6'
+      System::Call 'kernel32::CloseHandle(p $R7)'
+  upd_waited:
+  ${EndIf}
+
+  ${If} $UPDATE_MODE == "1"
+    ; Recreate the desktop shortcut only if the person still has one; an update must not put back
+    ; a shortcut they deleted.
+    IfFileExists "$DESKTOP\UnlayeredSlicer.lnk" 0 +2
+      StrCpy $DESKTOP_LINK_EXISTED "1"
+    ; The slicer only self-updates a per-user install, so there is no per-machine copy to migrate
+    ; from here, and a UAC prompt from an invisible installer would be inexplicable.
+    Goto mach_done
+  ${EndIf}
+
   ; --- Migration away from a per-machine install -----------------------------
   ; Per-user build only. The check further down reads this build's own registry
   ; hive (HKCU here), so on its own it cannot see a Program Files installation

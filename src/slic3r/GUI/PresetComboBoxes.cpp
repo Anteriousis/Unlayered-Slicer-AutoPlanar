@@ -1404,6 +1404,11 @@ void PlaterPresetComboBox::update()
                     });
                 }
                 bool unsupported = group == "Unsupported presets";
+                // Unlayered: a bundle that gives this list a single preset gets no submenu of its own.
+                std::map<std::string, int> bundle_sizes;
+                if (groupName == "by_bundle")
+                    for (auto it : list)
+                        ++bundle_sizes[preset_bundle_ids[it->first]];
                 for (auto it : list) {
                     // ORCA add sorting support for vendor / type for user presets
                     auto groupName2 = groupName == "by_bundle"   ? (preset_bundle_names[it->first].empty()     ? _L("Unspecified") : from_u8(preset_bundle_names[it->first]))
@@ -1411,9 +1416,10 @@ void PlaterPresetComboBox::update()
                                     : groupName == "by_vendor"   ? (preset_filament_vendors[it->first].empty() ? _L("Unspecified") : from_u8(preset_filament_vendors[it->first]))
                                     : groupByGroup               ? groupName
                                     : from_u8(preset_filament_vendors[it->first]);
+                    const bool own_submenu = groupName == "by_bundle" && bundle_sizes[preset_bundle_ids[it->first]] > 1;
                     int  index = groupName == "by_bundle"
                         ? Append(from_u8(preset_aliases[it->first]), *it->second,
-                                 from_u8(preset_bundle_ids[it->first]), groupName2, nullptr,
+                                 own_submenu ? from_u8(preset_bundle_ids[it->first]) : wxString(), groupName2, nullptr,
                                  unsupported ? DD_ITEM_STYLE_DISABLED : 0)
                         : Append(from_u8(preset_aliases[it->first]), *it->second, groupName2, nullptr,
                                  unsupported ? DD_ITEM_STYLE_DISABLED : 0);
@@ -1422,7 +1428,10 @@ void PlaterPresetComboBox::update()
                         set_label_marker(index, LABEL_ITEM_DISABLED);
                     else if (m_type == Preset::TYPE_PRINTER && group == "System presets" )
                         set_label_marker(index, LABEL_ITEM_PRINTER_MODELS);
-                    SetItemTooltip(index, preset_descriptions[it->first]);
+                    // A preset lifted out of its bundle's submenu still says which bundle it is from.
+                    SetItemTooltip(index, groupName == "by_bundle" && !own_submenu && preset_descriptions[it->first].empty()
+                                              ? from_u8(preset_bundle_names[it->first])
+                                              : preset_descriptions[it->first]);
                     bool is_selected = it->first == selected;
                     validate_selection(is_selected);
                     if (is_selected  && selected_in_ams) {
@@ -1822,16 +1831,23 @@ void TabPresetComboBox::update()
     if (!bundle_presets.empty())
     {
         set_label_marker(Append(_L("Bundle presets"), wxNullBitmap, DD_ITEM_STYLE_SPLIT_ITEM));
+        // Unlayered: a bundle that gives this list a single preset gets no submenu of its own.
+        std::map<std::string, int> bundle_sizes;
+        for (const auto &bundle_preset : bundle_presets)
+            ++bundle_sizes[preset_bundle_ids[bundle_preset.first]];
         for (std::map<wxString, std::pair<wxBitmap*, bool>>::iterator it = bundle_presets.begin(); it != bundle_presets.end(); ++it) {
             // Get bundle name for grouping
             wxString bundle_name = _L("Unspecified");
             if (preset_bundle_names.count(it->first) > 0 && !preset_bundle_names[it->first].empty()) {
                 bundle_name = from_u8(preset_bundle_names[it->first]);
             }
+            const bool own_submenu = bundle_sizes[preset_bundle_ids[it->first]] > 1;
             // Use Append with group parameter for sub-dropdown grouping
-            int item_id = Append(from_u8(preset_aliases[it->first]), *it->second.first, from_u8(preset_bundle_ids[it->first]), bundle_name);
+            int item_id = Append(from_u8(preset_aliases[it->first]), *it->second.first,
+                                 own_submenu ? from_u8(preset_bundle_ids[it->first]) : wxString(), bundle_name);
             SetItemAlias(item_id, it->first);
-            SetItemTooltip(item_id, preset_descriptions[it->first]);
+            SetItemTooltip(item_id, !own_submenu && preset_descriptions[it->first].empty() ? from_u8(preset_bundle_names[it->first])
+                                                                                          : preset_descriptions[it->first]);
             bool is_enabled = it->second.second;
             if (!is_enabled)
                 set_label_marker(item_id, LABEL_ITEM_DISABLED);

@@ -13,7 +13,11 @@ set(SLIC3R_GUI_SOURCES
     GUI/2DBed.cpp
     GUI/2DBed.hpp
     GUI/3DBed.cpp
+    GUI/BeltPurgeTower.cpp
+    GUI/BeltPurgeTower.hpp
     GUI/3DBed.hpp
+    GUI/BedMeshOverlay.cpp
+    GUI/BedMeshOverlay.hpp
     GUI/Widgets/StaticGroup.cpp
     GUI/Widgets/StaticGroup.hpp
     GUI/3DScene.cpp
@@ -242,6 +246,12 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI.cpp
     GUI/GUI_Factories.cpp
     GUI/GUI_Factories.hpp
+    GUI/MenuMnemonics.cpp
+    GUI/MenuMnemonics.hpp
+    GUI/FocusRing.cpp
+    GUI/FocusRing.hpp
+    GUI/Theme.cpp
+    GUI/Theme.hpp
     GUI/GUI_Geometry.cpp
     GUI/GUI_Geometry.hpp
     GUI/GUI.hpp
@@ -458,8 +468,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrintHostDialogs.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
-    GUI/PrivacyUpdateDialog.cpp
-    GUI/PrivacyUpdateDialog.hpp
     GUI/ProgressStatusBar.cpp
     GUI/ProgressStatusBar.hpp
     GUI/Project.cpp
@@ -478,6 +486,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RecenterDialog.hpp
     GUI/ReleaseNote.cpp
     GUI/ReleaseNote.hpp
+    GUI/AutoUpdater.cpp
+    GUI/AutoUpdater.hpp
     GUI/RemovableDriveManager.cpp
     GUI/RemovableDriveManager.hpp
     GUI/SavePresetDialog.cpp
@@ -705,6 +715,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/ASCIIFolding.hpp
     Utils/AppUpdater.cpp
     Utils/AppUpdater.hpp
+    Utils/UnlayeredAccount.cpp
+    Utils/UnlayeredAccount.hpp
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp
@@ -778,8 +790,6 @@ set(SLIC3R_GUI_SOURCES
     Utils/MoonrakerPrinterAgent.hpp
     Utils/Moonraker.cpp
     Utils/Moonraker.hpp
-    Utils/BBLCloudServiceAgent.cpp
-    Utils/BBLCloudServiceAgent.hpp
     Utils/BBLPrinterAgent.cpp
     Utils/BBLPrinterAgent.hpp
     Utils/BBLNetworkPlugin.cpp

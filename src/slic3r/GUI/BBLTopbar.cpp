@@ -12,10 +12,24 @@
 #include "wxExtensions.hpp"
 #include "Plater.hpp"
 #include "MainFrame.hpp"
+#include "Theme.hpp"
+#include "Widgets/StateColor.hpp"
+
+// The bar's colours come from the theme: the "Top bar" role for the background, and white text
+// pushed dark when the auto-contrast option is on and the bar is light.
+static wxColour topbar_background() { return StateColor::darkModeColorFor(wxColour("#262E31")); }
+static wxColour topbar_text()
+{
+    const wxColour bg = topbar_background();
+    return Slic3r::GUI::ThemeManager::get().active().auto_contrast_text ? StateColor::EnsureContrast(*wxWHITE, bg, 4.5) : *wxWHITE;
+}
 #include "WebViewDialog.hpp"
 #include "PartPlate.hpp"
 
 #include <boost/log/trivial.hpp>
+
+#include <algorithm>
+#include <vector>
 
 #ifdef __WXGTK__
 #include <gtk/gtk.h>
@@ -45,12 +59,15 @@ CenteredTitle::CenteredTitle(wxWindow* parent)
 {
     SetBackgroundStyle(wxBG_STYLE_PAINT);
     Create(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    // Display only: keyboard traversal skips it.
+    SetCanFocus(false);
+    DisableFocusFromKeyboard();
     Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
         wxBufferedPaintDC dc(this);
-        dc.SetBackground(wxBrush(wxColour(38, 46, 48)));
+        dc.SetBackground(wxBrush(topbar_background()));
         dc.Clear();
 
-        dc.SetTextForeground(*wxWHITE);
+        dc.SetTextForeground(topbar_text());
 
         wxFontMetrics fm = dc.GetFontMetrics();
         int textHeight = fm.ascent + fm.descent;
@@ -103,7 +120,7 @@ public:
 
 void BBLTopbarArt::DrawBackground(wxDC& dc, wxWindow* wnd, const wxRect& rect)
 {
-    dc.SetBrush(wxBrush(wxColour(38, 46, 48)));
+    dc.SetBrush(wxBrush(topbar_background()));
     wxRect clipRect = rect;
     clipRect.y -= 8;
     clipRect.height += 8;
@@ -195,11 +212,7 @@ void BBLTopbarArt::DrawButton(wxDC& dc, wxWindow* wnd, const wxAuiToolBarItem& i
         dc.DrawBitmap(bmp, bmpX, bmpY, true);
 
     // set the item's text color based on if it is disabled
-#ifdef __WINDOWS__
-    dc.SetTextForeground(wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT));
-#else
-    dc.SetTextForeground(*wxWHITE);
-#endif
+    dc.SetTextForeground(topbar_text());
     if (item.GetState() & wxAUI_BUTTON_STATE_DISABLED)
     {
         dc.SetTextForeground(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
@@ -242,23 +255,23 @@ void BBLTopbar::Init(wxFrame* parent)
 
     if(window_btns_on_left){
         wxBitmap close_bitmap = create_scaled_bitmap("topbar_close", nullptr, TOPBAR_ICON_SIZE);
-        wxAuiToolBarItem* close_btn = this->AddTool(wxID_CLOSE_FRAME, "", close_bitmap);
+        wxAuiToolBarItem* close_btn = this->AddTool(wxID_CLOSE_FRAME, "", close_bitmap, _L("Close"));
 
         this->AddSpacer(FromDIP(4));
 
         maximize_bitmap = create_scaled_bitmap("topbar_max", nullptr, TOPBAR_ICON_SIZE);
         window_bitmap = create_scaled_bitmap("topbar_win", nullptr, TOPBAR_ICON_SIZE);
         if (m_frame->IsMaximized()) {
-            maximize_btn = this->AddTool(wxID_MAXIMIZE_FRAME, "", window_bitmap);
+            maximize_btn = this->AddTool(wxID_MAXIMIZE_FRAME, "", window_bitmap, _L("Maximize/Restore"));
         }
         else {
-            maximize_btn = this->AddTool(wxID_MAXIMIZE_FRAME, "", maximize_bitmap);
+            maximize_btn = this->AddTool(wxID_MAXIMIZE_FRAME, "", maximize_bitmap, _L("Maximize/Restore"));
         }
 
         this->AddSpacer(FromDIP(4));
 
         wxBitmap iconize_bitmap = create_scaled_bitmap("topbar_min", nullptr, TOPBAR_ICON_SIZE);
-        wxAuiToolBarItem* iconize_btn = this->AddTool(wxID_ICONIZE_FRAME, "", iconize_bitmap);
+        wxAuiToolBarItem* iconize_btn = this->AddTool(wxID_ICONIZE_FRAME, "", iconize_bitmap, _L("Minimize"));
 
         this->AddSpacer(15);
     }
@@ -275,13 +288,13 @@ void BBLTopbar::Init(wxFrame* parent)
     wxBitmap file_bitmap = create_scaled_bitmap("topbar_file", nullptr, TOPBAR_ICON_SIZE);
     m_file_menu_item = this->AddTool(ID_TOP_FILE_MENU, _L("File"), file_bitmap, wxEmptyString, wxITEM_NORMAL);
 
-    this->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT));
+    this->SetForegroundColour(topbar_text());
 
     this->AddSpacer(FromDIP(5));
 
     wxBitmap dropdown_bitmap = create_scaled_bitmap("topbar_dropdown", nullptr, TOPBAR_ICON_SIZE);
     m_dropdown_menu_item = this->AddTool(ID_TOP_DROPDOWN_MENU, "",
-        dropdown_bitmap, wxEmptyString);
+        dropdown_bitmap, _L("Menu"));
 
     this->AddSpacer(FromDIP(5));
     this->AddSeparator();
@@ -293,19 +306,19 @@ void BBLTopbar::Init(wxFrame* parent)
     this->AddSpacer(FromDIP(10));
 
     wxBitmap save_bitmap = create_scaled_bitmap("topbar_save", nullptr, TOPBAR_ICON_SIZE);
-    wxAuiToolBarItem* save_btn = this->AddTool(wxID_SAVE, "", save_bitmap);
+    wxAuiToolBarItem* save_btn = this->AddTool(wxID_SAVE, "", save_bitmap, _L("Save project"));
 
     this->AddSpacer(FromDIP(10));
 
     wxBitmap undo_bitmap = create_scaled_bitmap("topbar_undo", nullptr, TOPBAR_ICON_SIZE);
-    m_undo_item = this->AddTool(wxID_UNDO, "", undo_bitmap);
+    m_undo_item = this->AddTool(wxID_UNDO, "", undo_bitmap, _L("Undo"));
     wxBitmap undo_inactive_bitmap = create_scaled_bitmap("topbar_undo_inactive", nullptr, TOPBAR_ICON_SIZE);
     m_undo_item->SetDisabledBitmap(undo_inactive_bitmap);
 
     this->AddSpacer(FromDIP(10));
 
     wxBitmap redo_bitmap = create_scaled_bitmap("topbar_redo", nullptr, TOPBAR_ICON_SIZE);
-    m_redo_item = this->AddTool(wxID_REDO, "", redo_bitmap);
+    m_redo_item = this->AddTool(wxID_REDO, "", redo_bitmap, _L("Redo"));
     wxBitmap redo_inactive_bitmap = create_scaled_bitmap("topbar_redo_inactive", nullptr, TOPBAR_ICON_SIZE);
     m_redo_item->SetDisabledBitmap(redo_inactive_bitmap);
 
@@ -344,23 +357,23 @@ void BBLTopbar::Init(wxFrame* parent)
 
     if(!window_btns_on_left){
     wxBitmap iconize_bitmap = create_scaled_bitmap("topbar_min", nullptr, TOPBAR_ICON_SIZE);
-    wxAuiToolBarItem* iconize_btn = this->AddTool(wxID_ICONIZE_FRAME, "", iconize_bitmap);
+    wxAuiToolBarItem* iconize_btn = this->AddTool(wxID_ICONIZE_FRAME, "", iconize_bitmap, _L("Minimize"));
 
     this->AddSpacer(FromDIP(4));
 
     maximize_bitmap = create_scaled_bitmap("topbar_max", nullptr, TOPBAR_ICON_SIZE);
     window_bitmap = create_scaled_bitmap("topbar_win", nullptr, TOPBAR_ICON_SIZE);
     if (m_frame->IsMaximized()) {
-        maximize_btn = this->AddTool(wxID_MAXIMIZE_FRAME, "", window_bitmap);
+        maximize_btn = this->AddTool(wxID_MAXIMIZE_FRAME, "", window_bitmap, _L("Maximize/Restore"));
     }
     else {
-        maximize_btn = this->AddTool(wxID_MAXIMIZE_FRAME, "", maximize_bitmap);
+        maximize_btn = this->AddTool(wxID_MAXIMIZE_FRAME, "", maximize_bitmap, _L("Maximize/Restore"));
     }
 
     this->AddSpacer(FromDIP(4));
 
     wxBitmap close_bitmap = create_scaled_bitmap("topbar_close", nullptr, TOPBAR_ICON_SIZE);
-    wxAuiToolBarItem* close_btn = this->AddTool(wxID_CLOSE_FRAME, "", close_bitmap);
+    wxAuiToolBarItem* close_btn = this->AddTool(wxID_CLOSE_FRAME, "", close_bitmap, _L("Close"));
     }
 
     Realize();
@@ -382,6 +395,15 @@ void BBLTopbar::Init(wxFrame* parent)
     this->Bind(wxEVT_LEFT_DCLICK, &BBLTopbar::OnMouseLeftDClock, this);
     this->Bind(wxEVT_LEFT_DOWN, &BBLTopbar::OnMouseLeftDown, this);
     this->Bind(wxEVT_LEFT_UP, &BBLTopbar::OnMouseLeftUp, this);
+    this->Bind(wxEVT_KEY_DOWN, &BBLTopbar::OnKeyDown, this);
+    this->Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent& event) {
+        // Focus moving elsewhere ends keyboard mode without pulling it back.
+        if (!m_popup_open) {
+            m_keyboard_return_focus = nullptr;
+            SetKeyboardTool(-1);
+        }
+        event.Skip();
+    });
     this->Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent& event) {
         m_last_mouse_position = wxDefaultPosition;
         event.Skip();
@@ -646,57 +668,98 @@ void BBLTopbar::OnMouseLeftDClock(wxMouseEvent& mouse)
     OnFullScreen(evt);
 }
 
-void BBLTopbar::OnFileToolItem(wxAuiToolBarEvent& evt)
+void BBLTopbar::PopupToolMenu(int tool_id, wxMenu* menu, bool& skip_popup)
 {
-    wxAuiToolBar* tb = static_cast<wxAuiToolBar*>(evt.GetEventObject());
+    SetToolSticky(tool_id, true);
 
-    tb->SetToolSticky(evt.GetId(), true);
-
-    if (!m_skip_popup_file_menu) {
-        auto rec = this->GetToolRect(ID_TOP_FILE_MENU);
-        GetParent()->PopupMenu(m_file_menu, wxPoint(rec.GetLeft(), this->GetSize().GetHeight() - 2));
+    if (!skip_popup) {
+        const wxRect rec = GetToolRect(tool_id);
+        m_popup_open     = true;
+        GetParent()->PopupMenu(menu, wxPoint(rec.GetLeft(), GetSize().GetHeight() - 2));
+        m_popup_open = false;
     }
     else {
-        m_skip_popup_file_menu = false;
+        skip_popup = false;
     }
 
-    // make sure the button is "un-stuck"
-    tb->SetToolSticky(evt.GetId(), false);
+    // make sure the button is "un-stuck", unless it carries the keyboard highlight
+    SetToolSticky(tool_id, tool_id == m_keyboard_tool);
 }
 
-void BBLTopbar::OnDropdownToolItem(wxAuiToolBarEvent& evt)
+void BBLTopbar::OnFileToolItem(wxAuiToolBarEvent&)     { PopupToolMenu(ID_TOP_FILE_MENU, m_file_menu, m_skip_popup_file_menu); }
+void BBLTopbar::OnDropdownToolItem(wxAuiToolBarEvent&) { PopupToolMenu(ID_TOP_DROPDOWN_MENU, &m_top_menu, m_skip_popup_dropdown_menu); }
+void BBLTopbar::OnCalibToolItem(wxAuiToolBarEvent&)    { PopupToolMenu(ID_CALIB, &m_calib_menu, m_skip_popup_calib_menu); }
+
+void BBLTopbar::ToggleKeyboardMode()
 {
-    wxAuiToolBar* tb = static_cast<wxAuiToolBar*>(evt.GetEventObject());
-
-    tb->SetToolSticky(evt.GetId(), true);
-
-    if (!m_skip_popup_dropdown_menu) {
-        auto rec = this->GetToolRect(ID_TOP_DROPDOWN_MENU);
-        GetParent()->PopupMenu(&m_top_menu, wxPoint(rec.GetLeft(), this->GetSize().GetHeight() - 2));
+    if (m_keyboard_tool >= 0) {
+        SetKeyboardTool(-1);
+        return;
     }
-    else {
-        m_skip_popup_dropdown_menu = false;
-    }
-
-    // make sure the button is "un-stuck"
-    tb->SetToolSticky(evt.GetId(), false);
+    m_keyboard_return_focus = wxWindow::FindFocus();
+    SetCanFocus(true); // the toolbar is a decorative container for Tab, but Alt/F10 focus it on purpose
+    SetFocus();
+    SetKeyboardTool(ID_TOP_FILE_MENU);
 }
 
-void BBLTopbar::OnCalibToolItem(wxAuiToolBarEvent &evt)
+void BBLTopbar::SetKeyboardTool(int tool_id)
 {
-    wxAuiToolBar *tb = static_cast<wxAuiToolBar *>(evt.GetEventObject());
-
-    tb->SetToolSticky(evt.GetId(), true);
-
-    if (!m_skip_popup_calib_menu) {
-        auto rec = this->GetToolRect(ID_CALIB);
-        GetParent()->PopupMenu(&m_calib_menu, wxPoint(rec.GetLeft(), this->GetSize().GetHeight() - 2));
-    } else {
-        m_skip_popup_calib_menu = false;
+    if (m_keyboard_tool >= 0)
+        SetToolSticky(m_keyboard_tool, false);
+    m_keyboard_tool = tool_id;
+    if (tool_id >= 0)
+        SetToolSticky(tool_id, true);
+    else if (wxWindow* back = m_keyboard_return_focus) {
+        m_keyboard_return_focus = nullptr;
+        back->SetFocus();
     }
+    Refresh();
+}
 
-    // make sure the button is "un-stuck"
-    tb->SetToolSticky(evt.GetId(), false);
+void BBLTopbar::OnKeyDown(wxKeyEvent& event)
+{
+    if (m_keyboard_tool < 0) {
+        event.Skip();
+        return;
+    }
+    switch (event.GetKeyCode()) {
+    case WXK_LEFT:
+    case WXK_RIGHT: {
+        // The menus in bar order, skipping one that is hidden (Calibration) or disabled.
+        std::vector<int> tools;
+        for (int id : { ID_TOP_FILE_MENU, ID_TOP_DROPDOWN_MENU, ID_CALIB })
+            if (wxAuiToolBarItem* item = FindTool(id); item != nullptr && item->GetSizerItem()->IsShown() && GetToolEnabled(id))
+                tools.push_back(id);
+        const auto it  = std::find(tools.begin(), tools.end(), m_keyboard_tool);
+        int        pos = it == tools.end() ? 0 : int(it - tools.begin());
+        pos            = (pos + (event.GetKeyCode() == WXK_RIGHT ? 1 : int(tools.size()) - 1)) % int(tools.size());
+        SetKeyboardTool(tools[pos]);
+        break;
+    }
+    case WXK_RETURN:
+    case WXK_NUMPAD_ENTER:
+    case WXK_SPACE:
+    case WXK_DOWN:
+        // A mouse-closed menu leaves its skip flag set; a keyboard open must not be eaten by it.
+        if (m_keyboard_tool == ID_TOP_FILE_MENU) {
+            m_skip_popup_file_menu = false;
+            PopupToolMenu(ID_TOP_FILE_MENU, m_file_menu, m_skip_popup_file_menu);
+        }
+        else if (m_keyboard_tool == ID_TOP_DROPDOWN_MENU) {
+            m_skip_popup_dropdown_menu = false;
+            PopupToolMenu(ID_TOP_DROPDOWN_MENU, &m_top_menu, m_skip_popup_dropdown_menu);
+        }
+        else {
+            m_skip_popup_calib_menu = false;
+            PopupToolMenu(ID_CALIB, &m_calib_menu, m_skip_popup_calib_menu);
+        }
+        break;
+    case WXK_ESCAPE:
+        SetKeyboardTool(-1);
+        break;
+    default:
+        event.Skip();
+    }
 }
 
 void BBLTopbar::OnMouseLeftDown(wxMouseEvent& event)

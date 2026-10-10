@@ -539,6 +539,8 @@ bool GLGizmoSkeleton::on_mouse(const wxMouseEvent& evt)
 
     if (evt.LeftUp() && m_drag_axis >= 0) {
         m_drag_axis = -1;
+        // The planes follow the moved node (they used to keep the pre-drag tangents).
+        rebuild_skeleton_dag();
         precompute_cut_contours();
         sync_skeleton_cache();
         return true;
@@ -602,9 +604,9 @@ void GLGizmoSkeleton::render_node_axis_gizmo(const Vec3d& node_world, float arro
 // rather than Z-sorted (which is unreliable on complex meshes).
 std::vector<std::pair<int,int>> GLGizmoSkeleton::build_cut_edges(const Transform3d& /*world*/) const
 {
-    // Shared with the headless pipeline so `--export-skeleton`'s cut_edges list is the very
-    // order this gizmo will cut in.
-    return build_skeleton_cut_edges(m_skeleton_dag);
+    // Derived by rebuild_skeleton_topology(), shared with the headless pipeline, so
+    // `--export-skeleton`'s cut_edges list is the very order this gizmo will cut in.
+    return m_skel_cut_edges;
 }
 
 // Object-local plane through the skeleton edge midpoint, facing the smoothed tangent (the
@@ -614,11 +616,13 @@ std::vector<std::pair<int,int>> GLGizmoSkeleton::build_cut_edges(const Transform
 // gizmo. Skeleton nodes and tangents are object-local, which is exactly the frame CutPlane stores.
 Slic3r::CutPlane GLGizmoSkeleton::make_edge_plane(int par, int child) const
 {
+    const SkeletonCutPlane sp = skeleton_edge_cut_plane(m_skeleton_dag, m_skel_tangents, par, child);
     Slic3r::CutPlane cp;
-    cp.point  = (m_skeleton_dag.nodes[par] + m_skeleton_dag.nodes[child]) * 0.5;
-    cp.normal = m_skel_tangents.get(par, child).normalized();
+    cp.point  = sp.point;
+    cp.normal = sp.normal;
     return cp;
 }
+
 
 // One-time prompt mirrored from GLGizmoCutPlanes::add_plane(): declarative cut planes only take
 // effect under the "By group" print sequence.
@@ -666,14 +670,14 @@ void GLGizmoSkeleton::perform_skeleton_cut(const Selection& selection)
     // The segmentation's arrangement mask is a uint64_t: at most 64 enabled planes per object.
     if (mo->cut_planes.planes.size() + edges.size() > 64) {
         MessageDialog(plater,
-                      format_wxstr(_L("This skeleton would add %1% cut planes (the object already has %2%); "
+                      format_wxstr(_L("This centreline would add %1% cut planes (the object already has %2%); "
                                       "at most 64 cut planes are supported per object."),
                                    edges.size(), mo->cut_planes.planes.size()),
                       _L("Too many cut planes"), wxICON_WARNING | wxOK).ShowModal();
         return;
     }
 
-    Plater::TakeSnapshot snapshot(plater, _u8L("Cut by Skeleton"), UndoRedo::SnapshotType::GizmoAction);
+    Plater::TakeSnapshot snapshot(plater, _u8L("Cut along pipe"), UndoRedo::SnapshotType::GizmoAction);
 
     const bool was_empty = mo->cut_planes.planes.empty();
     for (const auto& [par, child] : edges)
@@ -702,15 +706,46 @@ void GLGizmoSkeleton::rebuild_skeleton_dag()
     if (m_skeleton.num_nodes() == 0) {
         m_skeleton_dag   = SkeletonDAG{};
         m_skel_tangents  = SkeletonTangents{};
+        m_skel_cut_edges.clear();
+        set_root_markers({});
         return;
     }
-    const std::vector<int> roots = find_skeleton_roots(m_skeleton);
-    m_skeleton_dag = orient_skeleton_as_dag(m_skeleton, roots);
-    const std::vector<int> conv  = m_skel_correct_convergence
-        ? find_convergence_nodes(m_skeleton_dag) : std::vector<int>{};
-    m_skel_conv_count = (int) conv.size(); // node edits change this; the panel reads the cache
-    m_skel_tangents = compute_skeleton_tangents(m_skeleton, m_skeleton_dag, roots, conv,
-                                                (double)m_skel_tangent_W);
+    // In world space, through the same function build_skeleton() ends with. This used to find the
+    // roots and force the root planes along the OBJECT-LOCAL Z: on an instance rotated to stand the
+    // part up (Intake_manifold, 90 deg about X) any node edit re-rooted the skeleton at the flange
+    // tops and laid the "flat" first plane along a horizontal world axis.
+    const ModelObject* mo = m_c && m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    Transform3d world = Transform3d::Identity();
+    if (mo != nullptr) {
+        const int inst = m_c->selection_info()->get_active_instance();
+        if (inst >= 0 && inst < (int) mo->instances.size())
+            world = mo->instances[inst]->get_matrix();
+    }
+    const indexed_triangle_set its = mo != nullptr ? mo->raw_mesh().its : indexed_triangle_set{};
+    SkeletonTopology t = rebuild_skeleton_topology(m_skeleton, world, its, skeleton_params());
+    m_skeleton_dag    = std::move(t.dag);
+    m_skel_tangents   = std::move(t.tangents);
+    m_skel_cut_edges  = std::move(t.cut_edges);
+    m_skel_conv_count = (int) t.convergence_nodes.size(); // node edits change this; the panel reads the cache
+    set_root_markers(t.roots);
+}
+
+void GLGizmoSkeleton::set_root_markers(const std::vector<int>& roots)
+{
+    GLModel::Geometry roots_geo;
+    roots_geo.format = {GLModel::Geometry::EPrimitiveType::Points, GLModel::Geometry::EVertexLayout::P3};
+    for (int idx : roots) {
+        if (idx < 0 || idx >= m_skeleton.num_nodes())
+            continue;
+        const auto& rn = m_skeleton.nodes[idx];
+        roots_geo.add_vertex(Vec3f(rn.x(), rn.y(), rn.z()));
+        roots_geo.add_index((unsigned int) roots_geo.vertices_count() - 1);
+    }
+    m_skeleton_roots_model.reset();
+    if (roots_geo.vertices_count() > 0) {
+        m_skeleton_roots_model.init_from(std::move(roots_geo));
+        m_skeleton_roots_model.set_color({0.f, 1.f, 0.f, 1.f}); // green root nodes
+    }
 }
 
 void GLGizmoSkeleton::delete_skeleton_node(int idx)
@@ -735,6 +770,14 @@ void GLGizmoSkeleton::delete_skeleton_node(int idx)
 void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, float x, float y, float bottom_limit)
 {
     render_build_size();
+
+    // What the tool is for, in the first line a new user reads. "Skeleton" said nothing about
+    // that, and the tool was being tried on solid parts it cannot help.
+    m_imgui->text_wrapped(_L("For bent pipes, ducts and tubes: finds the bore's centreline and cuts the part "
+                             "into chunks along it, so each chunk prints square to the pipe. Not for solid or "
+                             "boxy parts."),
+                          ImGui::GetFontSize() * 24.f);
+    ImGui::Separator();
 
     // ── Topbar: tool buttons (Move | Delete | Connect) ── separator ── Generator ──
     {
@@ -890,7 +933,7 @@ void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, f
         const int pct = m_skel_job_state->percent.load();
         const std::string stage = m_skel_job_state->stage_copy();
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
-                              from_u8((boost::format("Building skeleton: %1%%% (%2%)") % pct % stage).str()));
+                              from_u8((boost::format("Finding centreline: %1%%% (%2%)") % pct % stage).str()));
         ImGui::SameLine();
         if (m_imgui->button(_L("Cancel")))
             wxGetApp().plater()->get_ui_job_worker().cancel();
@@ -904,7 +947,7 @@ void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, f
     // ── Generator panel (collapsible via gear button) ──
     if (m_skel_show_generator) {
         ImGui::AlignTextToFramePadding();
-        if (m_imgui->button(_L("Recompute skeleton"))) {
+        if (m_imgui->button(_L("Recompute centreline"))) {
             if (m_c && m_c->selection_info() && m_c->selection_info()->model_object())
                 skel_registry().erase(m_c->selection_info()->model_object()->id());
             // Registry, contours and step preview are all refreshed by
@@ -974,6 +1017,22 @@ void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, f
                     "Always     follow the axis of every hole, however shallow");
         }
 
+        // UNLAYERED_MOD — where the root stands. A part with no leg (a duct lying across the bed,
+        // a U on its bend) used to be rooted at whichever end tip was lowest, so every cut grew
+        // from one side; Middle hangs one foot under the middle of the contact patch instead.
+        {
+            const char* modes[] = {"Auto", "Middle", "Tips"};
+            ImGui::SetNextItemWidth(120.f);
+            ImGui::Combo(_L("Bed root").ToUTF8().data(), &m_skel_bed_root, modes, 3);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Where the first chunk stands on the bed (applies on Recompute centreline):\n"
+                    "Auto    Middle when no branch runs down to the bed as a leg, else Tips\n"
+                    "Middle  one root under the middle of the bed contact; the cuts fan out\n"
+                    "        both ways, leaning toward the bed and squaring up to the pipe\n"
+                    "Tips    every downward branch end that reaches the bed is a root");
+        }
+
         m_imgui->checkbox(_L("Collapse to spine"), m_skel_collapse_to_spine);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Discards all branching and keeps one path from the lowest node to\n"
@@ -1002,9 +1061,7 @@ void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, f
         const int n_conv = m_skel_conv_count;
         if (n_conv > 0) {
             if (m_imgui->checkbox(_L("Correct convergence"), m_skel_correct_convergence)) {
-                const std::vector<int> roots = find_skeleton_roots(m_skeleton);
-                const std::vector<int> conv  = m_skel_correct_convergence ? find_convergence_nodes(m_skeleton_dag) : std::vector<int>{};
-                m_skel_tangents = compute_skeleton_tangents(m_skeleton, m_skeleton_dag, roots, conv, (double)m_skel_tangent_W);
+                rebuild_skeleton_dag();
                 rebuild_step_contour();
             }
             if (ImGui::IsItemHovered())
@@ -1091,9 +1148,7 @@ void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, f
             if (n_conv > 0) {
                 ImGui::SetNextItemWidth(120.f);
                 if (ImGui::SliderFloat(_L("Tangent blend W").ToUTF8().data(), &m_skel_tangent_W, 0.0f, 1.0f, "%.2f")) {
-                    const std::vector<int> roots = find_skeleton_roots(m_skeleton);
-                    const std::vector<int> conv  = m_skel_correct_convergence ? find_convergence_nodes(m_skeleton_dag) : std::vector<int>{};
-                    m_skel_tangents = compute_skeleton_tangents(m_skeleton, m_skeleton_dag, roots, conv, (double)m_skel_tangent_W);
+                    rebuild_skeleton_dag();
                     rebuild_step_contour();
                 }
                 if (ImGui::IsItemHovered())
@@ -1102,6 +1157,34 @@ void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, f
                                       "Measured up to 74 deg of change on a torus, 88 on a washer, and\n"
                                       "0.003 deg on a part with no merge point — hence only shown here.");
             }
+
+            // How the cuts fan out of the root. Both apply live: they only re-aim normals.
+            ImGui::SetNextItemWidth(120.f);
+            if (ImGui::SliderFloat(_L("Root lean").ToUTF8().data(), &m_skel_root_lean, 0.0f, 90.0f, "%.0f deg")) {
+                rebuild_skeleton_dag();
+                precompute_cut_contours();
+                rebuild_step_contour();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Middle root only. The first cuts either side of the middle are held\n"
+                                  "at most 90 - this many degrees from flat, so the chunks beside the\n"
+                                  "middle build up and outward, not sideways off the bed. Also sets the\n"
+                                  "uncut seat over the bed contact (1.1 x centreline height x tan(lean)),\n"
+                                  "which keeps the two first planes from meeting inside the part.\n"
+                                  "Default 45.");
+
+            ImGui::SetNextItemWidth(120.f);
+            if (ImGui::InputFloat(_L("Root ramp").ToUTF8().data(), &m_skel_root_ramp, 0.0f, 0.0f, "%.1f mm")) {
+                m_skel_root_ramp = std::max(0.0f, m_skel_root_ramp);
+                rebuild_skeleton_dag();
+                precompute_cut_contours();
+                rebuild_step_contour();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Distance over which the lean out of the bed fades back to the pipe\n"
+                                  "direction, so consecutive cuts turn in small steps instead of the\n"
+                                  "first lying flat and the next snapping to the pipe.\n"
+                                  "0 = auto: max(3 edge lengths, 30%% of the longest root-to-tip path).");
 
             m_imgui->checkbox(_L("Show direction"), m_skel_show_direction);
             if (ImGui::IsItemHovered())
@@ -1157,7 +1240,7 @@ void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, f
                                           _L("At most 64 cut planes are supported per object."),
                                           _L("Too many cut planes"), wxICON_WARNING | wxOK).ShowModal();
                         } else {
-                            Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Cut at Skeleton Step"), UndoRedo::SnapshotType::GizmoAction);
+                            Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Cut at pipe step"), UndoRedo::SnapshotType::GizmoAction);
                             const auto& [par, child] = m_preview_edges[m_preview_step];
                             const bool was_empty = mo->cut_planes.planes.empty();
                             mo->cut_planes.planes.push_back(make_edge_plane(par, child));
@@ -1191,9 +1274,9 @@ void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, f
     const int n_nodes = m_skeleton_dag.num_nodes();
     if (n_nodes > 0)
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
-                              GUI::format(_L("Skeleton: %1% nodes"), n_nodes));
+                              GUI::format(_L("Centreline: %1% nodes"), n_nodes));
     else
-        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_DARK, _L("No skeleton computed"));
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_DARK, _L("No centreline yet"));
 
     // Footer: primary action button.
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 10.0f));
@@ -1202,10 +1285,10 @@ void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, f
 
     const bool skeleton_ready = n_nodes > 0;
     m_imgui->disabled_begin(!skeleton_ready);
-    if (m_imgui->button(_L("Cut by Skeleton")))
+    if (m_imgui->button(_L("Cut along pipe")))
         perform_skeleton_cut(m_parent.get_selection());
     if (ImGui::IsItemHovered() && skeleton_ready)
-        ImGui::SetTooltip("Adds a cut plane at every skeleton edge midpoint; the object is not split");
+        ImGui::SetTooltip("Adds a cut plane at every centreline step; the object is not split");
     m_imgui->disabled_end();
 
     ImGui::PopStyleVar(2);
@@ -1217,6 +1300,7 @@ void GLGizmoSkeleton::render_cut_plane_input_window(CutConnectors& connectors, f
 void GLGizmoSkeleton::apply_skeleton_result(const SkeletonResult& res)
 {
     GLGizmoCut3D::apply_skeleton_result(res);
+    m_skel_cut_edges = res.cut_edges;
     sync_skeleton_cache();
     precompute_cut_contours();
     rebuild_step_contour();

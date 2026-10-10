@@ -286,7 +286,19 @@ void PingCodeBindDialog::on_bind_printer(wxCommandEvent& event)
     }
 
     NetworkAgent* agent = wxGetApp().getAgent();
-    if (agent && agent->is_user_login(wxGetApp().get_printer_cloud_provider()) && ping_code.length() == PING_CODE_LENGTH) {
+    // Unlayered: a pin-code bind is a Bambu Cloud operation. Upstream ignored the click silently when
+    // the plug-in was not loaded or nobody was signed in, which reads as a dead button.
+    if (!Slic3r::NetworkAgent::is_network_module_loaded()) {
+        MessageDialog msg(this, _L("Binding with a Pin Code needs the Bambu network plug-in. Enable it in Preferences > Online, restart, and try again.\nFor LAN-only printing, use \"Bind with Access Code\" in the printer list instead."), _L("Bind with Pin Code"), wxOK);
+        msg.ShowModal();
+        return;
+    }
+    if (!agent || !agent->is_user_login(wxGetApp().get_printer_cloud_provider())) {
+        MessageDialog msg(this, _L("Binding with a Pin Code needs a Bambu Cloud sign-in. Turn off Stealth mode and enable Bambu Cloud in Preferences > Online, sign in, and try again.\nFor LAN-only printing, use \"Bind with Access Code\" in the printer list instead."), _L("Bind with Pin Code"), wxOK);
+        msg.ShowModal();
+        return;
+    }
+    if (ping_code.length() == PING_CODE_LENGTH) {
         auto result = agent->ping_bind(ping_code.ToStdString());
 
         if(result < 0){

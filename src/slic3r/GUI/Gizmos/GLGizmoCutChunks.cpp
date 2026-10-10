@@ -222,7 +222,7 @@ void GLGizmoCutChunks3D::perform_skeleton_cut(const Selection& selection)
         m_part_selection = PartSelection();
     });
 
-    Plater::TakeSnapshot snapshot(plater, _u8L("Cut by Skeleton"));
+    Plater::TakeSnapshot snapshot(plater, _u8L("Cut along pipe"));
     const CommonGizmosDataID data_requirements = on_get_requirements();
 
     // Map each skeleton node to the ObjectID of the model object that currently
@@ -386,7 +386,7 @@ void GLGizmoCutChunks3D::render_cut_plane_input_window(CutConnectors& connectors
 
     ImGui::Separator();
 
-    if (m_imgui->checkbox(_L("Show skeleton"), m_show_skeleton) && m_show_skeleton && !m_skeleton_model.is_initialized())
+    if (m_imgui->checkbox(_L("Show pipe centreline"), m_show_skeleton) && m_show_skeleton && !m_skeleton_model.is_initialized())
         compute_skeleton();
     if (m_show_skeleton) {
         ImGui::SameLine();
@@ -437,7 +437,7 @@ void GLGizmoCutChunks3D::render_cut_plane_input_window(CutConnectors& connectors
 
         const bool skeleton_ready = m_skeleton_dag.num_nodes() > 0;
         m_imgui->disabled_begin(!skeleton_ready);
-        if (m_imgui->button(_L("Cut by Skeleton")))
+        if (m_imgui->button(_L("Cut along pipe")))
             perform_skeleton_cut(m_parent.get_selection());
         if (ImGui::IsItemHovered() && skeleton_ready)
             ImGui::SetTooltip("BFS leaf-first cut: splits the object at every skeleton edge midpoint");

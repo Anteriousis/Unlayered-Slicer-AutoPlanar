@@ -356,7 +356,7 @@ wxBitmap* BitmapCache::load_svg(const std::string& bitmap_name,
         // The mark drawn on top of an on-state fill (checkbox tick, toggle thumb). The
         // fill above inverts light->dark, so the glyph has to invert dark->light with it
         // or it vanishes. tools/theme/recolor-accent.py bakes #FCFCFC into these icons.
-        replaces["#FCFCFC"] = "#2D2D31";
+        replaces["#FCFCFC"] = "#232327"; // dark window, keep in step with gDarkColors
         replaces["\"#262E30\""] = "\"#EFEFF0\"";
         replaces["\"#323A3D\""] = "\"#B3B3B5\"";
         replaces["\"#808080\""] = "\"#818183\"";
@@ -364,8 +364,8 @@ wxBitmap* BitmapCache::load_svg(const std::string& bitmap_name,
         replaces["\"#CECECE\""] = "\"#54545B\"";
         replaces["\"#6B6B6B\""] = "\"#818182\"";
         replaces["\"#909090\""] = "\"#FFFFFF\"";
-        replaces["\"#F1F1F1\""] = "\"#36363B\"";
-        replaces["#DBDBDB"]     = "#4A4A51"; // ORCA border color
+        replaces["\"#F1F1F1\""] = "\"#2B2B2F\""; // titlebar gradient bottom, keep in step with gDarkColors
+        replaces["#DBDBDB"]     = "#78787F"; // ORCA border color -- keep in step with the #DBDBDB row of gDarkColors
         replaces["#F0F0F1"]     = "#333337"; // ORCA disabled background color
         replaces["#262E30"]     = "#EFEFF0"; // ORCA
     } else {

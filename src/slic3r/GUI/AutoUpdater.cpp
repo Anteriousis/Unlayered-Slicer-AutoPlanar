@@ -1,0 +1,524 @@
+#include "AutoUpdater.hpp"
+
+#include <cctype>
+#include <chrono>
+#include <condition_variable>
+#include <thread>
+
+#include <wx/button.h>
+#include <wx/sizer.h>
+#include <wx/stattext.h>
+#include <wx/utils.h>
+
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/format.hpp>
+#include <boost/log/trivial.hpp>
+
+#include "libslic3r_version.h"
+#include "libslic3r/Semver.hpp"
+#include "libslic3r/Utils.hpp"
+#include "GUI.hpp"
+#include "GUI_App.hpp"
+#include "GUI_Utils.hpp"
+#include "I18N.hpp"
+#include "MainFrame.hpp"
+#include "MsgDialog.hpp"
+#include "NotificationManager.hpp"
+#include "Plater.hpp"
+#include "ReleaseNote.hpp"
+
+namespace fs = boost::filesystem;
+
+namespace Slic3r {
+namespace GUI {
+
+namespace {
+
+// Where the application signs in. The key is undocumented and has no UI, like "version_check_url":
+// it exists to point a test build at a local copy of the site.
+std::string site_url_from(AppConfig *config)
+{
+    std::string url = config ? config->get("unlayered_site_url") : std::string();
+    return url.empty() ? std::string("https://unlayered3d.com") : url;
+}
+
+// The app config key that carries "an update to X was about to be installed" across the restart,
+// so the next launch can say it worked.
+constexpr const char *PENDING_UPDATE_KEY = "pending_update_version";
+
+// The newest version whose "What's new" has been dealt with (shown, or skipped on a first run).
+constexpr const char *WHATS_NEW_KEY = "whats_new_version";
+
+// "## 0.1.2 — 2026-10-10" -> 0.1.2. Not a version heading -> none.
+boost::optional<Semver> heading_version(const std::string &line)
+{
+    std::string token = line.substr(3);
+    const size_t end  = token.find_first_of(" \t\r");
+    if (end != std::string::npos)
+        token.resize(end);
+    if (!token.empty() && (token.front() == 'v' || token.front() == 'V'))
+        token.erase(0, 1);
+    if (token.empty() || !isdigit(static_cast<unsigned char>(token.front())))
+        return boost::none;
+    return Semver::parse(token);
+}
+
+// ------------------------------------------------------------------------------------------------
+// The browser sign-in, as a small modal dialog. The handoff (UnlayeredAccount) runs on a worker
+// thread; everything that touches a window is marshalled back through the application object and
+// re-checks that the dialog is still alive, because it may have been cancelled meanwhile.
+// ------------------------------------------------------------------------------------------------
+class SignInDialog : public DPIDialog
+{
+public:
+    SignInDialog(wxWindow *parent, std::shared_ptr<UnlayeredAccount> account)
+        : DPIDialog(parent, wxID_ANY, _L("Sign in to Unlayered"), wxDefaultPosition, wxDefaultSize,
+                    wxDEFAULT_DIALOG_STYLE)
+        , m_account(std::move(account))
+        , m_alive(std::make_shared<std::atomic<bool>>(true))
+    {
+        auto *main = new wxBoxSizer(wxVERTICAL);
+
+        auto *intro = new wxStaticText(
+            this, wxID_ANY,
+            _L("Your browser opens so you can sign in to your Unlayered account and confirm. "
+               "Come back here when it says the slicer is signed in."));
+        intro->Wrap(FromDIP(420));
+        main->Add(intro, 0, wxALL, FromDIP(16));
+
+        m_status = new wxStaticText(this, wxID_ANY, _L("Starting..."));
+        main->Add(m_status, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+
+        auto *buttons = new wxBoxSizer(wxHORIZONTAL);
+        m_reopen      = new wxButton(this, wxID_ANY, _L("Open the browser again"));
+        m_reopen->Disable();
+        m_reopen->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+            if (!m_browser_url.empty())
+                wxLaunchDefaultBrowser(wxString::FromUTF8(m_browser_url));
+        });
+        auto *cancel = new wxButton(this, wxID_CANCEL, _L("Cancel"));
+        buttons->Add(m_reopen, 0, wxRIGHT, FromDIP(8));
+        buttons->AddStretchSpacer();
+        buttons->Add(cancel);
+        main->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+
+        SetSizerAndFit(main);
+        Centre(wxBOTH);
+        wxGetApp().UpdateDlgDarkUI(this);
+
+        run();
+    }
+
+    ~SignInDialog() override { *m_alive = false; }
+
+    const std::string &error() const { return m_error; }
+
+protected:
+    void on_dpi_changed(const wxRect &) override { Fit(); Refresh(); }
+
+private:
+    void run()
+    {
+        auto               alive   = m_alive;
+        auto               account = m_account;
+        SignInDialog      *self    = this; // only dereferenced on the GUI thread, after an alive check
+
+        std::thread([alive, account, self]() {
+            auto on_gui = [alive, self](std::function<void(SignInDialog *)> fn) {
+                wxGetApp().CallAfter([alive, self, fn]() {
+                    if (*alive)
+                        fn(self);
+                });
+            };
+
+            UnlayeredAccount::Handoff handoff;
+            std::string               error;
+            if (!account->start_handoff(handoff, error)) {
+                on_gui([error](SignInDialog *d) { d->fail(error); });
+                return;
+            }
+            on_gui([url = handoff.browser_url](SignInDialog *d) {
+                d->m_browser_url = url;
+                d->m_reopen->Enable();
+                d->m_status->SetLabel(_L("Waiting for you to confirm in your browser..."));
+                d->Layout();
+                wxLaunchDefaultBrowser(wxString::FromUTF8(url));
+            });
+
+            // The site keeps a handoff for five minutes; poll a little inside that.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(290);
+            while (*alive && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                if (!*alive)
+                    return;
+                switch (account->collect(handoff, error)) {
+                case UnlayeredAccount::CollectResult::SignedIn:
+                    on_gui([](SignInDialog *d) { d->EndModal(wxID_OK); });
+                    return;
+                case UnlayeredAccount::CollectResult::Failed:
+                    // collect() already turns "no answer" into Pending; this is the site refusing.
+                    on_gui([error](SignInDialog *d) { d->fail(error); });
+                    return;
+                case UnlayeredAccount::CollectResult::Pending: break;
+                }
+            }
+            on_gui([](SignInDialog *d) {
+                d->fail(_u8L("The sign-in request expired. Close this window and try again."));
+            });
+        }).detach();
+    }
+
+    void fail(const std::string &error)
+    {
+        m_error = error;
+        m_status->SetLabel(wxString::Format(_L("Sign-in did not complete: %s"), wxString::FromUTF8(error)));
+        m_status->Wrap(FromDIP(420));
+        m_reopen->Disable();
+        Fit();
+    }
+
+    std::shared_ptr<UnlayeredAccount>  m_account;
+    std::shared_ptr<std::atomic<bool>> m_alive;
+    wxStaticText                      *m_status{nullptr};
+    wxButton                          *m_reopen{nullptr};
+    std::string                        m_browser_url;
+    std::string                        m_error;
+};
+
+} // namespace
+
+AutoUpdater::AutoUpdater(GUI_App &app)
+    : m_app(app)
+    , m_account(std::make_shared<UnlayeredAccount>(site_url_from(app.app_config)))
+    , m_alive(std::make_shared<std::atomic<bool>>(true))
+{}
+
+AutoUpdater::~AutoUpdater() { *m_alive = false; }
+
+void AutoUpdater::notify(const std::string &text, const std::string &link, std::function<void()> on_link)
+{
+    Plater *plater = m_app.plater();
+    if (!plater || !plater->get_notification_manager())
+        return;
+    plater->get_notification_manager()->close_notification_of_type(NotificationType::NewAppAvailable);
+    plater->get_notification_manager()->push_notification(
+        NotificationType::NewAppAvailable, NotificationManager::NotificationLevel::ImportantNotificationLevel, text, link,
+        on_link ? std::function<bool(wxEvtHandler *)>([on_link](wxEvtHandler *) {
+            // Deferred: the callback runs inside the notification's own render pass, and the
+            // actions here open dialogs or close the main window.
+            wxGetApp().CallAfter(on_link);
+            return true;
+        })
+                : std::function<bool(wxEvtHandler *)>());
+}
+
+void AutoUpdater::on_startup()
+{
+    m_account->load();
+    cleanup_stale_download_dirs();
+
+    // Did the previous session hand over to an installer, and did it work?
+    if (AppConfig *config = m_app.app_config) {
+        const std::string pending = config->get(PENDING_UPDATE_KEY);
+        if (!pending.empty()) {
+            config->set(PENDING_UPDATE_KEY, "");
+            if (pending == UNLAYERED_VERSION) {
+                BOOST_LOG_TRIVIAL(info) << "updater: now running the update to " << pending;
+                notify((boost::format(_u8L("%1% was updated to %2%.")) % SLIC3R_APP_FULL_NAME % pending).str());
+            } else {
+                BOOST_LOG_TRIVIAL(warning) << "updater: an update to " << pending << " was due but this is still "
+                                           << UNLAYERED_VERSION << "; it will be offered again";
+            }
+        }
+    }
+
+    // Stealth mode keeps only the anonymous update check. The sign-in is re-validated lazily instead,
+    // by the download itself, which forgets a token the site refuses.
+    if (!m_account->signed_in() || (m_app.app_config && m_app.app_config->get_stealth_mode()))
+        return;
+    // Confirms the stored sign-in still works (the person may have signed out on the website).
+    // Off the GUI thread; the result only changes what the menus and the next update do.
+    auto account = m_account;
+    auto alive   = m_alive;
+    std::thread([account, alive]() {
+        if (*alive)
+            account->refresh();
+    }).detach();
+}
+
+std::string changelog_sections(const std::string &markdown, const std::string &after, const std::string &up_to)
+{
+    const auto top    = Semver::parse(up_to);
+    const auto bottom = after.empty() ? boost::optional<Semver>() : Semver::parse(after);
+    if (!top || (!after.empty() && !bottom))
+        return {};
+
+    std::string out;
+    bool        keep = false;
+    size_t      pos  = 0;
+    while (pos < markdown.size()) {
+        size_t eol = markdown.find('\n', pos);
+        if (eol == std::string::npos)
+            eol = markdown.size();
+        const std::string line = markdown.substr(pos, eol - pos);
+        pos = eol + 1;
+
+        if (boost::algorithm::starts_with(line, "## ")) {
+            const auto v = heading_version(line);
+            keep = v && *v <= *top && (bottom ? *bottom < *v : *v == *top);
+        } else if (boost::algorithm::starts_with(line, "# ")) {
+            keep = false; // the document title
+        }
+        if (keep)
+            out += line + "\n";
+    }
+    return out;
+}
+
+void AutoUpdater::show_whats_new(bool first_run)
+{
+    AppConfig *config = m_app.app_config;
+    if (!config)
+        return;
+    const std::string seen = config->get(WHATS_NEW_KEY);
+    config->set(WHATS_NEW_KEY, UNLAYERED_VERSION);
+    if (first_run)
+        return;
+
+    const auto current = Semver::parse(UNLAYERED_VERSION);
+    const auto last    = seen.empty() ? boost::optional<Semver>() : Semver::parse(seen);
+    if (!current || (last && !(*last < *current)))
+        return;
+
+    // Installed beside the other resources; a build-tree run has none and quietly shows nothing.
+    const fs::path path = fs::path(resources_dir()) / "CHANGELOG.md";
+    std::string    markdown;
+    try {
+        if (fs::exists(path))
+            load_string_file(path, markdown);
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(warning) << "updater: could not read " << path.string() << ": " << e.what();
+    }
+    const std::string notes = changelog_sections(markdown, last ? seen : std::string(), UNLAYERED_VERSION);
+    if (notes.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "updater: no changelog for " << UNLAYERED_VERSION << " in " << path.string();
+        return;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "updater: showing what's new in " << UNLAYERED_VERSION
+                            << (seen.empty() ? std::string() : " since " + seen);
+    // Deferred, so the update check started after this call is not held up behind the dialog.
+    auto alive = m_alive;
+    m_app.CallAfter([this, alive, notes]() {
+        if (!*alive || !m_app.mainframe)
+            return;
+        UpdateVersionDialog dialog(m_app.mainframe);
+        dialog.update_version_info(wxString::FromUTF8(notes), wxString::FromUTF8(UNLAYERED_VERSION));
+        dialog.set_whats_new_mode();
+        dialog.ShowModal();
+    });
+}
+
+void AutoUpdater::sign_in(wxWindow *parent, std::function<void(bool)> done)
+{
+    SignInDialog dlg(parent ? parent : m_app.mainframe, m_account);
+    const bool   ok = dlg.ShowModal() == wxID_OK && m_account->signed_in();
+    if (ok) {
+        const auto p = m_account->profile();
+        notify((boost::format(_u8L("Signed in to Unlayered as %1%.")) % (p ? p->email : std::string())).str());
+    } else if (!dlg.error().empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "account: sign-in failed: " << dlg.error();
+    }
+    if (done)
+        done(ok);
+}
+
+void AutoUpdater::sign_out()
+{
+    const auto p = m_account->profile();
+    MessageDialog confirm(m_app.mainframe,
+                          wxString::Format(_L("Sign out of Unlayered (%s)?\n\n%s will stop updating itself until you "
+                                              "sign in again."),
+                                           wxString::FromUTF8(p ? p->email : std::string()), SLIC3R_APP_FULL_NAME),
+                          _L("Sign Out"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
+    if (confirm.ShowModal() == wxID_YES)
+        m_account->sign_out();
+}
+
+bool AutoUpdater::handle_new_version(const std::string &version, const std::string &notes, const std::string &page_url,
+                                     const std::optional<AccountDownload> &download, bool by_user, bool skipped)
+{
+    if (!download)
+        return false;
+
+    m_install_dir = self_updatable_install_dir();
+    if (!m_install_dir) {
+        BOOST_LOG_TRIVIAL(info) << "updater: " << version
+                                << " is available with the account, but this copy is not a per-user installation "
+                                   "that can replace itself; using the update dialog";
+        return false;
+    }
+
+    if (m_version == version && m_state != State::Idle) {
+        if (by_user) {
+            if (m_state == State::Ready)
+                notify_ready();
+            else
+                notify((boost::format(_u8L("Version %1% is still downloading.")) % version).str());
+        }
+        return true;
+    }
+    if (m_state == State::Downloading)
+        return true; // finish the one in flight; the next launch looks again
+
+    if (skipped && !by_user)
+        return true; // "Skip this Version" means silence, for the automatic check
+
+    m_state    = State::Idle;
+    m_version  = version;
+    m_download = *download;
+
+    const bool signed_in = m_account->signed_in();
+    if (signed_in && !by_user) {
+        BOOST_LOG_TRIVIAL(info) << "updater: downloading " << version << " in the background";
+        start_download();
+        return true;
+    }
+
+    // A manual check, or signed out: show what is new and ask.
+    UpdateVersionDialog dialog(m_app.mainframe);
+    dialog.update_version_info(wxString::FromUTF8(notes), wxString::FromUTF8(version));
+    // After update_version_info(), which resets the button to the classic modes.
+    dialog.set_account_mode(signed_in ? UpdateVersionDialog::AccountMode::UpdateInBackground
+                                      : UpdateVersionDialog::AccountMode::SignInToUpdate);
+    if (by_user)
+        dialog.m_button_skip_version->Hide();
+
+    switch (dialog.ShowModal()) {
+    case wxID_YES:
+        if (signed_in)
+            start_download();
+        else
+            sign_in(m_app.mainframe, [this](bool ok) {
+                if (ok)
+                    start_download();
+            });
+        break;
+    case wxID_OPEN: wxLaunchDefaultBrowser(wxString::FromUTF8(page_url)); break;
+    default: break;
+    }
+    return true;
+}
+
+void AutoUpdater::start_download()
+{
+    if (m_state == State::Downloading)
+        return;
+    m_state = State::Downloading;
+
+    auto       account  = m_account;
+    auto       alive    = m_alive;
+    const auto download = m_download;
+
+    std::thread([this, account, alive, download]() {
+        fs::path    installer;
+        std::string error;
+        unsigned    status = 0;
+        bool        ok     = false;
+
+        UnlayeredAccount::DownloadLink link;
+        if (account->fetch_download_link(download.url, link, status, error)) {
+            if (!link.sha256.empty() && !boost::algorithm::iequals(link.sha256, download.sha256)) {
+                // Published again between the manifest and this request. Do not mix the two.
+                error = "The installer was replaced while this update was starting. It will be retried on "
+                        "the next launch.";
+            } else {
+                const AppUpdateAsset asset{download.name, link.url, download.sha256, download.size};
+                ok = download_installer(asset, installer, {}, error);
+            }
+        }
+        wxGetApp().CallAfter([this, alive, ok, installer, error, status]() {
+            if (*alive)
+                on_download_finished(ok, installer, error, status);
+        });
+    }).detach();
+}
+
+void AutoUpdater::on_download_finished(bool ok, const fs::path &installer, const std::string &error, unsigned http_status)
+{
+    if (ok) {
+        m_installer = installer;
+        m_state     = State::Ready;
+        if (m_app.app_config)
+            m_app.app_config->set(PENDING_UPDATE_KEY, m_version);
+        BOOST_LOG_TRIVIAL(info) << "updater: " << m_version << " is ready at " << installer.string();
+        notify_ready();
+        return;
+    }
+
+    m_state = State::Idle;
+    BOOST_LOG_TRIVIAL(error) << "updater: background download of " << m_version << " failed (HTTP " << http_status
+                             << "): " << error;
+    if (http_status == 401) {
+        // The site no longer accepts the sign-in (expired, or signed out on the website).
+        notify((boost::format(_u8L("Version %1% is available. Sign in to Unlayered again to update.")) % m_version).str(),
+               _u8L("Sign in"), [this]() {
+                   sign_in(m_app.mainframe, [this](bool signed_in) {
+                       if (signed_in)
+                           start_download();
+                   });
+               });
+    } else if (http_status == 403) {
+        const auto p = m_account->profile();
+        notify((boost::format(_u8L("Version %1% is available, but %2% does not have access to %3% downloads.")) %
+                m_version % (p ? p->email : std::string("this account")) % SLIC3R_APP_FULL_NAME)
+                   .str());
+    }
+    // Anything else (offline, a checksum mismatch) stays in the log: the next launch tries again,
+    // and Help > Check for Updates is always there.
+}
+
+void AutoUpdater::notify_ready()
+{
+    notify((boost::format(_u8L("%1% %2% is ready. It installs when you close the app.")) % SLIC3R_APP_FULL_NAME %
+            m_version)
+               .str(),
+           _u8L("Restart to update"), [this]() { restart_to_update(); });
+}
+
+void AutoUpdater::restart_to_update()
+{
+    if (m_state != State::Ready)
+        return;
+    if (other_instances_running()) {
+        MessageDialog dlg(m_app.mainframe,
+                          wxString::Format(_L("Close the other %s windows first, then restart to update."),
+                                           SLIC3R_APP_FULL_NAME),
+                          _L("Restart to update"), wxOK | wxICON_INFORMATION);
+        dlg.ShowModal();
+        return;
+    }
+    m_relaunch = true;
+    // Close(false) so the save prompts run and a Cancel is honoured; the install itself happens in
+    // on_app_exit(), only once the application really is going away.
+    if (m_app.mainframe && !m_app.mainframe->Close(false))
+        m_relaunch = false;
+}
+
+void AutoUpdater::on_app_exit()
+{
+    if (m_state != State::Ready || !m_install_dir || m_installer.empty())
+        return;
+    if (other_instances_running()) {
+        // Its files are in use, so the installer would fail part-way. The next launch offers the
+        // update again.
+        BOOST_LOG_TRIVIAL(info) << "updater: another instance is running; not installing " << m_version << " now";
+        return;
+    }
+    std::string error;
+    if (!launch_silent_update(m_installer, *m_install_dir, m_relaunch, error))
+        BOOST_LOG_TRIVIAL(error) << "updater: could not start the update: " << error;
+}
+
+} // namespace GUI
+} // namespace Slic3r

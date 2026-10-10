@@ -24,7 +24,8 @@ void host_bindings::register_model(py::module_& host)
         .value("NegativeVolume", ModelVolumeType::NEGATIVE_VOLUME)
         .value("ParameterModifier", ModelVolumeType::PARAMETER_MODIFIER)
         .value("SupportBlocker", ModelVolumeType::SUPPORT_BLOCKER)
-        .value("SupportEnforcer", ModelVolumeType::SUPPORT_ENFORCER);
+        .value("SupportEnforcer", ModelVolumeType::SUPPORT_ENFORCER)
+        .value("InfillMesh", ModelVolumeType::INFILL_MESH);
 
     py::class_<ModelVolume, std::unique_ptr<ModelVolume, py::nodelete>>(host, "ModelVolume")
         .def("id", [](const ModelVolume& volume) { return volume.id().id; })

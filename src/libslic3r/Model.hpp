@@ -347,6 +347,11 @@ enum class ModelVolumeType : int {
     PARAMETER_MODIFIER,
     SUPPORT_BLOCKER,
     SUPPORT_ENFORCER,
+    // Orca: research/mesh-infill — user-supplied infill structure. Not
+    // sliced as a body; consumed by prepare_mesh_infill_data as the source
+    // of the object's sparse infill (appended last: serialized values of
+    // the existing types must not shift).
+    INFILL_MESH,
 };
 
 // A single non-destructive cut plane, authored in the Prepare view and stored in the object's
@@ -975,6 +980,7 @@ public:
     bool                is_negative_volume()    const { return m_type == ModelVolumeType::NEGATIVE_VOLUME; }
 	bool                is_modifier()           const { return m_type == ModelVolumeType::PARAMETER_MODIFIER; }
 	bool                is_support_enforcer()   const { return m_type == ModelVolumeType::SUPPORT_ENFORCER; }
+	bool                is_infill_mesh()        const { return m_type == ModelVolumeType::INFILL_MESH; }
 	bool                is_support_blocker()    const { return m_type == ModelVolumeType::SUPPORT_BLOCKER; }
 	bool                is_support_modifier()   const { return m_type == ModelVolumeType::SUPPORT_BLOCKER || m_type == ModelVolumeType::SUPPORT_ENFORCER; }
     bool                is_text()               const { return text_configuration.has_value(); }

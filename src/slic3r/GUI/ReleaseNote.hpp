@@ -97,6 +97,16 @@ public:
     // false -> the confirm button opens the download page in a browser instead.
     // Safe to call in either order relative to update_version_info().
     void set_install_mode(bool in_app);
+
+    // The account-based updater (AutoUpdater) has two more things the confirm button can mean.
+    enum class AccountMode {
+        UpdateInBackground, // signed in: download quietly, then "Restart to update"
+        SignInToUpdate,     // signed out: sign in to Unlayered first, then the above
+    };
+    void set_account_mode(AccountMode mode);
+    // After update_version_info(): turns the dialog into "What's new" for the version now running -
+    // the release notes and a single OK, no download, skip or stable-only controls.
+    void set_whats_new_mode();
     std::vector<std::string> splitWithStl(std::string str, std::string pattern);
 
     wxStaticBitmap*   m_brand{nullptr};
@@ -111,6 +121,8 @@ public:
     CheckBox*         m_cb_stable_only;
     Button*           m_button_download;
     Button*           m_button_cancel;
+    HyperLink*        m_page_link{nullptr};
+    Label*            m_stable_only_label{nullptr};
     std::string       url_line;
     std::string       html_source;
 

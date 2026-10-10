@@ -1043,13 +1043,18 @@ function(unlayered_copy_dlls target config postfix output_dlls)
             ${TOP_LEVEL_PROJECT_DIR}/deps/WebView2/lib/win-${_arch}/WebView2Loader.dll
         DESTINATION ${_out_dir})
 
-    # OpenSSL 3 runtime DLLs are statically imported by UnlayeredSlicer.dll. They come from the system
-    # OpenSSL found by find_package(OpenSSL) (only on the dev PATH), so they must be copied and shipped
-    # or the app fails to load on a clean machine. Derive the bin dir from the found include dir.
+    # When find_package(OpenSSL) picks up a shared OpenSSL 3 (a system install on the dev PATH), its runtime
+    # DLLs are statically imported by UnlayeredSlicer.dll, so they must be copied and shipped or the app fails
+    # to load on a clean machine. The static OpenSSL from deps/ has no DLLs to ship. Derive the bin dir from
+    # the found include dir.
     get_filename_component(_openssl_bin_dir "${OPENSSL_INCLUDE_DIR}/../bin" ABSOLUTE)
-    file(COPY ${_openssl_bin_dir}/libcrypto-3-x64.dll
-            ${_openssl_bin_dir}/libssl-3-x64.dll
-        DESTINATION ${_out_dir})
+    set(_openssl_dlls "")
+    if (EXISTS "${_openssl_bin_dir}/libcrypto-3-x64.dll")
+        file(COPY ${_openssl_bin_dir}/libcrypto-3-x64.dll
+                ${_openssl_bin_dir}/libssl-3-x64.dll
+            DESTINATION ${_out_dir})
+        set(_openssl_dlls ${_out_dir}/libcrypto-3-x64.dll ${_out_dir}/libssl-3-x64.dll)
+    endif ()
 
     file(COPY ${CMAKE_PREFIX_PATH}/bin/occt/TKBO.dll
             ${CMAKE_PREFIX_PATH}/bin/occt/TKBRep.dll
@@ -1089,8 +1094,7 @@ function(unlayered_copy_dlls target config postfix output_dlls)
         ${_out_dir}/libmpfr-4.dll
         ${_out_dir}/WebView2Loader.dll
 
-        ${_out_dir}/libcrypto-3-x64.dll
-        ${_out_dir}/libssl-3-x64.dll
+        ${_openssl_dlls}
 
         ${_out_dir}/TKBO.dll
         ${_out_dir}/TKBRep.dll
@@ -1253,17 +1257,19 @@ endif()
 # Resources that must not reach a customer install. webapp-example is a developer harness with no
 # entry point. The seed files are a development overlay only -- the shipped defaults live in
 # WebAppSlot, so a customer install has nothing to read and the files would only describe switches
-# that are not there. tab_webapp_active.svg belongs to the generic Web application tab, which does
-# not ship. The Agent and Universe icons DO ship: those two tabs are features of this edition.
+# that are not there. tab_webapp_active.svg is NOT excluded: the generic Web application tab has no
+# entry point in a customer install, but a config or ORCA_WEB_APP_URL can still enable it, and
+# MainFrame then aborts at startup ("Could not load bitmap: tab_webapp_active") without its icon.
 set(SLIC3R_RESOURCES_EXCLUDE
     PATTERN "web/webapp-example" EXCLUDE
     PATTERN "web/webapp/agent.json" EXCLUDE
     PATTERN "web/webapp/universe.json" EXCLUDE
-    PATTERN "web/webapp/default.json" EXCLUDE
-    PATTERN "images/tab_webapp_active.svg" EXCLUDE)
+    PATTERN "web/webapp/default.json" EXCLUDE)
 
 if (WIN32)
     install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "./resources" ${SLIC3R_RESOURCES_EXCLUDE})
+    # The "What's new" dialog after an update reads its version's sections from here (AutoUpdater).
+    install(FILES "${CMAKE_SOURCE_DIR}/CHANGELOG.md" DESTINATION "./resources")
     if(ORCA_BUNDLED_UV_EXECUTABLE)
         install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "./resources/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
     endif()
@@ -1276,6 +1282,7 @@ elseif (SLIC3R_FHS)
     install(DIRECTORY ${SLIC3R_RESOURCES_DIR}/ DESTINATION ${SLIC3R_FHS_RESOURCES}
         PATTERN "*/udev" EXCLUDE
     )
+    install(FILES "${CMAKE_SOURCE_DIR}/CHANGELOG.md" DESTINATION ${SLIC3R_FHS_RESOURCES})
     if(ORCA_BUNDLED_UV_EXECUTABLE)
         install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "${SLIC3R_FHS_RESOURCES}/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
     endif()
@@ -1293,6 +1300,7 @@ elseif (CMAKE_MACOSX_BUNDLE)
 else ()
     install(FILES src/dev-utils/platform/unix/com.unlayered3d.UnlayeredSlicer.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
     install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources" ${SLIC3R_RESOURCES_EXCLUDE})
+    install(FILES "${CMAKE_SOURCE_DIR}/CHANGELOG.md" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
     if(ORCA_BUNDLED_UV_EXECUTABLE)
         install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
     endif()
@@ -1338,8 +1346,12 @@ set (CPACK_PACKAGE_ICON "${CMAKE_SOURCE_DIR}/resources/images\\\\UnlayeredSlicer
 set (CPACK_NSIS_MUI_ICON "${CPACK_PACKAGE_ICON}")
 set (CPACK_NSIS_MUI_UNIICON "${CPACK_PACKAGE_ICON}")
 set (CPACK_NSIS_INSTALLED_ICON_NAME  "$INSTDIR\\\\unlayered-slicer.exe")
+# A self-update (/UPDATE, see NSIS.template.in) only recreates the shortcut if it was still there.
 set(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
-    CreateShortCut \\\"$DESKTOP\\\\UnlayeredSlicer.lnk\\\" \\\"$INSTDIR\\\\unlayered-slicer.exe\\\"
+    \\\${If} $UPDATE_MODE != \\\"1\\\"
+    \\\${OrIf} $DESKTOP_LINK_EXISTED == \\\"1\\\"
+      CreateShortCut \\\"$DESKTOP\\\\UnlayeredSlicer.lnk\\\" \\\"$INSTDIR\\\\unlayered-slicer.exe\\\"
+    \\\${EndIf}
 ")
 set (CPACK_PACKAGE_CHECKSUM SHA256)
 set (CPACK_PACKAGE_INSTALL_REGISTRY_KEY "Unlayered Slicer")

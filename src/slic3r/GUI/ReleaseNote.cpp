@@ -267,8 +267,8 @@ UpdateVersionDialog::UpdateVersionDialog(wxWindow *parent)
 
     // Always the browser escape hatch, whichever mode the confirm button is in. This used to end
     // with wxID_YES, making it indistinguishable from Download.
-    auto page_link = new HyperLink(this, _L("Open the download page"), "", LB_AUTO_WRAP);
-    page_link->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent &e) {
+    m_page_link = new HyperLink(this, _L("Open the download page"), "", LB_AUTO_WRAP);
+    m_page_link->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent &e) {
         EndModal(wxID_OPEN);
     });
 
@@ -339,8 +339,8 @@ UpdateVersionDialog::UpdateVersionDialog(wxWindow *parent)
         e.Skip();
     });
 
-    auto stable_only_label = new Label(this, _L("Check for stable updates only"));
-    stable_only_label->SetFont(Label::Body_12);
+    m_stable_only_label = new Label(this, _L("Check for stable updates only"));
+    m_stable_only_label->SetFont(Label::Body_12);
 
     m_button_cancel = new Button(this, _L("Cancel"));
     m_button_cancel->SetStyle(ButtonStyle::Regular, ButtonType::Choice);
@@ -352,7 +352,7 @@ UpdateVersionDialog::UpdateVersionDialog(wxWindow *parent)
     //sizer_button->Add(m_remind_choice, 0, wxALL | wxEXPAND, FromDIP(5));
 
     sizer_button->Add(m_cb_stable_only     , 0, wxALIGN_CENTER);
-    sizer_button->Add(stable_only_label    , 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    sizer_button->Add(m_stable_only_label  , 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
     sizer_button->AddStretchSpacer();
     sizer_button->Add(m_button_download    , 0, wxLEFT, FromDIP(10));
     sizer_button->Add(m_button_skip_version, 0, wxLEFT, FromDIP(10));
@@ -360,7 +360,7 @@ UpdateVersionDialog::UpdateVersionDialog(wxWindow *parent)
 
     m_sizer_desc->AddStretchSpacer();
     m_sizer_desc->Add(m_text_up_info, 0, wxEXPAND | wxBOTTOM, FromDIP(5));
-    m_sizer_desc->Add(page_link);
+    m_sizer_desc->Add(m_page_link);
     m_sizer_desc->AddStretchSpacer();
 
     m_sizer_top->Add(m_brand     , 0, wxRIGHT  | wxALIGN_CENTER_VERTICAL, FromDIP(15));
@@ -403,6 +403,42 @@ void UpdateVersionDialog::set_install_mode(bool in_app)
     // still has to be laid out again.
     Layout();
     Fit();
+}
+
+void UpdateVersionDialog::set_account_mode(AccountMode mode)
+{
+    m_in_app_install = true;
+
+    if (mode == AccountMode::UpdateInBackground) {
+        m_button_download->SetLabel(_L("Update"));
+        m_text_up_info->SetLabel(wxString::Format(
+            _L("Version %s is available. It downloads in the background while you keep working; you can "
+               "then restart to update, or it installs the next time you close %s."),
+            m_version, SLIC3R_APP_FULL_NAME));
+    } else {
+        m_button_download->SetLabel(_L("Sign in and Update"));
+        m_text_up_info->SetLabel(wxString::Format(
+            _L("Version %s is available. Updates are downloaded with your Unlayered account: sign in once "
+               "in your browser and %s keeps itself up to date from then on."),
+            m_version, SLIC3R_APP_FULL_NAME));
+    }
+    Layout();
+    Fit();
+}
+
+void UpdateVersionDialog::set_whats_new_mode()
+{
+    SetTitle(wxString::Format(_L("What's new in %s %s"), SLIC3R_APP_FULL_NAME, m_version));
+    m_text_up_info->SetLabel(wxString::Format(_L("%s was updated to version %s. Here is what changed."),
+                                              SLIC3R_APP_FULL_NAME, m_version));
+    m_page_link->Hide();
+    m_button_download->Hide();
+    m_button_skip_version->Hide();
+    m_cb_stable_only->Hide();
+    m_stable_only_label->Hide();
+    m_button_cancel->SetLabel(_L("OK"));
+    m_button_cancel->SetStyle(ButtonStyle::Confirm, ButtonType::Choice);
+    Layout();
 }
 
 

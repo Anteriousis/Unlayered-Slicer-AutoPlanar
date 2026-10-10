@@ -4,6 +4,7 @@
 #include "GLTexture.hpp"
 #include "3DScene.hpp"
 #include "GLModel.hpp"
+#include <optional>
 
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/ExPolygon.hpp"
@@ -59,6 +60,10 @@ public:
 
     static void update_render_colors();
     static void load_render_colors();
+    // Theme: a user colour for the plate itself (the bed model, or the flat face when the printer
+    // has no model) on one base; nullopt = the built-in colour for that base.
+    static void      set_model_color_override(bool dark, const std::optional<ColorRGBA>& color);
+    static ColorRGBA model_color(bool dark);
 
     class Axes
     {
@@ -138,6 +143,8 @@ public:
 
     // Build volume geometry for various collision detection tasks.
     const BuildVolume& build_volume() const { return m_build_volume; }
+    // BELT_MOD: see BuildVolume::set_belt_printer.
+    void set_belt_printer(bool enabled, bool infinite_y) { m_build_volume.set_belt_printer(enabled, infinite_y); }
 
     // Was the model provided, or was it generated procedurally?
     Type get_type() const { return m_type; }

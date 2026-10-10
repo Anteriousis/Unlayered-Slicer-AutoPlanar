@@ -64,6 +64,9 @@
 //#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
+#include "libslic3r/Fill/InfillMeshTiling.hpp"
+#include "libslic3r/Fill/MeshGenerator.hpp"
+#include "libslic3r/Flow.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/SLA/SupportPoint.hpp"
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
@@ -82,14 +85,18 @@
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
+#include "Theme.hpp"
 #include "GUI_ObjectList.hpp"
 #ifdef __WXGTK__
 #include "LinuxDisplayBackend.hpp"
 #endif
 #include "GUI_Utils.hpp"
 #include "GUI_Factories.hpp"
+#include "MenuMnemonics.hpp"
 #include "wxExtensions.hpp"
 #include "../Utils/PrintHost.hpp"
+#include "libslic3r/BedMesh.hpp"
+#include "../Utils/Moonraker.hpp"
 #include "MainFrame.hpp"
 #include "WebAppPanel.hpp"
 #include "WebAppSettings.hpp"
@@ -101,6 +108,7 @@
 #include "GUI_Preview.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "BeltPurgeTower.hpp"   // BELT_MOD
 #include "Camera.hpp"
 #include "Mouse3DController.hpp"
 #include "Tab.hpp"
@@ -1358,6 +1366,7 @@ ExtruderGroup::ExtruderGroup(wxWindow * parent, int index, wxString const &title
     //label_ams->SetMinSize({FromDIP(70), -1});
     if (index >= 0) {
         btn_edit = new ScalableButton(this, wxID_ANY, "dot");
+        btn_edit->SetToolTip(_L("Set the number of AMS units"));
         btn_edit->SetBackgroundColour(extruder_group_chip_bg());
         btn_edit->Hide();
         btn_edit->Bind(wxEVT_COMMAND_BUTTON_CLICKED, [this, index](auto &evt) {
@@ -1394,7 +1403,9 @@ ExtruderGroup::ExtruderGroup(wxWindow * parent, int index, wxString const &title
         hsizer_ams->Add(btn_edit, 0, wxLEFT | wxALIGN_CENTER, FromDIP(2));
     hsizer_ams->Add(ams_not_installed_msg, 0, wxALIGN_CENTER);
 
-    btn_up = new ScalableButton(this, wxID_ANY, "page_up", "", {FromDIP(14), FromDIP(14)}, wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, false, 14);
+    // 24 px hit target (was 14): the page buttons are the only way to reach the other AMS units.
+    btn_up = new ScalableButton(this, wxID_ANY, "page_up", "", {FromDIP(24), FromDIP(24)}, wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, false, 16);
+    btn_up->SetToolTip(_L("Previous AMS page"));
     btn_up->SetBackgroundColour(*wxWHITE);
     btn_up->Bind(wxEVT_COMMAND_BUTTON_CLICKED, [this](auto &evt) {
         if (page_cur > 0)
@@ -1402,7 +1413,8 @@ ExtruderGroup::ExtruderGroup(wxWindow * parent, int index, wxString const &title
         update_ams();
     });
     btn_up->Hide();
-    btn_down = new ScalableButton(this, wxID_ANY, "page_down", "", {FromDIP(14), FromDIP(14)}, wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, false, 14);
+    btn_down = new ScalableButton(this, wxID_ANY, "page_down", "", {FromDIP(24), FromDIP(24)}, wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, false, 16);
+    btn_down->SetToolTip(_L("Next AMS page"));
     btn_down->SetBackgroundColour(*wxWHITE);
     btn_down->Bind(wxEVT_COMMAND_BUTTON_CLICKED, [this](auto &evt) {
         if (page_cur + 1 < page_num)
@@ -2468,6 +2480,8 @@ Sidebar::Sidebar(Plater *parent)
         p->m_panel_printer_title->SetBackgroundColor2(0xF1F1F1);
 
         p->m_printer_icon = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "printer");
+        p->m_printer_icon->DisableFocusFromKeyboard(); // decorative (its handler is empty): not a Tab stop
+        p->m_printer_icon->SetCanFocus(false);
         p->m_text_printer_settings = new Label(p->m_panel_printer_title, _L("Printer"), LB_PROPAGATE_MOUSE_EVENT | wxST_ELLIPSIZE_END);
 
         p->m_printer_icon->Bind(wxEVT_BUTTON, [](wxCommandEvent& e) {
@@ -2491,6 +2505,7 @@ Sidebar::Sidebar(Plater *parent)
         });
 
         p->m_printer_setting = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "settings");
+        p->m_printer_setting->SetToolTip(_L("Add or remove printers"));
         p->m_printer_setting->Bind(wxEVT_BUTTON, [](wxCommandEvent &e) {
             // p->editing_filament = -1;
             // wxGetApp().params_dialog()->Popup();
@@ -2538,7 +2553,7 @@ Sidebar::Sidebar(Plater *parent)
         p->m_panel_printer_content->SetBackgroundColour(wxColour(255, 255, 255));
 
         struct PanelColors {
-            wxColour bg_normal = "#FFFFFF";
+            wxColour bg_normal = "#FFFEFF"; // the input-background role: the card and the combo inside it read as one control
             wxColour bg_focus  = "#ECECEC";
             wxColour bd_normal = "#DBDBDB";
             wxColour bd_hover  = "#767676";
@@ -2600,7 +2615,7 @@ Sidebar::Sidebar(Plater *parent)
         // ORCA paint whole combobox on focus
         auto printer_focus_bg = [this, panel_color](bool focused){
             auto bg_color = StateColor::darkModeColorFor(focused ? panel_color.bg_focus : panel_color.bg_normal);
-            p->panel_printer_preset->SetBackgroundColor(bg_color);
+            p->panel_printer_preset->SetBackgroundColor(StateColor(focused ? panel_color.bg_focus : panel_color.bg_normal)); // resolved at paint, so a theme change reaches it
             p->panel_printer_preset->SetBorderColor(focused ? panel_color.bd_focus : panel_color.bd_normal);
             p->btn_edit_printer->SetBackgroundColour(bg_color);
             p->image_printer->SetBackgroundColour(bg_color);
@@ -2678,7 +2693,7 @@ Sidebar::Sidebar(Plater *parent)
         // ORCA paint whole combobox on focus
         auto nozzle_focus_bg = [this, panel_color](bool focused){
             auto bg_color = StateColor::darkModeColorFor(focused ? panel_color.bg_focus : panel_color.bg_normal);
-            p->panel_nozzle_dia->SetBackgroundColor(bg_color);
+            p->panel_nozzle_dia->SetBackgroundColor(StateColor(focused ? panel_color.bg_focus : panel_color.bg_normal)); // resolved at paint, so a theme change reaches it
             p->panel_nozzle_dia->SetBorderColor(focused ? panel_color.bd_focus : panel_color.bd_normal);
             p->label_nozzle_title->SetBackgroundColour(bg_color);
             p->label_nozzle_type->SetBackgroundColour(bg_color);
@@ -2754,7 +2769,7 @@ Sidebar::Sidebar(Plater *parent)
         // ORCA paint whole combobox on focus
         auto bed_focus_bg = [this, panel_color](bool focused){
             auto bg_color = StateColor::darkModeColorFor(focused ? panel_color.bg_focus : panel_color.bg_normal);
-            p->panel_printer_bed->SetBackgroundColor(bg_color);
+            p->panel_printer_bed->SetBackgroundColor(StateColor(focused ? panel_color.bg_focus : panel_color.bg_normal)); // resolved at paint, so a theme change reaches it
             p->panel_printer_bed->SetBorderColor(focused ? panel_color.bd_focus : panel_color.bd_normal);
             p->image_printer_bed->SetBackgroundColour(bg_color);
             p->combo_printer_bed->SetBackgroundColour(bg_color); // paints margins instead combo background
@@ -2917,6 +2932,8 @@ Sidebar::Sidebar(Plater *parent)
     wxBoxSizer* bSizer39;
     bSizer39 = new wxBoxSizer( wxHORIZONTAL );
     p->m_filament_icon = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "filament");
+    p->m_filament_icon->DisableFocusFromKeyboard(); // decorative: no action, so not a Tab stop
+    p->m_filament_icon->SetCanFocus(false);
     p->m_staticText_filament_settings = new Label(p->m_panel_filament_title, _L("Project Filaments"), LB_PROPAGATE_MOUSE_EVENT);
     bSizer39->Add(p->m_filament_icon, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
     bSizer39->Add(p->m_staticText_filament_settings, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT, FromDIP(SidebarProps::ElementSpacing()));
@@ -6868,7 +6885,6 @@ struct Plater::priv
     void select_view(const std::string& direction);
     //BBS: add no_slice option
     void select_view_3D(const std::string& name, bool no_slice = true);
-    void select_next_view_3D();
 
     bool is_preview_shown() const { return current_panel == preview; }
     bool is_preview_loaded() const { return preview->is_loaded(); }
@@ -6995,6 +7011,10 @@ struct Plater::priv
     void exit_gizmo();
     void remove(size_t obj_idx);
     bool delete_object_from_model(size_t obj_idx, bool refresh_immediately = true); //BBS
+    // BELT_MOD -- keep the auto-generated belt purge prism in sync with the config and the plate
+    // (GUI::ensure_belt_purge_tower in BeltPurgeTower.cpp). Returns true when the model changed.
+    bool ensure_belt_purge_tower() { return GUI::ensure_belt_purge_tower(model, partplate_list, sidebar->obj_list(), m_belt_purge_sig); }
+    BeltPurgeSignature m_belt_purge_sig;
     void delete_all_objects_from_model();
     void reset(bool apply_presets_change = false);
     void center_selection();
@@ -7597,11 +7617,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         view3D_canvas->Bind(EVT_GLCANVAS_UPDATE_GEOMETRY, &priv::on_update_geometry, this);
         view3D_canvas->Bind(EVT_GLCANVAS_MOUSE_DRAGGING_STARTED, &priv::on_3dcanvas_mouse_dragging_started, this);
         view3D_canvas->Bind(EVT_GLCANVAS_MOUSE_DRAGGING_FINISHED, &priv::on_3dcanvas_mouse_dragging_finished, this);
-        view3D_canvas->Bind(EVT_GLCANVAS_TAB, [this](SimpleEvent&) { select_next_view_3D(); });
         view3D_canvas->Bind(EVT_GLCANVAS_RESETGIZMOS, [this](SimpleEvent&) { reset_all_gizmos(); });
         view3D_canvas->Bind(EVT_GLCANVAS_UNDO, [this](SimpleEvent&) { this->undo(); });
         view3D_canvas->Bind(EVT_GLCANVAS_REDO, [this](SimpleEvent&) { this->redo(); });
-        view3D_canvas->Bind(EVT_GLCANVAS_COLLAPSE_SIDEBAR, [this](SimpleEvent&) { this->q->collapse_sidebar(!this->q->is_sidebar_collapsed());  });
         view3D_canvas->Bind(EVT_GLCANVAS_RESET_LAYER_HEIGHT_PROFILE, [this](SimpleEvent&) { this->view3D->get_canvas3d()->reset_layer_height_profile(); });
         view3D_canvas->Bind(EVT_GLCANVAS_ADAPTIVE_LAYER_HEIGHT_PROFILE, [this](Event<float>& evt) { this->view3D->get_canvas3d()->adaptive_layer_height_profile(evt.data); });
         view3D_canvas->Bind(EVT_GLCANVAS_SMOOTH_LAYER_HEIGHT_PROFILE, [this](HeightProfileSmoothEvent& evt) { this->view3D->get_canvas3d()->smooth_layer_height_profile(evt.data); });
@@ -7667,8 +7685,6 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             preview->get_canvas3d()->set_as_dirty();
         });
     if (wxGetApp().is_editor()) {
-        preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_TAB, [this](SimpleEvent&) { select_next_view_3D(); });
-        preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_COLLAPSE_SIDEBAR, [this](SimpleEvent&) { this->q->collapse_sidebar(!this->q->is_sidebar_collapsed());  });
         preview->get_wxglcanvas()->Bind(EVT_CUSTOMEVT_TICKSCHANGED, [this](wxCommandEvent& event) {
             Type tick_event_type = (Type)event.GetInt();
             Model& model = wxGetApp().plater()->model();
@@ -8092,17 +8108,6 @@ void Plater::priv::select_view_3D(const std::string& name, bool no_slice)
     selection_changed();
 
     apply_free_camera_correction(false);
-}
-
-void Plater::priv::select_next_view_3D()
-{
-    
-    if (current_panel == view3D)
-        wxGetApp().mainframe->select_tab(TAB_ID_PREVIEW);
-    else if (current_panel == preview)
-        wxGetApp().mainframe->select_tab(TAB_ID_PREPARE);
-//    else if (current_panel == assemble_view)
-//        set_current_panel(view3D);
 }
 
 void Plater::priv::enable_sidebar(bool enabled)
@@ -9554,7 +9559,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         }
     }
 
-    if (load_config) {
+    if (load_config && !silence) { // a silent load (e.g. the project carried across a window rebuild) keeps the project's printer
         DeviceManager *dev = Slic3r::GUI::wxGetApp().getDeviceManager();
         if (dev) {
             MachineObject *obj = dev->get_selected_machine();
@@ -10709,6 +10714,10 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     // If the update_background_process() was not called by the timer, kill the timer,
     // so the update_restart_background_process() will not be called again in vain.
     background_process_timer.Stop();
+    // BELT_MOD -- sync the belt purge prism before the model is applied to the Print below, so the
+    // prism change rides this same apply.
+    if (printer_technology == ptFFF && this->ensure_belt_purge_tower())
+        return_state |= UPDATE_BACKGROUND_PROCESS_REFRESH_SCENE;
     // Update the "out of print bed" state of ModelInstances.
     update_print_volume_state();
     // Apply new config to the possibly running background task.
@@ -12368,6 +12377,11 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
      */
         wxGetApp().obj_list()->update_object_list_by_printer_technology();
 
+        // A bed mesh read from another host does not describe this printer.
+        BedMeshOverlay& bed_mesh = this->partplate_list.bed_mesh_overlay();
+        if (bed_mesh.has_mesh() && bed_mesh.host() != wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("print_host"))
+            bed_mesh.clear();
+
         // BBS:Model reset by plate center
         PartPlateList& cur_plate_list = this->partplate_list;
         PartPlate* cur_plate = cur_plate_list.get_curr_plate();
@@ -13336,9 +13350,8 @@ void Plater::priv::on_filament_color_changed(wxCommandEvent &event)
 
 void Plater::priv::install_network_plugin(wxCommandEvent &event)
 {
-    // Unlayered: nothing fires EVT_INSTALL_PLUGIN_NETWORKING any more - the notification that used
-    // to offer it no longer has an action. Left as a no-op rather than unbinding, so a stray event
-    // cannot open a dialog for a plug-in that cannot be installed.
+    wxGetApp().ShowDownNetPluginDlg();
+    return;
 }
 
 void Plater::priv::update_plugin_when_launch(wxCommandEvent &event)
@@ -13416,11 +13429,16 @@ void Plater::priv::apply_color_mode()
     const bool is_dark         = wxGetApp().dark_mode();
     wxColour   orca_color      = wxColour(59, 68, 70);//wxColour(ColorRGBA::ORCA().r_uchar(), ColorRGBA::ORCA().g_uchar(), ColorRGBA::ORCA().b_uchar());
     orca_color                 = is_dark ? StateColor::darkModeColorFor(orca_color) : StateColor::lightModeColorFor(orca_color);
-    wxColour sash_color = is_dark ? wxColour(38, 46, 48) : wxColour(206, 206, 206);
+    // The sash and border between the sidebar and the 3D view: the theme's separators colour when
+    // it sets one, else the pair they always had.
+    const auto& theme_colors = ThemeManager::get().active().colors;
+    const bool  themed_sep   = theme_colors.count("separators") && !theme_colors.at("separators").empty();
+    wxColour sash_color   = themed_sep ? StateColor::darkModeColorFor(wxColour("#EEEEEE")) : is_dark ? wxColour(38, 46, 48) : wxColour(206, 206, 206);
+    wxColour border_color = themed_sep ? sash_color : is_dark ? *wxBLACK : wxColour(165, 165, 165);
     m_aui_mgr.GetArtProvider()->SetColour(wxAUI_DOCKART_INACTIVE_CAPTION_COLOUR, sash_color);
     m_aui_mgr.GetArtProvider()->SetColour(wxAUI_DOCKART_INACTIVE_CAPTION_TEXT_COLOUR, *wxWHITE);
     m_aui_mgr.GetArtProvider()->SetColour(wxAUI_DOCKART_SASH_COLOUR, sash_color);
-    m_aui_mgr.GetArtProvider()->SetColour(wxAUI_DOCKART_BORDER_COLOUR, is_dark ? *wxBLACK : wxColour(165, 165, 165));
+    m_aui_mgr.GetArtProvider()->SetColour(wxAUI_DOCKART_BORDER_COLOUR, border_color);
 }
 
 static void get_position(wxWindowBase* child, wxWindowBase* until_parent, int& x, int& y) {
@@ -14297,6 +14315,13 @@ void Plater::priv::set_bed_shape(const Pointfs       &shape,
     //BBS: add shape position
     Vec2d shape_position = partplate_list.get_current_shape_position();
     bool new_shape = bed.set_shape(shape, printable_height, extruder_areas, extruder_heights, custom_model, force_as_custom, shape_position);
+    // BELT_MOD: the belt is open along Y. Set on every call: set_shape returns early when the shape
+    // is unchanged, and switching between a belt and a flat printer keeps the shape.
+    {
+        const auto *belt       = config->option<ConfigOptionBool>("belt_printer");
+        const auto *infinite_y = config->option<ConfigOptionBool>("belt_printer_infinite_y");
+        bed.set_belt_printer(belt != nullptr && belt->value, infinite_y != nullptr && infinite_y->value);
+    }
 
     float prev_height_lid, prev_height_rod;
     partplate_list.get_height_limits(prev_height_lid, prev_height_rod);
@@ -15856,6 +15881,185 @@ bool Plater::up_to_date(bool saved, bool backup)
                                         !Slic3r::has_other_changes(backup));
 }
 
+bool Plater::generate_infill_preview_for_object(int obj_idx, bool interactive, bool dry_run)
+{
+    static const char *kPreviewVolumeName = "Infill Preview";
+    if (obj_idx < 0 || obj_idx >= int(p->model.objects.size()))
+        return false;
+    ModelObject *object = p->model.objects[obj_idx];
+
+    // Effective config: global presets + this object's overrides.
+    DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
+    full_config.apply(object->config.get(), true);
+    const InfillPattern pattern = full_config.option<ConfigOptionEnum<InfillPattern>>("sparse_infill_pattern")->value;
+    const bool tpms_pattern = pattern == ipGyroid || pattern == ipTpmsD || pattern == ipTpmsFK;
+    if (pattern != ipCustomMesh && ! (tpms_pattern && mesh_backed_tpms_enabled())) {
+        if (interactive)
+            MessageDialog(this, mesh_backed_tpms_enabled()
+                ? _L("Mesh infill preview supports the Custom (infill mesh), Gyroid, TPMS-D and Fischer-Koch S sparse infill patterns.")
+                : _L("Mesh infill preview supports the Custom (infill mesh) sparse infill pattern."),
+                          _L("Preview Mesh Infill"), wxOK).ShowModal();
+        return false;
+    }
+    // Replace any previous preview volume; the preview is a modifier without overrides, so it
+    // follows the object in every instance without changing the sliced result.
+    auto replace_preview_volume = [&](TriangleMesh &&mesh, const std::string &key) {
+        for (int i = int(object->volumes.size()) - 1; i >= 0; --i)
+            if (object->volumes[i]->name == kPreviewVolumeName)
+                object->delete_volume(size_t(i));
+        ModelVolume *vol = object->add_volume(std::move(mesh), ModelVolumeType::PARAMETER_MODIFIER,
+                                              /*modify_to_center_geometry=*/false);
+        vol->name = kPreviewVolumeName;
+        sidebar().obj_list()->add_volumes_to_object_in_list(size_t(obj_idx));
+        m_infill_preview_keys[object->id().id] = key;
+    };
+    auto preview_up_to_date = [&](const std::string &key) {
+        const bool has_preview_volume = std::any_of(object->volumes.begin(), object->volumes.end(),
+            [](const ModelVolume *v) { return v->name == kPreviewVolumeName; });
+        auto it = m_infill_preview_keys.find(object->id().id);
+        return has_preview_volume && it != m_infill_preview_keys.end() && it->second == key;
+    };
+
+    if (pattern == ipCustomMesh) {
+        // The user's Infill Mesh volume(s) tiled through the object's own bounding box, in
+        // object-local coordinates -- the same lattice prepare_mesh_infill_data slices.
+        Transform3d          cell_to_object;
+        const std::string    mesh_path = full_config.opt_string("infill_mesh_path");
+        indexed_triangle_set cell = infill_mesh_cell(*object, mesh_path, cell_to_object);
+        if (cell.indices.empty()) {
+            if (interactive)
+                MessageDialog(this, _L("The object has no Infill Mesh volume and no infill mesh file. Right-click the object and use "
+                                       "Add Infill Mesh, or set the infill mesh file in the Strength settings."),
+                              _L("Preview Mesh Infill"), wxOK).ShowModal();
+            return false;
+        }
+        const BoundingBoxf3 target = object->raw_mesh_bounding_box();
+        std::string key = "custom|" + mesh_path + "|" + std::to_string(cell.indices.size()) + "|";
+        for (const ModelVolume *v : object->volumes)
+            if (v->is_infill_mesh()) {
+                key += std::to_string(v->id().id) + ":";
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 4; ++c)
+                        key += std::to_string(v->get_matrix().matrix()(r, c)) + ",";
+            }
+        char bb_buf[160];
+        std::snprintf(bb_buf, sizeof(bb_buf), "|%.6g,%.6g,%.6g,%.6g,%.6g,%.6g",
+                      target.min.x(), target.min.y(), target.min.z(), target.max.x(), target.max.y(), target.max.z());
+        key += bb_buf;
+        if (! interactive && preview_up_to_date(key))
+            return false;
+        if (dry_run)
+            return true;
+        InfillCellTiling tiling;
+        indexed_triangle_set lattice;
+        {
+            wxBusyCursor busy;
+            lattice = build_infill_lattice(cell, cell_to_object, target, kMaxInfillTiles, &tiling);
+        }
+        if (lattice.indices.empty()) {
+            if (interactive)
+                MessageDialog(this, _L("Mesh infill generation produced no geometry."), _L("Preview Mesh Infill"), wxOK).ShowModal();
+            return false;
+        }
+        if (tiling.truncated && interactive)
+            MessageDialog(this, _L("The infill mesh is too small for this object: tiling it would exceed the tile limit, "
+                                   "so only the cell itself is shown."), _L("Preview Mesh Infill"), wxOK).ShowModal();
+        replace_preview_volume(TriangleMesh(std::move(lattice)), key);
+        return true;
+    }
+    const double density_pct = full_config.option<ConfigOptionPercent>("sparse_infill_density")->value;
+    if (density_pct <= 0.) {
+        if (interactive)
+            MessageDialog(this, _L("Sparse infill density is zero."), _L("Preview Mesh Infill"), wxOK).ShowModal();
+        return false;
+    }
+    const int    multiline    = std::max(1, full_config.option<ConfigOptionInt>("fill_multiline")->value);
+    const double layer_height = full_config.opt_float("layer_height");
+    const double nozzle       = full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.front();
+    // The same flow-spacing derivation the slicing path uses — NOT the raw
+    // line width (period parity; see prepare_mesh_infill_data).
+    const Flow   flow = Flow::new_from_config_width(frInfill,
+        *full_config.option<ConfigOptionFloatOrPercent>("sparse_infill_line_width"), float(nozzle), float(layer_height));
+    const double spacing = flow.spacing();
+
+    // Same env knobs as the slicing path.
+    const char *mode_env = std::getenv("UNLAYERED_MESH_INFILL_MODE");
+    const ImplicitMeshMode mode = (mode_env != nullptr && std::strcmp(mode_env, "band") == 0)
+        ? ImplicitMeshMode::SolidBand : ImplicitMeshMode::Surface;
+    int wall_count = 2;
+    if (const char *w = std::getenv("UNLAYERED_MESH_INFILL_WALLS"); w != nullptr && *w != '\0')
+        wall_count = std::max(1, atoi(w));
+
+    const BoundingBoxf3 aabb = object->instance_bounding_box(0);
+    // Staleness key over everything generation depends on.
+    char key_buf[320];
+    std::snprintf(key_buf, sizeof(key_buf), "%d|%d|%d|%.9g|%d|%.9g|%.9g|%.9g,%.9g,%.9g,%.9g,%.9g,%.9g",
+                  int(pattern), int(mode), wall_count, density_pct, multiline, spacing, layer_height,
+                  aabb.min.x(), aabb.min.y(), aabb.min.z(), aabb.max.x(), aabb.max.y(), aabb.max.z());
+    const std::string key(key_buf);
+    if (! interactive && preview_up_to_date(key))
+        return false;
+    if (dry_run)
+        return true; // would regenerate
+
+    const MeshInfillField field_spec = make_mesh_infill_field(pattern, 0.01 * density_pct, spacing, multiline, layer_height);
+    TriangleMesh mesh;
+    {
+        wxBusyCursor busy;
+        mesh = make_mesh_infill_preview_mesh(field_spec, aabb, mode, wall_count, spacing);
+    }
+    if (mesh.empty()) {
+        if (interactive)
+            MessageDialog(this, _L("Mesh infill generation produced no geometry."), _L("Preview Mesh Infill"), wxOK).ShowModal();
+        return false;
+    }
+
+    // The mesh was generated in world coordinates (instance 0's frame);
+    // pull it back into object-local coordinates and attach it as a modifier
+    // volume of the source object. That places it exactly, makes it follow
+    // the object when moved, and shows it in every instance. A modifier with
+    // no setting overrides does not change the sliced result.
+    mesh.transform(object->instances.front()->get_matrix().inverse());
+    replace_preview_volume(std::move(mesh), key);
+    return true;
+}
+
+void Plater::set_svg_infill_preview(const Polylines &lines)
+{
+    if (GLCanvas3D *canvas = get_view3D_canvas3D(); canvas != nullptr)
+        canvas->set_svg_infill_preview(lines, 0.2);
+}
+
+void Plater::preview_mesh_infill()
+{
+    int obj_idx = get_selected_object_idx();
+    if (obj_idx < 0 && ! p->model.objects.empty())
+        obj_idx = 0;
+    if (obj_idx < 0 || obj_idx >= int(p->model.objects.size())) {
+        MessageDialog(this, _L("Add or select an object first."), _L("Preview Mesh Infill"), wxOK).ShowModal();
+        return;
+    }
+    take_snapshot(std::string("Preview mesh infill"));
+    if (generate_infill_preview_for_object(obj_idx, /*interactive=*/true))
+        update();
+}
+
+void Plater::refresh_infill_previews()
+{
+    // Dry-run first: only pay for an undo snapshot when something is stale.
+    bool any_stale = false;
+    for (size_t i = 0; i < p->model.objects.size() && ! any_stale; ++i)
+        any_stale = generate_infill_preview_for_object(int(i), /*interactive=*/false, /*dry_run=*/true);
+    if (! any_stale)
+        return;
+    take_snapshot(std::string("Refresh infill previews"));
+    bool changed = false;
+    for (size_t i = 0; i < p->model.objects.size(); ++i)
+        changed |= generate_infill_preview_for_object(int(i), /*interactive=*/false);
+    if (changed)
+        update();
+}
+
 bool Plater::add_model(bool imperial_units, std::string fname)
 {
     wxArrayString input_files;
@@ -17095,6 +17299,11 @@ void Plater::reload_gcode_from_disk()
 void Plater::reload_print()
 {
     p->preview->reload_print();
+}
+
+void Plater::refresh_belt_view()
+{
+    p->preview->refresh_belt_view();
 }
 
 // BBS
@@ -19338,6 +19547,107 @@ void Plater::replace_all_with_stl()
     p->replace_all_with_stl();
 }
 
+void Plater::toggle_bed_mesh()
+{
+    wxGetApp().toggle_show_bed_mesh();
+    if (wxGetApp().show_bed_mesh() && !p->partplate_list.bed_mesh_overlay().has_mesh())
+        fetch_bed_mesh();
+    if (GLCanvas3D* canvas = get_current_canvas3D()) {
+        canvas->set_as_dirty();
+        canvas->request_extra_frame();
+    }
+}
+
+void Plater::fetch_bed_mesh()
+{
+    // Same config the upload path uses: this fork keeps the host on the printer preset.
+    DynamicPrintConfig& printer_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    std::shared_ptr<PrintHost> host(PrintHost::get_print_host(&printer_config));
+    // Hosts to try in order. Klipper users often leave the host type at OctoPrint, which Moonraker
+    // emulates for uploads; the same host, key and certificate then answer Moonraker's own
+    // bed_mesh query, which is quick to try before OctoPrint's own socket-based readback.
+    std::vector<std::shared_ptr<PrintHost>> hosts;
+    if (const auto* host_type = printer_config.option<ConfigOptionEnum<PrintHostType>>("host_type");
+        host && host_type != nullptr && host_type->value == htOctoPrint)
+        hosts.push_back(std::make_shared<Moonraker>(&printer_config));
+    if (host && host->can_get_bed_mesh())
+        hosts.push_back(host);
+    NotificationManager* notifications = get_notification_manager();
+    if (hosts.empty()) {
+        notifications->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+            _u8L("This printer's host type cannot report a bed mesh. Moonraker (Klipper), OctoPrint (Marlin) and Duet/Unlayered (RepRapFirmware) can."));
+        return;
+    }
+
+    struct Result {
+        BedMesh     mesh;
+        std::string error;
+        bool        ok = false;
+    };
+    auto              result    = std::make_shared<Result>();
+    const std::string host_name = hosts.front()->get_host();
+    const std::string status    = _u8L("Reading bed mesh from printer");
+    queue_job(get_ui_job_worker(),
+        [hosts, result, status](Job::Ctl& ctl) {
+            ctl.update_status(0, status);
+            for (const std::shared_ptr<PrintHost>& h : hosts) {
+                wxString error;
+                BOOST_LOG_TRIVIAL(info) << "Bed mesh: asking " << h->get_name() << " at " << h->get_host();
+                result->ok = h->get_bed_mesh(result->mesh, error);
+                if (result->ok)
+                    break;
+                if (!result->error.empty())
+                    result->error += " / ";
+                result->error += std::string(h->get_name()) + ": " + error.ToUTF8().data();
+            }
+            ctl.update_status(100, "");
+        },
+        [this, result, host_name](bool canceled, std::exception_ptr& eptr) {
+            if (eptr) {
+                try { std::rethrow_exception(eptr); }
+                catch (const std::exception& ex) { result->ok = false; result->error = ex.what(); }
+                eptr = nullptr;
+            }
+            if (canceled)
+                return;
+            NotificationManager* notifications = get_notification_manager();
+            BedMeshOverlay&      overlay       = p->partplate_list.bed_mesh_overlay();
+            if (!result->ok) {
+                notifications->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::ErrorNotificationLevel,
+                    Slic3r::format(_u8L("Could not read the bed mesh from %1%: %2%"), host_name, result->error));
+            }
+            else if (result->mesh.empty()) {
+                overlay.clear();
+                notifications->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
+                    Slic3r::format(_u8L("%1% has no bed mesh loaded."), host_name));
+            }
+            else {
+                const BedMesh& mesh = result->mesh;
+                const Vec2d    size = mesh.max - mesh.min;
+                std::string text = Slic3r::format(_u8L("Bed mesh \"%1%\" read from %2% via %3%: %4% x %5% probe points over %6% x %7% mm, range %8% mm."),
+                    mesh.profile_name.empty() ? _u8L("unsaved") : mesh.profile_name, host_name, mesh.source,
+                    mesh.probed_cols(), mesh.probed_rows(), int(std::lround(size.x())), int(std::lround(size.y())),
+                    Slic3r::format("%.3f", mesh.z_range()));
+                if (!mesh.note.empty())
+                    text += " " + mesh.note + ".";
+                if (!mesh.loaded)
+                    text += " " + _u8L("The printer is not confirmed to be compensating with this mesh.");
+                notifications->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel, text);
+                if (mesh.out_of_flat())
+                    notifications->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+                        Slic3r::format(_u8L("Bed is %1% mm out of flat, more than the %2% mm warning threshold. Mesh compensation will hide it, but check the bed and its tramming before relying on that."),
+                                       Slic3r::format("%.3f", mesh.z_range()), Slic3r::format("%.1f", BedMesh::FLATNESS_WARNING_MM)));
+                overlay.set_mesh(mesh, host_name);
+                if (!wxGetApp().show_bed_mesh())
+                    wxGetApp().toggle_show_bed_mesh();
+            }
+            if (GLCanvas3D* canvas = get_current_canvas3D()) {
+                canvas->set_as_dirty();
+                canvas->request_extra_frame();
+            }
+        });
+}
+
 void Plater::reload_all_from_disk()
 {
     p->reload_all_from_disk();
@@ -19811,7 +20121,11 @@ bool Plater::export_loaded_gcode()
     if (output_path.empty())
         return false;
 
-    if (fs::equivalent(source, output_path, boost::system::error_code{}))
+    // equivalent() takes the error_code by non-const reference, so it has to be a named variable:
+    // MSVC binds the temporary anyway, clang and gcc reject it. An error (e.g. output_path does not
+    // exist yet) just means "not the same file".
+    boost::system::error_code equivalent_ec;
+    if (fs::equivalent(source, output_path, equivalent_ec))
         return true;   // saving it over itself: nothing to do, and copy_file would truncate it
 
     boost::system::error_code ec;
@@ -22759,6 +23073,8 @@ Plater::TakeSnapshot::TakeSnapshot(Plater* plater, const std::string& snapshot_n
 // Wrapper around wxWindow::PopupMenu to suppress error messages popping out while tracking the popup menu.
 bool Plater::PopupMenu(wxMenu *menu, const wxPoint& pos)
 {
+    // Context menus grow items dynamically, so mnemonics are assigned right before showing.
+    assign_menu_mnemonics(menu);
     // Don't want to wake up and trigger reslicing while tracking the pop-up menu.
     SuppressBackgroundProcessingUpdate sbpu;
     // When tracking a pop-up menu, postpone error messages from the slicing result.

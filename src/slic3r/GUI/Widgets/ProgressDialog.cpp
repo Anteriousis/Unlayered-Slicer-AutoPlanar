@@ -138,7 +138,9 @@ bool ProgressDialog::Create(const wxString &title, const wxString &message, int 
 
     m_pdStyle = style;
 
-    if (!wxDialog::Create(m_parentTop, wxID_ANY, title, wxDefaultPosition, wxDefaultSize, GetWindowStyle())) return false;
+    // Without a parent the dialog must stay parentless: wxMSW would otherwise adopt the active
+    // top-level window, which GUI_App::recreate_GUI destroys while this dialog is still up.
+    if (!wxDialog::Create(m_parentTop, wxID_ANY, title, wxDefaultPosition, wxDefaultSize, GetWindowStyle() | (m_parentTop == nullptr ? wxDIALOG_NO_PARENT : 0))) return false;
     SetBackgroundColour(PROGRESSDIALOG_DEF_BK);
 
     /* SetSize(DESIGN_RESOUTION_PROGRESS_SIZE);

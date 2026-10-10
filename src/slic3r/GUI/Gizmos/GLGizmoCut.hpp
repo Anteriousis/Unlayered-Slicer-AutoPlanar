@@ -18,6 +18,7 @@ class ModelVolume;
 class GLShaderProgram;
 struct CutConnectorAttributes;
 struct SkeletonResult; // defined in libslic3r/SkeletonBuild.hpp; see the note below
+struct SkeletonParams; // ditto
 
 namespace GUI {
 
@@ -124,6 +125,11 @@ protected:
     float m_skel_tunnel_min_aspect{1.2f};
     float m_skel_prune_leaves{0.0f};
     int   m_skel_decimate_faces{0};  // 0 = off; see the Face budget tooltip
+    // Where the root stands; mirrors Slic3r::BedRootMode (0 = auto, 1 = middle, 2 = tips). The
+    // lean and ramp shape how the cuts fan out of it and apply live, without a rebuild.
+    int   m_skel_bed_root{0};
+    float m_skel_root_lean{45.0f};
+    float m_skel_root_ramp{0.0f};    // 0 = auto
     // Outstanding async skeleton build, if any. Shared with the worker so that closing
     // the gizmo mid-build cannot leave it writing through a dangling pointer.
     std::shared_ptr<SkeletonJobState> m_skel_job_state;
@@ -328,6 +334,7 @@ public:
 
 protected:
     void compute_skeleton();          // launches the worker; result arrives via poll
+    SkeletonParams skeleton_params() const; // the panel's settings as pipeline parameters
     void poll_skeleton_job();         // main thread: apply the worker's result when ready
     // virtual so GLGizmoSkeleton can refresh its cache when the async result lands
     virtual void apply_skeleton_result(const SkeletonResult& res);

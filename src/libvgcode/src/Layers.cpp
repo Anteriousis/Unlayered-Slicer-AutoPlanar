@@ -37,9 +37,16 @@ void Layers::update(const PathVertex& vertex, uint32_t vertex_id)
             m_all_planar = false;
     };
 
-    if (m_items.empty() || vertex.layer_id == m_items.size()) {
-        // this code assumes that gcode paths are sent sequentially, one layer after the other
-        assert(vertex.layer_id == static_cast<uint32_t>(m_items.size()));
+    // UNLAYERED_MOD: keyed on the source layer id changing, not on it equalling the item count.
+    // This code assumes gcode paths are sent sequentially, one layer after the other, and used to
+    // assume every layer change is followed by at least one move. A layer change with no move (an
+    // empty layer) leaves a gap in the ids: with `layer_id == size()` every later vertex fell into
+    // the previous item for the rest of the file (the preview showed one giant last layer and
+    // lost everything after the gap), and `>=` would open a new item for each of the first few
+    // vertices after the gap. Remembering the id of the current item keeps one item per source
+    // layer that has moves, whatever ids were skipped.
+    if (m_items.empty() || vertex.layer_id != m_last_layer_id) {
+        m_last_layer_id = vertex.layer_id;
         Item& item = m_items.emplace_back(Item());
         accumulate_extrusion(item);
         item.range.set(vertex_id, vertex_id);
@@ -62,6 +69,7 @@ void Layers::reset()
     m_items.clear();
     m_view_range.reset();
     m_all_planar = true;
+    m_last_layer_id = 0;
 }
 
 std::vector<float> Layers::get_times(ETimeMode mode) const

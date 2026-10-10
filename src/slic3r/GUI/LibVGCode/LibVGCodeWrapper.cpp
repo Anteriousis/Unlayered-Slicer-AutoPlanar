@@ -191,9 +191,15 @@ Slic3r::PrintEstimatedStatistics::ETimeMode convert(const ETimeMode& mode)
 }
 
 GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::vector<std::string>& str_tool_colors,
-    const std::vector<std::string>& str_color_print_colors, const Viewer& viewer)
+    const std::vector<std::string>& str_color_print_colors, const Viewer& viewer,
+    const Slic3r::Transform3d* display_transform)
 {
     GCodeInputData ret;
+
+    // BELT_MOD: see the declaration.
+    auto position = [display_transform](const Slic3r::Vec3f& v) -> Vec3 {
+        return display_transform == nullptr ? convert(v) : convert(Slic3r::Vec3f((*display_transform * v.cast<double>()).cast<float>()));
+    };
 
     // collect tool colors
     ret.tools_colors.reserve(str_tool_colors.size());
@@ -228,9 +234,22 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
         int max_segment_id = -1;
         for (const Slic3r::GCodeProcessorResult::MoveVertex& move : result.moves)
             max_segment_id = std::max(max_segment_id, int(to_section_id(move.cut_segment_id)));
+        // UNLAYERED_MOD -- each section fades from the filament it is printed in: the extruder of
+        // the first extrusion carrying that id. Ids are per object, so with several objects the
+        // first one to print a given id sets its base colour; with one object this is exactly the
+        // Prepare view's fade.
+        std::vector<int> section_tool(size_t(max_segment_id + 1), -1);
+        for (const Slic3r::GCodeProcessorResult::MoveVertex& move : result.moves) {
+            const int id = int(to_section_id(move.cut_segment_id));
+            if (id >= 0 && section_tool[id] < 0 && move.type == Slic3r::EMoveType::Extrude)
+                section_tool[id] = int(move.extruder_id);
+        }
         ret.cut_segment_colors.reserve(size_t(max_segment_id + 1));
-        for (int i = 0; i <= max_segment_id; ++i)
-            ret.cut_segment_colors.emplace_back(convert(::cut_segment_color(size_t(i))));
+        for (int i = 0; i <= max_segment_id; ++i) {
+            const int tool = section_tool[i] >= 0 && section_tool[i] < int(ret.tools_colors.size()) ? section_tool[i] : 0;
+            const Slic3r::ColorRGBA filament = ret.tools_colors.empty() ? Slic3r::ColorRGBA::WHITE() : convert(ret.tools_colors[tool]);
+            ret.cut_segment_colors.emplace_back(convert(::cut_segment_color(size_t(i), size_t(max_segment_id + 1), filament)));
+        }
     }
 
     const std::vector<Slic3r::GCodeProcessorResult::MoveVertex>& moves = result.moves;
@@ -252,7 +271,7 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
                 // equal to the current one with the exception of the position, which should match the previous move position,
                 // and the times, which are set to zero
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
-                const libvgcode::PathVertex vertex = { convert(prev.position), curr.height, curr.width, curr.feedrate, prev.actual_feedrate,
+                const libvgcode::PathVertex vertex = { position(prev.position), curr.height, curr.width, curr.feedrate, prev.actual_feedrate,
                     curr.mm3_per_mm, curr.fan_speed, curr.temperature, 0.0f, convert(curr.extrusion_role), curr_type,
                     static_cast<uint32_t>(curr.gcode_id), static_cast<uint32_t>(curr.layer_id),
                     static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), { 0.0f, 0.0f },
@@ -262,7 +281,7 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
                     /* UNLAYERED_MOD: tilted-layer tool axis */ curr.tool_axis_id,
                     /* cut planes: section id */ to_section_id(curr.cut_segment_id) };
 #else
-              const libvgcode::PathVertex vertex = { convert(prev.position), curr.height, curr.width, curr.feedrate, prev.actual_feedrate,
+              const libvgcode::PathVertex vertex = { position(prev.position), curr.height, curr.width, curr.feedrate, prev.actual_feedrate,
                     curr.mm3_per_mm, curr.fan_speed, curr.temperature, convert(curr.extrusion_role), curr_type,
                     static_cast<uint32_t>(curr.gcode_id), static_cast<uint32_t>(curr.layer_id),
                     static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), { 0.0f, 0.0f },
@@ -277,7 +296,7 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
         }
 
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
-        const libvgcode::PathVertex vertex = { convert(curr.position), curr.height, curr.width, curr.feedrate, curr.actual_feedrate,
+        const libvgcode::PathVertex vertex = { position(curr.position), curr.height, curr.width, curr.feedrate, curr.actual_feedrate,
             curr.mm3_per_mm, curr.fan_speed, curr.temperature,
             result.filament_densities[curr.extruder_id] * curr.mm3_per_mm * (curr.position - prev.position).norm(),
             convert(curr.extrusion_role), curr_type, static_cast<uint32_t>(curr.gcode_id), static_cast<uint32_t>(curr.layer_id),
@@ -288,7 +307,7 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
             /* UNLAYERED_MOD: tilted-layer tool axis */ curr.tool_axis_id,
             /* cut planes: section id */ to_section_id(curr.cut_segment_id) };
 #else
-        const libvgcode::PathVertex vertex = { convert(curr.position), curr.height, curr.width, curr.feedrate, curr.actual_feedrate,
+        const libvgcode::PathVertex vertex = { position(curr.position), curr.height, curr.width, curr.feedrate, curr.actual_feedrate,
             curr.mm3_per_mm, curr.fan_speed, curr.temperature, convert(curr.extrusion_role), curr_type,
             static_cast<uint32_t>(curr.gcode_id), static_cast<uint32_t>(curr.layer_id),
             static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), curr.time,

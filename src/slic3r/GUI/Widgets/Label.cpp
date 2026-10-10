@@ -1,20 +1,49 @@
+#include <cmath>
+#include <initializer_list>
 #include "libslic3r/Utils.hpp"
 #include "Label.hpp"
 #include "StaticBox.hpp"
 #include <wx/intl.h> // For wxLocale
 #include <wx/dcclient.h>
 #include <wx/settings.h>
+#include <wx/fontenum.h>
 #include <boost/log/trivial.hpp>
 #ifdef __linux__
 #include <fontconfig/fontconfig.h>
+#include <pango/pangocairo.h>
+#include <pango/pangofc-fontmap.h>
 #endif
 
+
+static float s_font_scale = 1.0f;
+
+void Label::setFontScale(float scale) { s_font_scale = scale; }
+float Label::getFontScale() { return s_font_scale; }
+
+static std::string s_font_family;
+
+void Label::setFontFamily(const std::string& family) { s_font_family = family; }
+std::string Label::getFontFamily() { return s_font_family; }
+
+// The face for the chosen family, or empty for the default. Comic Sans MS is proprietary and
+// cannot be shipped, so it is used only where the system has it; Comic Neue (OFL) stands in.
+static wxString chosen_face()
+{
+    if (s_font_family == "dyslexic")
+        return "OpenDyslexic";
+    if (s_font_family == "comic") {
+        static const bool has_comic_sans = wxFontEnumerator::IsValidFacename("Comic Sans MS");
+        return has_comic_sans ? "Comic Sans MS" : "Comic Neue";
+    }
+    return wxString();
+}
 
 wxFont Label::sysFont(int size, bool bold)
 {
 //#ifdef __linux__
 //    return wxFont{};
 //#endif
+    size = int(std::lround(size * s_font_scale));
 #ifndef __APPLE__
     size = size * 4 / 5;
 #endif
@@ -25,6 +54,8 @@ wxFont Label::sysFont(int size, bool bold)
     if (wxLocale::GetSystemLanguage() == wxLANGUAGE_KOREAN) {
         face = "NanumGothic";
     }
+    if (const wxString chosen = chosen_face(); !chosen.empty())
+        face = chosen; // the user's choice wins; glyphs it lacks fall back through the system
 
     wxFont font{size, wxFONTFAMILY_SWISS, wxFONTSTYLE_NORMAL, bold ? wxFONTWEIGHT_BOLD : wxFONTWEIGHT_NORMAL, false, face};
     font.SetFaceName(face);
@@ -86,20 +117,38 @@ static bool fc_font_available(const char *family_name)
 void Label::initSysFont()
 {
 #if defined(__linux__) || defined(_WIN32)
-    // On Linux, skip AddPrivateFont for fonts already known to fontconfig
-    // (e.g. installed system-wide in a Flatpak).  Calling AddPrivateFont
-    // triggers a Pango crash in ensure_faces() on Pango >= 1.48 (GNOME 49+),
-    // because FcConfigAppFontAddFile invalidates Pango's cached font map.
-    bool load_fonts = true;
+    // Bundled fonts are registered once, all together. On Linux, wxFont::AddPrivateFont adds the
+    // file to a private FcConfig and hands that config to Pango; Pango only rescans its families
+    // when the config object changes, so files added after the first batch stay invisible until
+    // it is told explicitly (pango_fc_font_map_config_changed). Fonts fontconfig already knows
+    // (e.g. installed system-wide in a Flatpak) are skipped: registering a second copy crashes
+    // Pango >= 1.48 in ensure_faces(). (macOS registers the bundle's fonts/ directory itself.)
+    static bool registered = false;
+    if (!registered) {
+        registered = true;
+        const std::string& resource_path = Slic3r::resources_dir();
+        auto add = [&](const char* family, std::initializer_list<const char*> files) {
 #ifdef __linux__
-    load_fonts = !fc_font_available("HarmonyOS Sans SC") || !fc_font_available("NanumGothic");
+            if (fc_font_available(family))
+                return;
+#else
+            (void) family;
 #endif
-    if (load_fonts) {
-        const std::string &resource_path = Slic3r::resources_dir();
-        wxFont::AddPrivateFont(wxString::FromUTF8(resource_path + "/fonts/HarmonyOS_Sans_SC_Bold.ttf"));
-        wxFont::AddPrivateFont(wxString::FromUTF8(resource_path + "/fonts/HarmonyOS_Sans_SC_Regular.ttf"));
-        wxFont::AddPrivateFont(wxString::FromUTF8(resource_path + "/fonts/NanumGothic-Regular.ttf"));
-        wxFont::AddPrivateFont(wxString::FromUTF8(resource_path + "/fonts/NanumGothic-Bold.ttf"));
+            for (const char* file : files)
+                wxFont::AddPrivateFont(wxString::FromUTF8(resource_path + "/fonts/" + file));
+        };
+        add("HarmonyOS Sans SC", {"HarmonyOS_Sans_SC_Bold.ttf", "HarmonyOS_Sans_SC_Regular.ttf"});
+        add("NanumGothic", {"NanumGothic-Regular.ttf", "NanumGothic-Bold.ttf"});
+        // The readable-text choices (preference "ui_font_family").
+        add("OpenDyslexic", {"OpenDyslexic-Regular.otf", "OpenDyslexic-Bold.otf"});
+        add("Comic Neue", {"ComicNeue-Regular.ttf", "ComicNeue-Bold.ttf"});
+#ifdef __linux__
+        if (PangoFontMap* fmap = pango_cairo_font_map_get_default(); fmap && PANGO_IS_FC_FONT_MAP(fmap))
+            pango_fc_font_map_config_changed(PANGO_FC_FONT_MAP(fmap));
+        wxFontEnumerator::InvalidateCache();
+#endif
+        for (const char* family : {"HarmonyOS Sans SC", "NanumGothic", "OpenDyslexic", "Comic Neue"})
+            BOOST_LOG_TRIVIAL(info) << "bundled font " << family << (wxFontEnumerator::IsValidFacename(family) ? " available" : " NOT available");
     }
 #endif
     Head_48 = Label::sysFont(48, true);

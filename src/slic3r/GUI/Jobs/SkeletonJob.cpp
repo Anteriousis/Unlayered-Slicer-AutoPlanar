@@ -11,7 +11,7 @@ void SkeletonJob::process(Ctl& ctl)
     if (!m_state)
         return;
 
-    ctl.update_status(0, _u8L("Building skeleton"));
+    ctl.update_status(0, _u8L("Finding pipe centreline"));
 
     SkeletonProgress prog;
     prog.canceled = [&ctl]() { return ctl.was_canceled(); };
@@ -23,7 +23,7 @@ void SkeletonJob::process(Ctl& ctl)
         }
         // The worker owns the status text; the gizmo panel reads `stage`/`percent` directly, so
         // this is only for the notification area.
-        ctl.update_status(pct, _u8L("Building skeleton"));
+        ctl.update_status(pct, _u8L("Finding pipe centreline"));
     };
 
     SkeletonResult res;

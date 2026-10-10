@@ -9,6 +9,13 @@
 
 class ComboBox : public wxWindowWithItems<TextInput, wxItemContainer>
 {
+    bool m_keyboard_stop{ false }; // read-only: the combo, not a child, takes keyboard focus
+
+public:
+    bool AcceptsFocus() const override { return m_keyboard_stop || TextInput::AcceptsFocus(); }
+    bool AcceptsFocusRecursively() const override { return m_keyboard_stop || TextInput::AcceptsFocusRecursively(); }
+    bool AcceptsFocusFromKeyboard() const override { return m_keyboard_stop || TextInput::AcceptsFocusFromKeyboard(); }
+
     typedef DropDown::Item Item;
     std::vector<Item>      items;
 

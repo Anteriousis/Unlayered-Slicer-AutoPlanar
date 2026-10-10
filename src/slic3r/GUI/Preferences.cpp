@@ -1,6 +1,15 @@
 #include "Preferences.hpp"
 #include "OptionsGroup.hpp"
 #include "GUI_App.hpp"
+#include "FocusRing.hpp"
+#include "Theme.hpp"
+#include <wx/clrpicker.h>
+#include <wx/textdlg.h>
+#include <wx/filedlg.h>
+#include <memory>
+#ifdef __WXGTK__
+#include <gtk/gtk.h>
+#endif
 #include "MainFrame.hpp"
 #include "Plater.hpp"
 #include "GLCanvas3D.hpp" // ORCA: for live preview refresh when toggling "Dim lower layers"
@@ -320,7 +329,7 @@ wxBoxSizer* PreferencesDialog::create_item_combobox(wxString title, wxString too
     return sizer;
 }
 
-wxBoxSizer *PreferencesDialog::create_item_combobox(wxString title, wxString tooltip, std::string param, std::vector<wxString> vlist, std::vector<std::string> config_name_index, const wxString wiki_url)
+wxBoxSizer *PreferencesDialog::create_item_combobox(wxString title, wxString tooltip, std::string param, std::vector<wxString> vlist, std::vector<std::string> config_name_index, const wxString wiki_url, std::function<void(const std::string&)> onchange)
 {
     assert(vlist.size() == config_name_index.size());
     unsigned int current_index = 0;
@@ -336,8 +345,10 @@ wxBoxSizer *PreferencesDialog::create_item_combobox(wxString title, wxString too
     auto [sizer, combobox] = create_item_combobox_base(title, tooltip, param, vlist, current_index);
 
     //// save config
-    combobox->GetDropDown().Bind(wxEVT_COMBOBOX, [this, param, config_name_index](wxCommandEvent& e) {
+    combobox->GetDropDown().Bind(wxEVT_COMBOBOX, [this, param, config_name_index, onchange](wxCommandEvent& e) {
         app_config->set(param, config_name_index[e.GetSelection()]);
+        if (onchange)
+            onchange(config_name_index[e.GetSelection()]);
         e.Skip();
     });
 
@@ -1018,40 +1029,6 @@ wxBoxSizer *PreferencesDialog::create_item_auto_reslice(wxString title, wxString
     return m_sizer;
 }
 
-wxBoxSizer* PreferencesDialog::create_item_darkmode(wxString title,wxString tooltip, std::string param)
-{
-    auto tip = tooltip.IsEmpty() ? title : tooltip; // auto fill tooltips with title if its empty
-
-    wxBoxSizer *m_sizer = create_item_label(title, tip);
-
-    auto checkbox = new ::CheckBox(m_parent);
-    checkbox->SetValue((app_config->get(param) == "1") ? true : false);
-    checkbox->SetToolTip(tip);
-    m_dark_mode_ckeckbox = checkbox;
-
-    m_sizer->Add(checkbox, 0, wxALIGN_CENTER);
-
-    //// save config
-    checkbox->Bind(wxEVT_TOGGLEBUTTON, [this, checkbox, param](wxCommandEvent& e) {
-        app_config->set(param, checkbox->GetValue() ? "1" : "0");
-        app_config->save();
-        wxGetApp().Update_dark_mode_flag();
-
-        //dark mode
-#ifdef _MSW_DARK_MODE
-        wxGetApp().force_colors_update();
-        wxGetApp().update_ui_from_settings();
-        set_dark_mode();
-#endif
-        SimpleEvent evt = SimpleEvent(EVT_GLCANVAS_COLOR_MODE_CHANGED);
-        wxPostEvent(wxGetApp().plater(), evt);
-        e.Skip();
-        });
-
-    
-    return m_sizer;
-}
-
 void PreferencesDialog::set_dark_mode()
 {
 #ifdef __WINDOWS__
@@ -1130,6 +1107,15 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
                 }
             }
         }
+        else if (param == "opaque_overlays") {
+            wxGetApp().imgui()->set_opaque_overlays(app_config->get_bool(param));
+            if (Plater* plater = wxGetApp().plater()) {
+                if (GLCanvas3D* canvas = plater->get_current_canvas3D()) {
+                    canvas->set_as_dirty();
+                    canvas->request_extra_frame();
+                }
+            }
+        }
         // ORCA: apply the preview dimming change immediately to the currently loaded preview
         else if (param == "preview_dim_previous_layers") {
             if (m_dim_previous_layers_brightness_input)
@@ -1180,8 +1166,12 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
             }
         }
 
-        // Unlayered: the "installed_networking" branch that used to be here opened the Bambu
-        // network plug-in download dialog. Its checkbox is gone, so nothing can set the key.
+        if (param == "installed_networking") {
+            bool pbool = app_config->get_bool("installed_networking");
+            if (pbool) {
+                GUI::wxGetApp().CallAfter([] { GUI::wxGetApp().ShowDownNetPluginDlg(); });
+            }
+        }
 
 #endif // __WXMSW__
 
@@ -1277,6 +1267,26 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
     if (param == "internal_developer_mode") { m_internal_developer_mode_ckeckbox = checkbox; }
 
     return m_sizer;
+}
+
+// A colour swatch that opens the native colour dialog, plus a Reset that restores the theme default.
+wxBoxSizer *PreferencesDialog::create_item_colour(wxString title, wxString tooltip, std::function<wxColour()> get, std::function<void(const wxColour &)> set, std::function<void()> reset)
+{
+    wxBoxSizer *sizer  = create_item_label(title, tooltip);
+    auto        picker = new wxColourPickerCtrl(m_parent, wxID_ANY, get());
+    picker->SetToolTip(tooltip);
+    picker->Bind(wxEVT_COLOURPICKER_CHANGED, [this, set](wxColourPickerEvent &e) { set(e.GetColour()); refresh_theme_items(); }); // status, and swatches auto-contrast moved
+    sizer->Add(picker, 0, wxALIGN_CENTER_VERTICAL);
+    m_theme_refresh.push_back([picker, get]() { picker->SetColour(get()); });
+
+    auto reset_btn = new Button(m_parent, _L("Reset"));
+    reset_btn->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
+    reset_btn->Bind(wxEVT_BUTTON, [this, reset](auto &) {
+        reset();
+        refresh_theme_items();
+    });
+    sizer->Add(reset_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+    return sizer;
 }
 
 wxBoxSizer* PreferencesDialog::create_item_button(wxString title, wxString title2, wxString tooltip, wxString tooltip2, std::function<void()> onclick, const wxString wiki_url)
@@ -1559,9 +1569,32 @@ wxBoxSizer* PreferencesDialog::create_item_link_association( wxString url_prefix
 }
 #endif // WIN32
 
+bool PreferencesDialog::recreate_GUI() const
+{
+    // Any net change of the theme in effect (an edit, another theme, a base flip, an import)
+    // was previewed live by patching existing windows; the rebuilt window is constructed from
+    // the theme and cannot drift. A round trip back to the same values needs no rebuild.
+    return m_recreate_GUI || !ThemeManager::get().active().same_values(m_theme_at_open);
+}
+
 PreferencesDialog::PreferencesDialog(wxWindow *parent, wxWindowID id, const wxString &title, const wxPoint &pos, const wxSize &size, long style)
     : DPIDialog(parent, id, _L("Preferences"), pos, size, style)
 {
+    m_theme_at_open = ThemeManager::get().active();
+#ifdef __WXGTK__
+    // GNOME attaches a modal dialog to its parent (mutter's attach-modal-dialogs, on by default):
+    // it cannot be moved on its own and dragging it drags the whole application. Keep wx's modal
+    // loop but drop GTK's modal flag, which is what the window manager keys on, as the window shows.
+    // Without GTK's modal flag the main window would accept input while this dialog is up (that
+    // crashed when a primitive was added mid-dialog), so the dialog blocks it itself: input events
+    // aimed at any other window of the application are dropped while it is shown.
+    Bind(wxEVT_SHOW, [this](wxShowEvent& e) {
+        if (m_widget != nullptr && e.IsShown())
+            gtk_window_set_modal(GTK_WINDOW(m_widget), FALSE);
+        wxGetApp().set_input_blocking_dialog(e.IsShown() ? this : nullptr);
+        e.Skip();
+    });
+#endif
     SetBackgroundColour(*wxWHITE);
     SetMinSize(DESIGN_WINDOW_SIZE);
     create();
@@ -1583,6 +1616,7 @@ void PreferencesDialog::create()
     m_pref_tabs->SetFont(Label::Body_14);
 
     create_items();
+    wxGetApp().retheme_from_base(); // this dialog's own panels are built with literal colours
 
     m_pref_tabs->Bind(wxEVT_TAB_SEL_CHANGED, [this](wxCommandEvent& e) {
         Freeze();
@@ -1599,7 +1633,7 @@ void PreferencesDialog::create()
     });
 
     auto item_color = StateColor(
-        std::make_pair(wxColour("#6B6B6C"), (int) StateColor::NotChecked),
+        std::make_pair(wxColour("#6B6B6B"), (int) StateColor::NotChecked), // the disabled-text key
         std::make_pair(wxColour("#363636"), (int) StateColor::Normal)
     );
 
@@ -1614,11 +1648,28 @@ void PreferencesDialog::create()
     SetSizer(m_sizer_body);
     Layout();
     Fit();
+    // Resizable; opens at the size it was last closed at (preferences_dialog_size), otherwise
+    // taller than the fitted minimum so more of a page shows at once. Kept within the display.
+    {
+        wxSize size = GetSize();
+        const std::string saved = app_config->get("preferences_dialog_size");
+        int w = 0, h = 0;
+        if (sscanf(saved.c_str(), "%d,%d", &w, &h) == 2 && w > 0 && h > 0)
+            size = wxSize(w, h);
+        else
+            size.y = std::max(size.y, DESIGN_FONT_SCALED(860));
+        const wxRect area = wxDisplay(wxDisplay::GetFromWindow(this)).GetClientArea();
+        size.x = std::min(size.x, area.width);
+        size.y = std::min(size.y, area.height);
+        SetSize(size);
+    }
     CenterOnParent();
 }
 
 PreferencesDialog::~PreferencesDialog()
 {
+    if (app_config != nullptr && !IsMaximized())
+        app_config->set("preferences_dialog_size", std::to_string(GetSize().x) + "," + std::to_string(GetSize().y));
 }
 
 void PreferencesDialog::on_dpi_changed(const wxRect &suggested_rect) {
@@ -1717,10 +1768,6 @@ void PreferencesDialog::create_items()
     auto item_default_page     = create_item_combobox(_L("Default page"), _L("Set the page opened on startup."), "default_page", DefaultPage);
     g_sizer->Add(item_default_page);
 
-#ifdef _WIN32
-    auto item_darkmode         = create_item_darkmode(_L("Enable dark Mode"), "", "dark_color_mode");
-    g_sizer->Add(item_darkmode);
-#endif
 
     auto item_single_instance  = create_item_checkbox(_L("Allow only one Unlayered Slicer instance"),
     #if __APPLE__
@@ -1736,8 +1783,6 @@ void PreferencesDialog::create_items()
     g_sizer->Add(item_show_splash_scr);
 
 #ifdef __linux__
-    auto item_window_button_pos  = create_item_checkbox(_L("Use window buttons on left side"), "", "window_buttons_on_left", _L("(Requires restart)"));
-    g_sizer->Add(item_window_button_pos);
 #endif
 
     //auto item_hints            = create_item_checkbox(_L("Show \"Daily Tips\" after start"), page, _L("If enabled, useful hints are displayed at startup."), "show_daily_tips");
@@ -1885,6 +1930,324 @@ void PreferencesDialog::create_items()
     sizer_page->Add(g_sizer, 0, wxEXPAND);
 
     //////////////////////////
+    /////////////////////////////////////
+    //// APPEARANCE TAB
+    /////////////////////////////////////
+    m_pref_tabs->AppendItem(_L("Appearance"));
+    f_sizers.push_back(new wxFlexGridSizer(1, 1, v_gap, 0));
+    g_sizer = f_sizers.back();
+    g_sizer->AddGrowableCol(0, 1);
+
+    //// APPEARANCE
+    g_sizer->Add(create_item_title(_L("Appearance")), 1, wxEXPAND);
+
+    auto item_color_scheme = create_item_combobox(_L("Colour scheme"),
+        _L("Follow the system's light or dark appearance, or force one."),
+        "color_scheme", {_L("System"), _L("Light"), _L("Dark")}, std::vector<std::string>{"system", "light", "dark"}, "",
+        [this](const std::string& scheme) {
+            wxGetApp().apply_color_scheme(scheme);
+#ifdef __WINDOWS__
+            set_dark_mode();
+#endif
+            refresh_theme_items(); // the theme in effect may have changed with the base
+        });
+    g_sizer->Add(item_color_scheme);
+
+    auto item_font_scale = create_item_combobox(_L("Font scale"),
+        _L("Scale of the interface text. Larger values need a larger window; the settings panels grow with the text. "
+           "The window is rebuilt when Preferences closes."),
+        "ui_font_scale", {"100%", "125%", "150%", "175%"}, std::vector<std::string>{"100", "125", "150", "175"}, "",
+        [this](const std::string& value) {
+            // Fonts are baked into every widget at creation, so the main window is rebuilt on
+            // close (the language-change path); the new scale must be in Label before that.
+            const float scale = std::clamp(std::atoi(value.c_str()), 50, 300) / 100.f;
+            ::Label::setFontScale(scale);
+            ImGuiWrapper::set_font_scale(scale);
+            ::Label::initSysFont();
+            m_recreate_GUI = true;
+        });
+    g_sizer->Add(item_font_scale);
+
+    auto item_font_family = create_item_combobox(_L("Font"),
+        _L("The typeface of the interface text. Comic Sans and OpenDyslexic are easier to read for some people; "
+           "Comic Sans uses the system's Comic Sans MS where it is installed and the bundled Comic Neue otherwise. "
+           "The window is rebuilt when Preferences closes."),
+        "ui_font_family", {_L("Default"), "Comic Sans", "OpenDyslexic"}, std::vector<std::string>{"", "comic", "dyslexic"}, "",
+        [this](const std::string& value) {
+            ::Label::setFontFamily(value);
+            ::Label::initSysFont();
+            m_recreate_GUI = true;
+        });
+    g_sizer->Add(item_font_family);
+
+    auto item_window_button_pos  = create_item_checkbox(_L("Use window buttons on left side"), "", "window_buttons_on_left", _L("(Requires restart)"));
+    g_sizer->Add(item_window_button_pos);
+
+    //// APPEARANCE > 3D view (not part of a theme)
+    g_sizer->Add(create_item_title(_L("3D view")), 1, wxEXPAND);
+    auto item_opaque_overlays = create_item_checkbox(
+        _L("Opaque overlays"),
+        _L("Draw the floating panels of the 3D view (preview summary, tool position, G-code window, "
+           "tool panels) and the toolbars fully opaque instead of letting the model show through."),
+        "opaque_overlays"
+    );
+    g_sizer->Add(item_opaque_overlays);
+
+    auto item_color_vision = create_item_combobox(_L("Colour vision"),
+        _L("Palettes for the G-code preview's line types and value ranges, and for the bed mesh height map, "
+           "chosen to stay distinguishable with the common colour-vision deficiencies."),
+        "preview_color_vision", {_L("Normal"), _L("Protanopia"), _L("Deuteranopia"), _L("Tritanopia")},
+        std::vector<std::string>{"normal", "protanopia", "deuteranopia", "tritanopia"}, "",
+        [](const std::string&) {
+            if (Plater* plater = wxGetApp().plater()) {
+                if (GLCanvas3D* canvas = plater->get_preview_canvas3D()) {
+                    canvas->get_gcode_viewer().apply_color_vision_palette();
+                    canvas->set_as_dirty();
+                    canvas->request_extra_frame();
+                }
+            }
+        });
+    g_sizer->Add(item_color_vision);
+
+    //// APPEARANCE > Theme (named themes; the working copy is edited live)
+    g_sizer->Add(create_item_title(_L("Theme")), 1, wxEXPAND);
+    {
+        auto theme_names = []() {
+            std::vector<wxString> names;
+            for (const Theme& t : ThemeManager::get().themes())
+                names.push_back(t.builtin ? (t.dark ? _L("Dark") : _L("Light")) : t.bundled ? wxGetTranslation(wxString::FromUTF8(t.name)) : wxString::FromUTF8(t.name));
+            return names;
+        };
+        auto theme_index = []() {
+            const auto& themes = ThemeManager::get().themes();
+            for (size_t i = 0; i < themes.size(); ++i)
+                if (themes[i].name == ThemeManager::get().active_name())
+                    return (unsigned int) i;
+            return 0u;
+        };
+        auto [sizer, combo] = create_item_combobox_base(_L("Theme"),
+            _L("The theme in use. Light and Dark are built in; choosing a theme of the other base switches the colour scheme to it "
+               "(with System selected it applies when the desktop is in that mode). The colours below edit the theme live; "
+               "editing a built-in theme starts an unsaved copy."),
+            "", theme_names(), theme_index());
+        auto* status = new wxStaticText(m_parent, wxID_ANY, "");
+        status->SetForegroundColour(DESIGN_GRAY900_COLOR);
+        status->SetFont(::Label::Body_14);
+        sizer->Add(status, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+        // Refilling the list raises selection events of its own; those must not select a theme.
+        auto repopulating = std::make_shared<bool>(false);
+        auto repopulate = [combo = combo, status, theme_names, theme_index, repopulating]() {
+            *repopulating = true;
+            combo->Clear();
+            for (const wxString& n : theme_names())
+                combo->Append(n);
+            combo->SetSelection(theme_index());
+            *repopulating = false;
+            status->SetLabel(ThemeManager::get().modified() ? _L("(modified, unsaved)") : wxString());
+        };
+        combo->GetDropDown().Bind(wxEVT_COMBOBOX, [this, repopulating](wxCommandEvent& e) {
+            if (*repopulating)
+                return;
+            const auto& themes = ThemeManager::get().themes();
+            if (e.GetSelection() >= 0 && e.GetSelection() < int(themes.size()))
+                ThemeManager::get().select(themes[e.GetSelection()].name);
+            refresh_theme_items();
+        });
+        m_theme_refresh.push_back(repopulate);
+        repopulate();
+        g_sizer->Add(sizer);
+
+        // Save / Save as / Rename / Delete / Revert act on the theme file behind the working copy.
+        wxBoxSizer* row = create_item_label(_L("Theme file"),
+            _L("Save writes the changes to the theme's file (a copy of a built-in theme asks for a name). Revert discards unsaved changes."));
+        auto add_button = [this](wxBoxSizer* to, const wxString& label, std::function<void()> action) {
+            auto* button = new Button(m_parent, label);
+            button->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
+            button->Bind(wxEVT_BUTTON, [action](auto&) { action(); });
+            to->Add(button, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+            return button;
+        };
+        // Rename and Delete only apply to a saved user theme (not Light/Dark or a shipped preset).
+        auto only_user_theme = [this](Button* button) {
+            m_theme_refresh.push_back([button]() {
+                const Theme* saved = ThemeManager::get().find(ThemeManager::get().active_name());
+                button->Enable(saved != nullptr && !saved->read_only());
+            });
+        };
+        auto ask_name = [this](const wxString& title, const wxString& initial) -> std::string {
+            wxTextEntryDialog dlg(this, _L("Theme name"), title, initial);
+            if (dlg.ShowModal() != wxID_OK)
+                return {};
+            const std::string name = dlg.GetValue().Strip(wxString::both).ToUTF8().data();
+            if (name == "Light" || name == "Dark") {
+                MessageDialog(this, _L("Light and Dark are the built-in themes; choose another name."), _L("Theme"), wxOK | wxICON_WARNING).ShowModal();
+                return {};
+            }
+            return name;
+        };
+        auto save_as = [this, ask_name]() {
+            ThemeManager& tm = ThemeManager::get();
+            const Theme* saved = tm.find(tm.active_name());
+            const wxString initial = wxString::FromUTF8(saved && !saved->builtin ? saved->name : (tm.active().dark ? "My dark theme" : "My light theme"));
+            const std::string name = ask_name(_L("Save theme as"), initial);
+            if (name.empty())
+                return;
+            if (const Theme* existing = tm.find(name); existing && existing->name != tm.active_name()) {
+                MessageDialog dlg(this, wxString::Format(_L("Replace the theme \"%s\"?"), wxString::FromUTF8(name)), _L("Theme"), wxYES_NO | wxICON_QUESTION);
+                if (dlg.ShowModal() != wxID_YES)
+                    return;
+            }
+            tm.save_as(name);
+            refresh_theme_items();
+        };
+        add_button(row, _L("Save"), [this, save_as]() {
+            if (!ThemeManager::get().save())
+                save_as();
+            refresh_theme_items();
+        });
+        add_button(row, _L("Save as…"), save_as);
+        g_sizer->Add(row);
+        // Second row: the two that change which files exist.
+        wxBoxSizer* row2 = create_item_label(wxString(), _L("Rename or delete the saved theme the working copy derives from."));
+        only_user_theme(add_button(row2, _L("Rename…"), [this, ask_name]() {
+            ThemeManager& tm = ThemeManager::get();
+            const Theme* saved = tm.find(tm.active_name());
+            if (saved == nullptr || saved->builtin)
+                return;
+            const std::string name = ask_name(_L("Rename theme"), wxString::FromUTF8(saved->name));
+            if (!name.empty() && !tm.rename(name))
+                MessageDialog(this, _L("A theme with that name already exists."), _L("Theme"), wxOK | wxICON_WARNING).ShowModal();
+            refresh_theme_items();
+        }));
+        only_user_theme(add_button(row2, _L("Delete"), [this]() {
+            ThemeManager& tm = ThemeManager::get();
+            const Theme* saved = tm.find(tm.active_name());
+            if (saved == nullptr || saved->builtin)
+                return;
+            MessageDialog dlg(this, wxString::Format(_L("Delete the theme \"%s\"?"), wxString::FromUTF8(saved->name)), _L("Theme"), wxYES_NO | wxICON_QUESTION);
+            if (dlg.ShowModal() == wxID_YES)
+                tm.remove(saved->name);
+            refresh_theme_items();
+        }));
+        g_sizer->Add(row2);
+        wxBoxSizer* row3 = create_item_label(_L("Unsaved changes"), _L("Discard the unsaved changes and return to the saved theme."));
+        add_button(row3, _L("Revert"), [this]() { ThemeManager::get().revert(); refresh_theme_items(); });
+        g_sizer->Add(row3);
+        // Import / Export: theme files travel as plain JSON.
+        wxBoxSizer* row4 = create_item_label(_L("Theme exchange"),
+            _L("Export writes the theme in use to a .json file; Import adds a theme file as a user theme and selects it."));
+        add_button(row4, _L("Import…"), [this]() {
+            wxFileDialog dlg(this, _L("Import theme"), wxGetApp().app_config->get_last_dir(), "", _L("Theme files") + " (*.json)|*.json", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+            if (dlg.ShowModal() != wxID_OK)
+                return;
+            auto theme = Theme::from_file(dlg.GetPath().ToUTF8().data());
+            if (!theme) {
+                MessageDialog(this, _L("This file is not a theme."), _L("Theme"), wxOK | wxICON_WARNING).ShowModal();
+                return;
+            }
+            ThemeManager& tm = ThemeManager::get();
+            if (const Theme* existing = tm.find(theme->name); existing && !existing->read_only()) {
+                MessageDialog ask(this, wxString::Format(_L("Replace the theme \"%s\"?"), wxString::FromUTF8(theme->name)), _L("Theme"), wxYES_NO | wxICON_QUESTION);
+                if (ask.ShowModal() != wxID_YES)
+                    return;
+            }
+            tm.install(*theme);
+            refresh_theme_items();
+        });
+        add_button(row4, _L("Export…"), [this]() {
+            const Theme& t = ThemeManager::get().active();
+            wxFileDialog dlg(this, _L("Export theme"), wxGetApp().app_config->get_last_dir(), wxString::FromUTF8(Theme::slug(t.name) + ".json"),
+                             _L("Theme files") + " (*.json)|*.json", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+            if (dlg.ShowModal() != wxID_OK)
+                return;
+            if (!ThemeManager::get().export_to(dlg.GetPath().ToUTF8().data()))
+                MessageDialog(this, _L("The theme could not be written."), _L("Theme"), wxOK | wxICON_ERROR).ShowModal();
+        });
+        g_sizer->Add(row4);
+    }
+
+    g_sizer->Add(create_item_title(_L("Interface colours")), 1, wxEXPAND);
+    for (const auto& [key, name] : GUI_App::theme_color_roles()) {
+        const std::string light_key = key;
+        g_sizer->Add(create_item_colour(_(name), _L("Applies immediately to the theme in use. Reset returns this colour to the built-in value."),
+            [light_key]() { return StateColor::darkModeColorFor(wxColour(light_key)); },
+            [light_key](const wxColour& c) { wxGetApp().set_theme_color(light_key, c); },
+            [light_key]() { wxGetApp().set_theme_color(light_key, wxNullColour); }));
+    }
+    g_sizer->Add(create_item_button(_L("All colours"), _L("Reset to base"), _L("Return every colour of this theme to the value of the built-in theme it derives from."), "",
+        [this]() { wxGetApp().reset_theme_colors(); refresh_theme_items(); }));
+
+    g_sizer->Add(create_item_title(_L("3D view colours")), 1, wxEXPAND);
+    auto item_view_bg = create_item_colour(_L("3D view background"),
+        _L("Background colour of the 3D view for the theme in use. Reset returns the built-in colour."),
+        []() { return wxGetApp().get_view_color("view_bg"); },
+        [](const wxColour& c) { wxGetApp().set_view_color("view_bg", c); },
+        []() { wxGetApp().set_view_color("view_bg", wxNullColour); });
+    g_sizer->Add(item_view_bg);
+
+    auto item_plate_model = create_item_colour(_L("Build plate model"),
+        _L("Colour of the build plate itself (the printer's bed model, or the flat plate when it has none) for the theme in use. Reset returns the built-in colour."),
+        []() { return wxGetApp().get_view_color("plate_model"); },
+        [](const wxColour& c) { wxGetApp().set_view_color("plate_model", c); },
+        []() { wxGetApp().set_view_color("plate_model", wxNullColour); });
+    g_sizer->Add(item_plate_model);
+
+    auto item_plate_grid = create_item_colour(_L("Build plate grid"),
+        _L("Colour of the grid lines on the current build plate for the theme in use. Reset returns the built-in colour."),
+        []() { return wxGetApp().get_view_color("plate_grid"); },
+        [](const wxColour& c) { wxGetApp().set_view_color("plate_grid", c); },
+        []() { wxGetApp().set_view_color("plate_grid", wxNullColour); });
+    g_sizer->Add(item_plate_grid);
+
+    auto item_toolbar = create_item_colour(_L("3D view toolbars"),
+        _L("Background colour of the toolbars drawn inside the 3D view for the theme in use. Reset returns the built-in look."),
+        []() { return wxGetApp().get_view_color("toolbar"); },
+        [](const wxColour& c) { wxGetApp().set_view_color("toolbar", c); },
+        []() { wxGetApp().set_view_color("toolbar", wxNullColour); });
+    g_sizer->Add(item_toolbar);
+
+    g_sizer->Add(create_item_title(_L("Text")), 1, wxEXPAND);
+    auto item_label_clr_sys = create_item_colour(_L("Colour of system-value labels"),
+        _L("Settings that still hold the value of the system preset are labelled in this colour."),
+        []() { return wxGetApp().get_label_clr_sys(); },
+        [](const wxColour &c) { wxGetApp().set_label_clr_sys(c); },
+        []() { wxGetApp().reset_label_clrs(); });
+    g_sizer->Add(item_label_clr_sys);
+
+    auto item_label_clr_modified = create_item_colour(_L("Colour of modified-value labels"),
+        _L("Settings changed from the preset are labelled in this colour."),
+        []() { return wxGetApp().get_label_clr_modified(); },
+        [](const wxColour &c) { wxGetApp().set_label_clr_modified(c); },
+        []() { wxGetApp().reset_label_clrs(); });
+    g_sizer->Add(item_label_clr_modified);
+    {
+        // Part of the theme, not an app-config key.
+        const wxString tip = _L("Recolour text that would fall below 4.5:1 contrast on its background, for example after changing a background colour above. "
+                                "Text colours you set yourself are left alone.");
+        wxBoxSizer* row = create_item_label(_L("Auto-contrast text"), tip);
+        auto* checkbox = new ::CheckBox(m_parent);
+        checkbox->SetValue(ThemeManager::get().active().auto_contrast_text);
+        checkbox->SetToolTip(tip);
+        checkbox->Bind(wxEVT_TOGGLEBUTTON, [this, checkbox](wxCommandEvent& e) { ThemeManager::get().set_auto_contrast_text(checkbox->GetValue()); refresh_theme_items(); e.Skip(); });
+        m_theme_refresh.push_back([checkbox]() { checkbox->SetValue(ThemeManager::get().active().auto_contrast_text); });
+        row->Add(checkbox, 0, wxALIGN_CENTER);
+        g_sizer->Add(row);
+    }
+
+    g_sizer->Add(create_item_title(_L("Keyboard focus")), 1, wxEXPAND);
+    auto item_focus_ring = create_item_colour(_L("Keyboard focus outline"),
+        _L("Colour of the outline drawn around the control that has keyboard focus. It appears after Tab and hides on a mouse click."),
+        []() { const std::string& c = ThemeManager::get().active().focus_ring; return wxColour(c.empty() ? "#3B8BF5" : c.c_str()); },
+        [](const wxColour& c) { ThemeManager::get().set_focus_ring(c); },
+        []() { ThemeManager::get().set_focus_ring(wxNullColour); });
+    g_sizer->Add(item_focus_ring);
+
+    g_sizer->AddSpacer(FromDIP(10));
+    sizer_page->Add(g_sizer, 0, wxEXPAND);
+
+    /////////////////////////////////////
+    //////////////////////////
+
     //// CONTROL TAB
     /////////////////////////////////////
     m_pref_tabs->AppendItem(_L("Control"));
@@ -2135,13 +2498,8 @@ void PreferencesDialog::create_items()
     });
     g_sizer->Add(item_network_test);
 
-    //// ONLINE > Cloud Providers
-    if (show_cloud_ui) {
-        g_sizer->Add(create_item_title(_L("Cloud Providers")), 1, wxEXPAND);
-
-        auto item_bambu_cloud = create_item_bambu_cloud(_L("Enable Bambu Cloud"), _L("Allow logging into Bambu Cloud alongside Orca Cloud. When enabled, a Bambu login section appears on the homepage."));
-        g_sizer->Add(item_bambu_cloud);
-    }
+    // Unlayered: the "Enable Bambu Cloud" option was removed with the Bambu account surface.
+    // Bambu printers are used over LAN only; there is no Bambu cloud to opt into.
 
     //// ONLINE > Update & sync
     g_sizer->Add(create_item_title(_L("Update & sync")), 1, wxEXPAND);
@@ -2175,10 +2533,18 @@ void PreferencesDialog::create_items()
         {_L("Filament & Color"), _L("Color only")});
     g_sizer->Add(item_filament_sync_mode);
 
-    // Unlayered: the "Network plug-in" section used to live here - an "Enable network plug-in"
-    // checkbox plus a version picker that downloaded the Bambu plug-in from api.bambulab.com. Both
-    // are gone, so there is no way to turn the plug-in on. installed_networking stays false and
-    // on_init_network() therefore never loads the module.
+    //// ONLINE > Network plugin
+    // Unlayered: opt-in, off by default. Outside show_cloud_ui on purpose - LAN printing to a Bambu
+    // printer needs the plug-in but not the cloud, so it must stay reachable in stealth mode.
+    g_sizer->Add(create_item_title(_L("Bambu network plug-in")), 1, wxEXPAND);
+
+    auto item_enable_plugin  = create_item_checkbox(_L("Enable Bambu network plug-in"),
+                                                    _L("Downloads Bambu Lab's closed-source network plug-in from Bambu Lab's servers. Required to send prints to Bambu Lab printers over LAN or Bambu Cloud."),
+                                                    "installed_networking");
+    g_sizer->Add(item_enable_plugin);
+
+    auto item_plugin_version = create_item_network_plugin_version(_L("Network plug-in version"), _L("Select the network plug-in version to use"));
+    g_sizer->Add(item_plugin_version);
 
     g_sizer->AddSpacer(FromDIP(10));
     sizer_page->Add(g_sizer, 0, wxEXPAND);

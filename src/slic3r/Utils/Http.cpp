@@ -466,6 +466,12 @@ void Http::priv::http_perform()
 		::curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postfields.c_str());
 		::curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, postfields.size());
 	}
+	else if (method == "POST" && form == nullptr && mime == nullptr && !putFile) {
+		// A POST with no body at all. Left unset, curl would pull the body from the read
+		// callback, which is only wired up for file uploads and crashes without one.
+		::curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "");
+		::curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+	}
 
 	CURLcode res = ::curl_easy_perform(curl);
 

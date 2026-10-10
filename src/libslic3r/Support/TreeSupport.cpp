@@ -689,6 +689,8 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
     const bool support_critical_regions_only = config.support_critical_regions_only.value;
     bool config_remove_small_overhangs = config.support_remove_small_overhang.value;
     bool config_detect_sharp_tails = g_config_support_sharp_tails;
+    // BELT_MOD -- the true floor (no clearance): see the lower_polys note in the loop below.
+    const SegmentSupportBounds floor_bounds = m_object->support_floor_is_tilted() ? SegmentSupportBounds(*m_object, 0.) : SegmentSupportBounds();
     const int enforce_support_layers = config.enforce_support_layers.value;
     const double area_thresh_well_supported = SQ(scale_(6));
     const double length_thresh_well_supported = scale_(6);
@@ -811,6 +813,41 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
     std::chrono::time_point<clock_> t0{ clock_::now() };
     // main part of overhang detection can be parallel
     tbb::concurrent_vector<ExPolygons> overhangs_all_layers(m_object->layer_count());
+    // Declarative cut planes: the FRESH BAND of inherited demand at each layer (demand[i] minus
+    // demand[i+1]), mapped to the layer it must be seeded at. Inherited load is support-on-support
+    // and must end flush under the ceiling: an overhang found at layer L gets its virtual gap node
+    // one layer down (generate_contact_points) and the branch's real top top_z_distance below
+    // that, so a band at layer s is seeded at the layer whose branch top lands at or just below
+    // print_z(s). Mapped source -> target so no band is skipped when layer heights vary; the
+    // segment-bounds clip in draw_circles() trims whatever a tilted ceiling cuts off.
+    // Bands under the child's BODY are ordinary overhangs and stay at their own layer, so the
+    // branch top keeps the normal top Z distance to the model.
+    std::vector<Polygons> demand_bands_at;
+    if (m_object->has_segment_demand()) {
+        const size_t n = m_object->layer_count();
+        demand_bands_at.resize(n);
+        const double overlap = m_object_config->support_section_overlap.value;
+        for (const bool flush : { true, false }) {
+            const std::vector<Polygons> &demand = flush ? m_object->segment_support_demand() : m_object->segment_body_demand();
+            for (size_t src = 0; src < demand.size() && src < n; ++ src) {
+                if (demand[src].empty())
+                    continue;
+                Polygons band = (src + 1 < demand.size()) ? diff(demand[src], demand[src + 1]) : demand[src];
+                if (band.empty())
+                    continue;
+                if (! flush) {
+                    append(demand_bands_at[src], band);
+                    continue;
+                }
+                const double top = m_object->get_layer(int(src))->print_z + top_z_distance + overlap;
+                size_t m = src;
+                while (m + 1 < n && m_object->get_layer(int(m + 1))->print_z <= top + EPSILON)
+                    ++ m;
+                append(demand_bands_at[std::min(m + 1, n - 1)], band);
+            }
+        }
+    }
+
     tbb::parallel_for(tbb::blocked_range<size_t>(0, m_object->layer_count()),
         [&](const tbb::blocked_range<size_t>& range) {
             for (size_t layer_nr = range.begin(); layer_nr < range.end(); layer_nr++) {
@@ -839,7 +876,12 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 //lower_layer_offset = std::min(lower_layer_offset, extrusion_width);
                 coordf_t support_offset_scaled = scale_(lower_layer_offset);
                 ExPolygons& curr_polys = layer->lslices_extrudable;
-                ExPolygons& lower_polys = lower_layer->lslices_extrudable;
+                // BELT_MOD -- material resting on a tilted floor (the belt, a cut face) is supported
+                // by it, not by the layer below: the floor's band through this slab counts as "below"
+                // for the overhang diff and the sharp-tail test alike.
+                ExPolygons lower_polys = lower_layer->lslices_extrudable;
+                if (floor_bounds.is_active())
+                    lower_polys = union_ex(lower_polys, floor_bounds.floor_band(layer->print_z - layer->height, layer->print_z));
 
                 // normal overhang
                 ExPolygons lower_layer_offseted = offset_ex(lower_polys, support_offset_scaled, SUPPORT_SURFACES_OFFSET_PARAMETERS);
@@ -1095,6 +1137,27 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             m_object->remove_bridges_from_contacts(lower_layer, layer, extrusion_width_scaled, &layer->loverhangs, max_bridge_length, break_bridge);
         }
 
+        // Orca: on layers where wave overhangs generated coverage, clear detected
+        // overhangs + cantilevers so tree support doesn't seed trunks there.
+        // Enforcers are appended AFTER this point and therefore unaffected.
+        // Gate: any printing region with wave_overhangs && support_remaining_areas_after_wave_overhangs.
+        // UNLAYERED_MOD: runs BEFORE the cut-plane segment demand below, so a child segment's
+        // support demand is never wiped by the wave clear.
+        if (!layer->wave_overhang_covered_polygons.empty()) {
+            bool wave_support_gate = false;
+            for (size_t ri = 0; ri < m_object->num_printing_regions(); ++ri) {
+                const PrintRegionConfig &rc = m_object->printing_region(ri).config();
+                if (rc.wave_overhangs.value && rc.support_remaining_areas_after_wave_overhangs.value) {
+                    wave_support_gate = true;
+                    break;
+                }
+            }
+            if (wave_support_gate) {
+                layer->loverhangs.clear();
+                layer->cantilevers.clear();
+            }
+        }
+
         // Declarative cut planes: seed the demand handed up by this segment's children. The demand
         // is a downward COLUMN (a footprint projected toward the floor through this segment's empty
         // space), so inject only the FRESH BAND newly appearing at this layer -- demand[i] minus
@@ -1102,16 +1165,11 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
         // around this segment's body and holes, instead of a flat stamp of the child's root pad.
         // Placed before nDetected so it counts as detected overhang and can make an otherwise
         // support-free segment grow support at all.
-        if (! m_object->segment_support_demand().empty()) {
-            const std::vector<Polygons> &demand = m_object->segment_support_demand();
-            if (size_t(layer_nr) < demand.size() && ! demand[layer_nr].empty()) {
-                Polygons band = (size_t(layer_nr) + 1 < demand.size())
-                              ? diff(demand[layer_nr], demand[size_t(layer_nr) + 1])
-                              : demand[layer_nr];
-                if (! band.empty())
-                    append(layer->loverhangs, union_ex(band));
-            }
-        }
+        // Declarative cut planes: seed the inherited demand bands mapped to this layer (see
+        // demand_bands_at above). Placed before nDetected so it counts as detected overhang and
+        // can make an otherwise support-free segment grow support at all.
+        if (size_t(layer_nr) < demand_bands_at.size() && ! demand_bands_at[layer_nr].empty())
+            append(layer->loverhangs, union_ex(demand_bands_at[layer_nr]));
 
 		int nDetected = layer->loverhangs.size();
         // enforcers now follow same logic as normal support. See STUDIO-3692
@@ -1124,6 +1182,23 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             }
         }
         int nEnforced = layer->loverhangs.size();
+
+        // Orca: also subtract wave-overhang coverage from sharp-tail overhangs
+        // before they get appended — sharp tails are the kind of thin cantilever
+        // that wave overhangs cover, so without this the sharp-tail code path
+        // would still re-add wave-covered area into loverhangs.
+        if (!sharp_tail_overhangs.empty() && !layer->wave_overhang_covered_polygons.empty()) {
+            bool wave_support_gate = false;
+            for (size_t ri = 0; ri < m_object->num_printing_regions(); ++ri) {
+                const PrintRegionConfig &rc = m_object->printing_region(ri).config();
+                if (rc.wave_overhangs.value && rc.support_remaining_areas_after_wave_overhangs.value) {
+                    wave_support_gate = true;
+                    break;
+                }
+            }
+            if (wave_support_gate)
+                sharp_tail_overhangs = diff_ex(sharp_tail_overhangs, layer->wave_overhang_covered_polygons);
+        }
 
         // add sharp tail overhangs
         append(layer->loverhangs, sharp_tail_overhangs);
@@ -2008,7 +2083,8 @@ void TreeSupport::extend_below_segment_floor()
     // draw_circles/generate_toolpaths addresses layers as `index + m_raft_layers` and reads
     // per-index side tables (layer_heights, contact_nodes), so inserting layers before either pass
     // shifts those indices and reads out of bounds -- which is exactly what it did.
-    if (! m_object->is_segment() || m_object->is_root_segment())
+    // BELT_MOD: also for an object on a belt, whose floor (the belt) is tilted in the slice frame.
+    if (! m_object->support_floor_is_tilted())
         return;
     const SegmentSupportBounds bounds(*m_object, m_slicing_params.first_print_layer_height);
     if (! bounds.is_active())
@@ -2026,13 +2102,22 @@ void TreeSupport::extend_below_segment_floor()
     // The tree's lowest foot, plus load that has no layer of its own to project: a floating
     // segment's suspended first layer arrives as demand on object layer 0, which the node graph
     // cannot turn into contacts.
+    // BELT_MOD: the classic tree records its feet in base_areas; the organic generator hands its
+    // layers through generate_support_toolpaths(), which fills support_islands instead. Take the
+    // lowest layer that has material in either, so an object on a belt (no cascade demand to fall
+    // back on) gets its organic feet carried down too.
     SupportLayer *src = nullptr;
     for (SupportLayer *layer : m_object->support_layers())
-        if (layer != nullptr && ! layer->base_areas.empty() && (src == nullptr || layer->print_z < src->print_z))
+        if (layer != nullptr && (! layer->base_areas.empty() || ! layer->support_islands.empty())
+            && (src == nullptr || layer->print_z < src->print_z))
             src = layer;
-    ExPolygons source = (src != nullptr) ? src->base_areas : ExPolygons();
-    if (! m_object->segment_support_demand().empty() && ! m_object->segment_support_demand().front().empty())
-        append(source, union_ex(m_object->segment_support_demand().front()));
+    ExPolygons source;
+    if (src != nullptr) {
+        source = src->base_areas;
+        append(source, src->support_islands);
+    }
+    if (const Polygons seed = m_object->segment_demand_first_layer(); ! seed.empty())
+        append(source, union_ex(seed));
     if (source.empty())
         return;
     source = union_ex(source);
@@ -2085,8 +2170,8 @@ void TreeSupport::draw_circles()
     const SegmentSupportBounds segment_bounds(*m_object, m_slicing_params.first_print_layer_height);
     // For a non-root segment the first slice layer is its cut face mid-stack, not the build plate,
     // so a first-layer tree brim / base expansion there is a flange floating inside the model.
-    // Matches the normal-support first-layer expansion rule in SupportCommon.
-    const bool non_root_segment = m_object->is_segment() && ! m_object->is_root_segment();
+    // Matches the normal-support first-layer expansion rule in SupportCommon. BELT_MOD: belt too.
+    const bool non_root_segment = m_object->support_floor_is_tilted();
 
     const PrintObjectConfig &config = m_object->config();
     const Print* print = m_object->print();
@@ -2474,7 +2559,8 @@ void TreeSupport::draw_circles()
                 // these four vectors, so reassigning any of them afterwards dangles every pointer
                 // and crashes in generate_toolpaths.
                 if (segment_bounds.is_active()) {
-                    const Polygons valid = segment_bounds.valid_region_polygon(ts_layer->print_z);
+                    const Polygons valid = segment_bounds.valid_region_polygon(ts_layer->print_z,
+                        m_object->segment_support_column_at(ts_layer->print_z), m_object_config->support_section_overlap.value);
                     ts_layer->base_areas     = intersection_ex(ts_layer->base_areas,     valid);
                     ts_layer->roof_areas     = intersection_ex(ts_layer->roof_areas,     valid);
                     ts_layer->roof_1st_layer = intersection_ex(ts_layer->roof_1st_layer, valid);

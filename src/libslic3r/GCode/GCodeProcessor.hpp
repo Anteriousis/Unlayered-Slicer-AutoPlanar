@@ -280,6 +280,21 @@ class Print;
         // suppressed and the physical nozzle stays vertical, so the preview's hotend marker must
         // not tilt even though tool_axes carries the layers' (tilted) build directions.
         bool virtual_5axis{ false };
+        // BELT_MOD: the file was written for a belt printer, so every MoveVertex::position is a
+        // machine-frame coordinate (sheared, scaled and axis-swapped by BeltKinematics::to_machine).
+        // belt_to_bed maps such a stored position back to the bed frame the model, the bed shape
+        // and printable_height live in; identity for every other printer. It composes the plate
+        // offset the processor adds to stored positions, the Z origin the start G-code's G92 leaves
+        // behind, and the exact inverse of the writer's kinematics -- there is no anchoring guess.
+        bool        belt_printer{ false };
+        bool        belt_infinite_y{ false };
+        Transform3d belt_to_bed{ Transform3d::Identity() };
+        // BELT_MOD / UNLAYERED_MOD: the physical nozzle does not follow the per-move tool axis when
+        // the machine has no rotary axes to follow it with -- virtual 5-axis output on a flat bed
+        // (nozzle vertical) or a plain belt printer (nozzle along the tilted gantry). The preview's
+        // hotend marker then uses fixed_tool_axis instead of the tool_axes palette.
+        bool        tool_axis_fixed{ false };
+        Vec3f       fixed_tool_axis{ Vec3f::UnitZ() };
         // Positions of ends of lines of the final G-code this->filename after TimeProcessor::post_process() finalizes the G-code.
         std::vector<size_t> lines_ends;
         Pointfs printable_area;
@@ -365,6 +380,11 @@ class Print;
             long_retraction_when_cut = other.long_retraction_when_cut;
             timelapse_warning_code = other.timelapse_warning_code;
             printable_height = other.printable_height;
+            belt_printer = other.belt_printer;
+            belt_infinite_y = other.belt_infinite_y;
+            belt_to_bed = other.belt_to_bed;
+            tool_axis_fixed = other.tool_axis_fixed;
+            fixed_tool_axis = other.fixed_tool_axis;
             settings_ids = other.settings_ids;
             filaments_count = other.filaments_count;
             extruder_colors = other.extruder_colors;
@@ -1168,6 +1188,18 @@ class Print;
         //BBS: x, y offset for gcode generated
         double          m_x_offset{ 0 };
         double          m_y_offset{ 0 };
+        // BELT_MOD: see GCodeProcessorResult::belt_to_bed. m_belt_to_logical is the inverse of the
+        // writer's kinematics alone (plate-local machine -> plate-local bed frame); m_belt_z_origin
+        // is the machine-Z origin the start G-code's G92 resets leave in m_origin[Z].
+        bool        m_belt_printer{ false };
+        bool        m_belt_infinite_y{ false };
+        bool        m_belt_rotary{ false };                    // a belt with real rotary axes
+        Vec3f       m_belt_gantry_axis{ Vec3f::UnitZ() };      // the gantry normal in the bed frame
+        Transform3d m_belt_to_logical{ Transform3d::Identity() };
+        float       m_belt_z_origin{ 0.f };
+        void        apply_belt_config(const PrintConfig &config);
+        // Stored MoveVertex::position -> bed-frame display position (identity when not a belt).
+        Transform3d belt_to_bed_transform() const;
 
         unsigned int m_line_id;
         unsigned int m_last_line_id;

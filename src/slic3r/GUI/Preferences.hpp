@@ -1,6 +1,7 @@
 #ifndef slic3r_Preferences_hpp_
 #define slic3r_Preferences_hpp_
 
+#include "Widgets/Label.hpp"
 #include "GUI.hpp"
 #include "GUI_Utils.hpp"
 
@@ -13,6 +14,7 @@
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/CheckBox.hpp"
 #include "Widgets/TextInput.hpp"
+#include "Theme.hpp"
 #include "Widgets/SpinInput.hpp"
 #include "Widgets/TabCtrl.hpp"
 #include "slic3r/Utils/bambu_networking.hpp"
@@ -22,11 +24,13 @@ namespace Slic3r { namespace GUI {
 #define DESIGN_GRAY900_COLOR wxColour("#363636") // Label color
 #define DESIGN_GRAY600_COLOR wxColour("#ACACAC") // Dimmed text color
 
-#define DESIGN_WINDOW_SIZE wxSize(FromDIP(640), FromDIP(640))
-#define DESIGN_TITLE_SIZE wxSize(FromDIP(280), -1)
-#define DESIGN_COMBOBOX_SIZE wxSize(FromDIP(120), -1)
+// Design sizes follow the user's font scale as well as the DPI.
+#define DESIGN_FONT_SCALED(px) FromDIP(int((px) * Label::getFontScale()))
+#define DESIGN_WINDOW_SIZE wxSize(DESIGN_FONT_SCALED(640), DESIGN_FONT_SCALED(640))
+#define DESIGN_TITLE_SIZE wxSize(DESIGN_FONT_SCALED(280), -1)
+#define DESIGN_COMBOBOX_SIZE wxSize(DESIGN_FONT_SCALED(120), -1)
 #define DESIGN_LARGE_COMBOBOX_SIZE wxSize(FromDIP(120), -1)
-#define DESIGN_INPUT_SIZE wxSize(FromDIP(120), -1)
+#define DESIGN_INPUT_SIZE wxSize(DESIGN_FONT_SCALED(120), -1)
 #define DESIGN_LEFT_MARGIN 25
 
 class PreferencesDialog : public DPIDialog
@@ -42,11 +46,12 @@ protected:
     // bool								m_settings_layout_changed {false};
     bool m_seq_top_layer_only_changed{false};
     bool m_recreate_GUI{false};
+    Theme m_theme_at_open; // the theme in effect when the dialog opened (values and base)
     std::string m_pending_language;
 
 public:
     bool seq_top_layer_only_changed() const { return m_seq_top_layer_only_changed; }
-    bool recreate_GUI() const { return m_recreate_GUI; }
+    bool recreate_GUI() const; // also true when the theme changed while the dialog was open
     const std::string& pending_language() const { return m_pending_language; }
     void on_dpi_changed(const wxRect &suggested_rect) override;
 
@@ -56,7 +61,7 @@ public:
                       const wxString &title = wxT(""),
                       const wxPoint & pos   = wxDefaultPosition,
                       const wxSize &  size  = wxDefaultSize,
-                      long            style = wxSYSTEM_MENU | wxCAPTION | wxCLOSE_BOX);
+                      long            style = wxSYSTEM_MENU | wxCAPTION | wxCLOSE_BOX | wxRESIZE_BORDER | wxMAXIMIZE_BOX);
 
     ~PreferencesDialog();
 
@@ -68,7 +73,6 @@ public:
     // debug mode
     ::CheckBox * m_developer_mode_ckeckbox   = {nullptr};
     ::CheckBox * m_internal_developer_mode_ckeckbox = {nullptr};
-    ::CheckBox * m_dark_mode_ckeckbox        = {nullptr};
     ::CheckBox * m_sync_user_preset_checkbox = {nullptr};
     ::CheckBox * m_bambu_cloud_checkbox      = {nullptr};
     ::TextInput *m_backup_interval_textinput = {nullptr};
@@ -86,12 +90,15 @@ public:
     wxBoxSizer *create_item_title(wxString title);
     wxBoxSizer *create_item_label(wxString label, const wxString tooltip = "", const wxString wiki_url = "");
     wxBoxSizer *create_item_combobox(wxString title, wxString tooltip, std::string param, std::vector<wxString> vlist, std::function<void(wxString)> onchange = {}, const wxString wiki_url = "");
-    wxBoxSizer *create_item_combobox(wxString title, wxString tooltip, std::string param, std::vector<wxString> vlist, std::vector<std::string> config_name_index, const wxString wiki_url = "");
+    wxBoxSizer *create_item_combobox(wxString title, wxString tooltip, std::string param, std::vector<wxString> vlist, std::vector<std::string> config_name_index, const wxString wiki_url = "", std::function<void(const std::string&)> onchange = {});
     wxBoxSizer *create_item_region_combobox(wxString title, wxString tooltip);
     wxBoxSizer *create_item_language_combobox(wxString title, wxString tooltip);
     wxBoxSizer *create_item_loglevel_combobox(wxString title, wxString tooltip, std::vector<wxString> vlist);
     wxBoxSizer *create_item_checkbox(wxString title, wxString tooltip, std::string param, const wxString secondary_title = "", const wxString wiki_url = "");
-    wxBoxSizer *create_item_darkmode(wxString title,wxString tooltip, std::string param);
+    wxBoxSizer *create_item_colour(wxString title, wxString tooltip, std::function<wxColour()> get, std::function<void(const wxColour&)> set, std::function<void()> reset);
+    // Re-reads every theme-driven control after the theme in effect changed.
+    std::vector<std::function<void()>> m_theme_refresh;
+    void refresh_theme_items() { for (auto& f : m_theme_refresh) f(); }
     void set_dark_mode();
     wxBoxSizer *create_item_button(wxString title, wxString title2, wxString tooltip, wxString tooltip2, std::function<void()> onclick, const wxString wiki_url = "");
     wxBoxSizer *create_item_downloads(wxString title, wxString tooltip);

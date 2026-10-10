@@ -52,7 +52,14 @@ enum class CutSegmentationStatus
 // volume -- support must stay below it, but must never stem from it (that would rest support on
 // the cut face of a segment printed later). Derived from the arrangement sign vector, not
 // re-inferred from plane geometry downstream.
-enum class CutClipRole { Floor, Ceiling };
+//
+// UNLAYERED_MOD -- a Bed clip is the build plate itself (world z >= 0), added only to a non-root
+// segment whose material reaches the plate. Such a segment slices along its own tilted build
+// normal, so nothing else stops its angled layers at z = 0: they ran on through the plate (and,
+// on a sunk import, printed the material under it). Load-bearing like a Floor, but it comes from no
+// authored plane (plane_index -1), and the slicer clips against it with a margin of
+// h/2 * |cos(tilt)| so no bead dips into the plate (PrintObject::slice_volumes).
+enum class CutClipRole { Floor, Ceiling, Bed };
 
 // One half-space bound of a segment, in the object's LOCAL frame:
 // a point p belongs to the segment iff  normal.dot(p) - offset <= 0  for every clip.
@@ -91,22 +98,29 @@ struct CutSegmentDescriptor
     // Exact extent of this segment's materialized clipped piece, projected on the build axis in the
     // instance frame. Drives the slice-frame rebase (the segment slices over its own range instead
     // of the whole object's) and the thin-segment check. Both are 0 for an unpopulated descriptor.
+    // For a segment carrying a Bed clip, the extent of the part ABOVE the plate, so its layer
+    // schedule starts where printable material starts instead of growing empty leading layers.
     double build_z_min { 0. };
     double build_z_max { 0. };
+    // How far up the build axis SUPPORT may have to reach: the highest point, along this
+    // segment's build axis, of any cut face the segment sits BELOW (its ceilings). A later
+    // segment resting on such a face can overhang this segment's empty space above this segment's
+    // own material, and the column carrying it has to be printed in THIS segment's layers -- so
+    // the segment slices up to here, with empty object layers, instead of stopping at
+    // build_z_max. Never below build_z_max; equal to it when there is no ceiling.
+    double support_z_max { 0. };
 
-    // UNLAYERED_MOD -- the value subtracted from the build-axis extent to place this segment's
-    // slice-frame origin, i.e. slice_z = build_axis_extent - slice_z_base(). Clamped at 0 for the
-    // ROOT segment: it is the only one resting on the build plate and it slices along +Z exactly,
-    // so its build_z_min is a real bed height, and rebasing a SUNK root onto its own bottom would
-    // lift material from under the plate into positive slice z where it gets sliced and printed.
-    // Clamping preserves the sinking instead, exactly as an ordinary object does, so the layer
-    // generator simply never slices what is under the plate.
+    // UNLAYERED_MOD -- how far this segment reaches HORIZONTALLY in the instance frame, as the
+    // diagonal of its horizontal bounding box. The build-axis extent above is a 1-D projection and
+    // says nothing about lateral size, but a virtual-5-axis tilt limit needs exactly that: a tilted
+    // layer climbs reach*tan(tilt) from one end to the other, and that climb has to fit under the
+    // gantry (virtual_tilt_limit_deg() in PrintConfig.hpp).
     //
-    // ONE definition on purpose. update_slice_frame() builds the frame from this and
-    // SegmentSupportBounds locates the build plate from it; when the clamp lived only in the
-    // former, the latter still assumed -build_z_min and put the plate 1.132 mm too high on a sunk
-    // root, floating every support branch off the bed.
-    double slice_z_base() const { return (is_root() && build_z_min < 0.) ? 0. : build_z_min; }
+    // The diagonal rather than the extent along the tilt azimuth, deliberately. No two points of
+    // the segment are further apart than it, so it bounds the run whichever way the tilt points --
+    // which means it does not have to be recomputed when the user spins a plane about Z, and the
+    // limit does not move under them mid-drag. 0 for an unpopulated descriptor = "reach unknown".
+    double build_reach_max { 0. };
 
     // Perpendicular distance from `base_plane` up to the nearest material of this segment. Zero
     // when the segment rests on its base plane (the usual case: the plane produced a cut face).
@@ -126,14 +140,49 @@ struct CutSegmentDescriptor
     ObjectID part_volume;
 
     bool is_root() const { return parent < 0 && ! part_volume.valid(); }
+
+    // BELT_MOD -- whether the root builds along world +Z (a flat bed). On a belt it builds along the
+    // tilted gantry normal, measured from the instance origin, so its build_z_min is NOT a height
+    // above the belt: about half of any object projects negative without being sunk at all.
+    // Meaningful for the root only; true by default so a hand-built descriptor keeps the flat-bed rule.
+    bool root_builds_up { true };
+
+    // UNLAYERED_MOD -- the value subtracted from the build-axis extent to place this segment's
+    // slice-frame origin, i.e. slice_z = build_axis_extent - slice_z_base(). Clamped at 0 for the
+    // ROOT segment on a flat bed: it is the only one resting on the build plate and it slices along
+    // +Z exactly, so its build_z_min is a real bed height, and rebasing a SUNK root onto its own bottom would
+    // lift material from under the plate into positive slice z where it gets sliced and printed
+    // (measured 2496 extruding moves down to -1.132 mm on a real project, and six empty leading
+    // layers once the bed clip removed them again). Clamping preserves the sinking instead,
+    // exactly as an ordinary object does, so the layer generator simply never slices what is
+    // under the plate. Non-root segments keep the unconditional rebase: their extent is projected
+    // on their own tilted build normal, and the rebase is what stops them growing leading empty
+    // layers. So does a belt root (root_builds_up false): clamping there dropped every layer whose
+    // gantry-normal projection was negative -- the leading wedge of the part next to the belt, up to
+    // the instance origin. Material genuinely under the belt is removed by the belt clip instead
+    // (bed_clip in slice_volumes), as for an ordinary belt object.
+    //
+    // ONE definition on purpose. update_slice_frame() builds the frame from this and
+    // SegmentSupportBounds locates the build plate from it; when the clamp lived only in the
+    // former, the latter still assumed -build_z_min and put the plate 1.132 mm too high on a sunk
+    // root, floating every support branch off the bed.
+    double slice_z_base() const { return (is_root() && root_builds_up && build_z_min < 0.) ? 0. : build_z_min; }
     bool is_part() const { return part_volume.valid(); }
+    bool has_bed_clip() const {
+        for (const CutSegmentClip &clip : clips)
+            if (clip.role == CutClipRole::Bed)
+                return true;
+        return false;
+    }
 
     bool operator==(const CutSegmentDescriptor &rhs) const {
         return index == rhs.index && parent == rhs.parent && base_plane == rhs.base_plane
             && clips == rhs.clips && build_normal == rhs.build_normal
             && build_z_min == rhs.build_z_min && build_z_max == rhs.build_z_max
+            && build_reach_max == rhs.build_reach_max
+            && support_z_max == rhs.support_z_max
             && base_plane_distance_below_material == rhs.base_plane_distance_below_material
-            && part_volume == rhs.part_volume;
+            && part_volume == rhs.part_volume && root_builds_up == rhs.root_builds_up;
     }
     bool operator!=(const CutSegmentDescriptor &rhs) const { return !(*this == rhs); }
 };
@@ -143,11 +192,14 @@ struct CutSegmentDescriptor
 // occupied cells), or the plane count exceeds the supported maximum (64). The first instance's
 // rotation defines "down" for root selection; disconnected components within one cell stay one
 // segment (same behavior as a destructive cut).
+// BELT_MOD -- root_build_normal_world is the direction the ROOT builds along, world frame: +Z on a
+// flat bed, the tilted gantry normal on a belt printer. Non-root segments keep their own normals.
 std::vector<CutSegmentDescriptor> derive_cut_segments(
     const ModelObject &mo, const Transform3d &instance_transform = Transform3d::Identity(),
     double min_segment_thickness = 0.0,
     CutSegmentationStatus *status = nullptr,
-    std::vector<indexed_triangle_set> *out_meshes = nullptr);
+    std::vector<indexed_triangle_set> *out_meshes = nullptr,
+    const Vec3d &root_build_normal_world = Vec3d::UnitZ());
 
 // The merged MODEL_PART mesh of `mo` in the object-local frame (each volume under its own matrix).
 // The partition is always derived from exactly this mesh; exposed so a caller that already needs it
@@ -190,7 +242,8 @@ std::vector<CutSegmentDescriptor> derive_cut_segments(
     bool user_ordered = false,
     CutSegmentationStatus *status = nullptr,
     std::vector<indexed_triangle_set> *out_meshes = nullptr,
-    const std::string &object_name = std::string());
+    const std::string &object_name = std::string(),
+    const Vec3d &root_build_normal_world = Vec3d::UnitZ());
 
 // Intersect `src` with the half-plane  ab.x()*x + ab.y()*y <= c  (x/y/c in unscaled mm, `src` and
 // `bbox` in scaled coordinates). `bbox` bounds the region of interest; the half-plane is realized

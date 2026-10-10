@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 #include <string>
 #define calib_pressure_advance_dd
 
@@ -363,7 +364,10 @@ private:
 
     const Calib_Params &m_params;
 
-    GCodeWriter        m_writer;
+    // BELT_MOD -- held through a shared_ptr because GCodeWriter owns its MachineKinematics
+    // (a unique_ptr) and is no longer copyable, while this class is copied with the Model
+    // (Model.cpp). The writer is rebuilt by _refresh_writer() before every use anyway.
+    std::shared_ptr<GCodeWriter> m_writer{std::make_shared<GCodeWriter>()};
     Vec3d              m_starting_point;
     bool               m_is_start_point_fixed = false;
 

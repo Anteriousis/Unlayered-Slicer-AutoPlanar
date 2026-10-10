@@ -29,6 +29,21 @@ const char* network_abi_name(NetworkAbi abi)
     return "unsupported";
 }
 
+#if defined(_MSC_VER) || defined(_WIN32)
+// Sized to the path. The fixed wchar_t[128]/[256] buffers this replaces failed the conversion on a
+// long data dir and handed LoadLibrary an empty string: BambuSource (158 chars from a scratch
+// --datadir) then never loaded, which marks the whole plug-in incompatible.
+HMODULE load_library_utf8(const std::string& path)
+{
+    const int n = ::MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (n <= 1)
+        return nullptr;
+    std::wstring wpath(size_t(n), L'\0');
+    ::MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), n);
+    return ::LoadLibraryW(wpath.c_str());
+}
+#endif
+
 } // namespace
 
 // ============================================================================
@@ -128,10 +143,7 @@ int BBLNetworkPlugin::initialize(bool using_backup, const std::string& version)
                            : resolve_library_path(version);
 
 #if defined(_MSC_VER) || defined(_WIN32)
-    wchar_t lib_wstr[256];
-    memset(lib_wstr, 0, sizeof(lib_wstr));
-    ::MultiByteToWideChar(CP_UTF8, NULL, library.c_str(), strlen(library.c_str())+1, lib_wstr, sizeof(lib_wstr) / sizeof(lib_wstr[0]));
-    m_networking_module = LoadLibrary(lib_wstr);
+    m_networking_module = load_library_utf8(library);
     if (!m_networking_module) {
         std::string library_path = get_libpath_in_current_directory(std::string(BAMBU_NETWORK_LIBRARY));
         if (library_path.empty()) {
@@ -142,9 +154,7 @@ int BBLNetworkPlugin::initialize(bool using_backup, const std::string& version)
             );
             return -1;
         }
-        memset(lib_wstr, 0, sizeof(lib_wstr));
-        ::MultiByteToWideChar(CP_UTF8, NULL, library_path.c_str(), strlen(library_path.c_str())+1, lib_wstr, sizeof(lib_wstr) / sizeof(lib_wstr[0]));
-        m_networking_module = LoadLibrary(lib_wstr);
+        m_networking_module = load_library_utf8(library_path);
     }
 #else
     m_networking_module = dlopen(library.c_str(), RTLD_LAZY);
@@ -314,20 +324,14 @@ void* BBLNetworkPlugin::get_source_module()
     auto plugin_folder = data_dir_path / "plugins";
 
 #if defined(_MSC_VER) || defined(_WIN32)
-    wchar_t lib_wstr[128];
-
     library = plugin_folder.string() + "/" + std::string(BAMBU_SOURCE_LIBRARY) + ".dll";
-    memset(lib_wstr, 0, sizeof(lib_wstr));
-    ::MultiByteToWideChar(CP_UTF8, NULL, library.c_str(), strlen(library.c_str())+1, lib_wstr, sizeof(lib_wstr) / sizeof(lib_wstr[0]));
-    m_source_module = LoadLibrary(lib_wstr);
+    m_source_module = load_library_utf8(library);
     if (!m_source_module) {
         std::string library_path = get_libpath_in_current_directory(std::string(BAMBU_SOURCE_LIBRARY));
         if (library_path.empty()) {
             return m_source_module;
         }
-        memset(lib_wstr, 0, sizeof(lib_wstr));
-        ::MultiByteToWideChar(CP_UTF8, NULL, library_path.c_str(), strlen(library_path.c_str()) + 1, lib_wstr, sizeof(lib_wstr) / sizeof(lib_wstr[0]));
-        m_source_module = LoadLibrary(lib_wstr);
+        m_source_module = load_library_utf8(library_path);
     }
 #else
 #if defined(__WXMAC__)
@@ -374,10 +378,13 @@ std::string BBLNetworkPlugin::get_libpath_in_current_directory(const std::string
     std::string file_name_string(size_needed, 0);
     ::WideCharToMultiByte(0, 0, file_name, wcslen(file_name), file_name_string.data(), size_needed, nullptr, nullptr);
 
-    std::size_t found = file_name_string.find("unlayered-slicer.exe");
-    if (found == (file_name_string.size() - 16)) {
+    // The length comes from the name itself: a hardcoded count went stale with the rename, so the
+    // match never fired and a plug-in placed beside the exe was silently ignored.
+    static const std::string exe_name = "unlayered-slicer.exe";
+    std::size_t found = file_name_string.rfind(exe_name);
+    if (found != std::string::npos && found == file_name_string.size() - exe_name.size()) {
         lib_path = library_name + ".dll";
-        lib_path = file_name_string.replace(found, 16, lib_path);
+        lib_path = file_name_string.replace(found, exe_name.size(), lib_path);
     }
 #else
     (void)library_name;

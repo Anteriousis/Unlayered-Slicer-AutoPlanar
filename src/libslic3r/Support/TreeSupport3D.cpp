@@ -3495,18 +3495,27 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
         // `overhangs` is SUPPORT-layer indexed with a raft offset.
         {
             PrintObject &demand_object = *print.get_object(processing.second.front());
-            if (! demand_object.segment_support_demand().empty()) {
-                const std::vector<Polygons> &demand   = demand_object.segment_support_demand();
-                const size_t                 num_raft = config.raft_layers.size();
-                for (size_t i = 0; i < demand.size() && i < demand_object.layer_count(); ++ i) {
-                    if (demand[i].empty())
-                        continue;
-                    Polygons band = (i + 1 < demand.size()) ? diff(demand[i], demand[i + 1]) : demand[i];
-                    if (band.empty())
-                        continue;
-                    const size_t idx = i + num_raft;
-                    if (idx < overhangs.size())
-                        append(overhangs[idx], band);
+            if (demand_object.has_segment_demand() && ! overhangs.empty()) {
+                const size_t num_raft = config.raft_layers.size();
+                // Inherited load under the child's SUPPORT is support-on-support and must end
+                // flush under the ceiling (or support_section_overlap past it). The organic tree
+                // leaves z_distance_top_layers empty below an overhang plus the overhang's own
+                // layer, so seed such a band that many layers ABOVE its own layer: the branch
+                // then tops out at the band's height, and the segment-bounds clip on the
+                // assembled layers trims whatever a tilted ceiling cuts off. A band under the
+                // child's BODY is an ordinary overhang and stays at its own layer.
+                const size_t overlap_layers = size_t(std::lround(demand_object.config().support_section_overlap.value / std::max(0.01, demand_object.config().layer_height.value)));
+                const size_t lift = config.z_distance_top_layers + 1 + overlap_layers;
+                for (const bool flush : { true, false }) {
+                    const std::vector<Polygons> &demand = flush ? demand_object.segment_support_demand() : demand_object.segment_body_demand();
+                    for (size_t i = 0; i < demand.size() && i < demand_object.layer_count(); ++ i) {
+                        if (demand[i].empty())
+                            continue;
+                        Polygons band = (i + 1 < demand.size()) ? diff(demand[i], demand[i + 1]) : demand[i];
+                        if (band.empty())
+                            continue;
+                        append(overhangs[std::min(i + (flush ? lift : 0) + num_raft, overhangs.size() - 1)], band);
+                    }
                 }
             }
         }
@@ -3634,9 +3643,10 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
         {
             const SegmentSupportBounds segment_bounds(print_object, print_object.slicing_parameters().first_print_layer_height);
             if (segment_bounds.is_active())
-                tbb::parallel_for_each(layers_sorted.begin(), layers_sorted.end(), [&segment_bounds](SupportGeneratorLayer *layer) {
+                tbb::parallel_for_each(layers_sorted.begin(), layers_sorted.end(), [&segment_bounds, &print_object](SupportGeneratorLayer *layer) {
                     if (layer != nullptr && ! layer->polygons.empty())
-                        layer->polygons = intersection(layer->polygons, segment_bounds.valid_region_polygon(layer->print_z));
+                        layer->polygons = intersection(layer->polygons, segment_bounds.valid_region_polygon(layer->print_z,
+                            print_object.segment_support_column_at(layer->print_z), print_object.config().support_section_overlap.value));
                 });
         }
 

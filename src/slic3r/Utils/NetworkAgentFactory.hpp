@@ -5,7 +5,6 @@
 #include "IPrinterAgent.hpp"
 #include "NetworkAgent.hpp"
 #include "OrcaCloudServiceAgent.hpp"
-#include "BBLCloudServiceAgent.hpp"
 #include "BBLNetworkPlugin.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include <memory>
@@ -143,19 +142,9 @@ public:
     {
         if (provider == ORCA_CLOUD_PROVIDER) {
             return std::make_shared<OrcaCloudServiceAgent>(log_dir);
-        } else if (provider == BBL_CLOUD_PROVIDER) {
-            auto& plugin = BBLNetworkPlugin::instance();
-            if (!plugin.is_loaded()) {
-                return nullptr;
-            }
-            if (!plugin.has_agent()) {
-                plugin.create_agent(log_dir);
-            }
-            if (!plugin.has_agent()) {
-                return nullptr;
-            }
-            return std::make_shared<BBLCloudServiceAgent>();
         }
+        // Unlayered: the Bambu (BBL) cloud agent has been removed. Bambu LAN printing uses the
+        // BBL *printer* agent only, which never needed a cloud agent.
         return nullptr;
     }
 

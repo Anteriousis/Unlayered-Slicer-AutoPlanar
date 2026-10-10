@@ -39,9 +39,14 @@ class Dump:
     def __init__(self, path):
         with open(path) as fh:
             self.d = json.load(fh)
-        self.nodes = np.asarray(self.d["nodes"], dtype=float).reshape(-1, 3)
+        self.all_nodes = np.asarray(self.d["nodes"], dtype=float).reshape(-1, 3)
         self.edges = [tuple(e) for e in self.d["edges"]]
         self.normals = np.asarray(self.d.get("cut_normals") or [], dtype=float).reshape(-1, 3)
+        # A planted foot hangs straight down from the centreline to the bed: it is a root, not
+        # part of the centreline, so the shape checks below measure the centreline without it.
+        self.foot = int(self.d.get("foot_node", -1))
+        keep = [i for i in range(len(self.all_nodes)) if i != self.foot]
+        self.nodes = self.all_nodes[keep] if len(keep) else self.all_nodes
 
     def __getitem__(self, k):
         return self.d[k]
@@ -64,24 +69,25 @@ class Dump:
         rel = self.nodes - np.asarray(origin, dtype=float)
         return float(np.max(np.linalg.norm(rel - np.outer(rel @ a, a), axis=1)))
 
-    def span(self, i):
-        if not len(self.nodes):
-            return (0.0, 0.0)
-        return (float(np.min(self.nodes[:, i])), float(np.max(self.nodes[:, i])))
-
     def graph_length(self):
-        return float(sum(np.linalg.norm(self.nodes[a] - self.nodes[b]) for a, b in self.edges))
+        return float(sum(np.linalg.norm(self.all_nodes[a] - self.all_nodes[b]) for a, b in self.edges))
 
     def degree(self):
-        deg = np.zeros(len(self.nodes), dtype=int)
+        deg = np.zeros(len(self.all_nodes), dtype=int)
         for a, b in self.edges:
             deg[a] += 1
             deg[b] += 1
         return deg
 
+    def span(self, i):
+        nodes = self.all_nodes
+        if not len(nodes):
+            return (0.0, 0.0)
+        return (float(np.min(nodes[:, i])), float(np.max(nodes[:, i])))
+
     def root_z(self):
         r = self.d.get("roots") or []
-        return min(float(self.nodes[i][2]) for i in r) if r else float("inf")
+        return min(float(self.all_nodes[i][2]) for i in r) if r else float("inf")
 
     def max_dist_to_polyline(self, poly):
         """Max distance from any skeleton node to a reference polyline (mm)."""
@@ -203,15 +209,99 @@ def has_nodes(n=4):
     return (f"produced a skeleton (>= {n} nodes)", f)
 
 
+def middle_root(xy, tol=3.0):
+    """One root, a planted foot on the bed, under the expected middle of the part."""
+    def f(d):
+        if d.foot < 0:
+            return False, f"no foot planted ({d.get('root_mode', '?')})"
+        roots = d.get("roots") or []
+        p = d.all_nodes[d.foot]
+        off = float(np.linalg.norm(p[:2] - np.asarray(xy, dtype=float)))
+        ok = roots == [d.foot] and off <= tol and p[2] <= d["bed_z"] + TOL_BED
+        return ok, f"foot at ({p[0]:.1f},{p[1]:.1f},{p[2]:.2f}), {off:.2f}mm off; roots {roots}"
+    return (f"single middle root near {xy} (<= {tol}mm)", f)
+
+
+def tips_root():
+    def f(d):
+        mode = d.get("root_mode", "?")
+        return d.foot < 0 and mode.startswith("tips"), f"foot {d.foot}, mode '{mode}'"
+    return ("rooted at the tips (a leg), no foot", f)
+
+
+def no_foot_cut():
+    def f(d):
+        bad = [e for e in d.get("cut_edges") or [] if d.foot in e]
+        return not bad, f"{len(bad)} cut(s) on the foot edge"
+    return ("the foot edge is not cut", f)
+
+
+def first_cuts_held(max_tilt=60.0):
+    """Beside a middle root the first cuts lean toward flat -- at most 90 - root_lean (45) from it at
+    the seat's edge, opening along the ramp -- rather than standing square to a level pipe (90).
+    The first cut lands up to one edge past the seat, where the cap has opened a little: 53 deg on
+    pipe_bend_flat at 5 mm resampling."""
+    def f(d):
+        cuts = [tuple(e) for e in d.get("cut_edges") or []]
+        tilt = d.get("cut_tilt_deg") or []
+        into = {c for (p, c) in cuts}
+        first = [tilt[k] for k, (p, c) in enumerate(cuts) if p not in into]
+        worst = max(first) if first else float("nan")
+        return bool(first) and worst <= max_tilt, f"{len(first)} first cut(s), steepest {worst:.1f} deg"
+    return (f"first cuts beside the middle tilt <= {max_tilt} deg", f)
+
+
+def first_plane_flat(tol=1.0):
+    """A leg root's first cut is the bed plane, exactly as before the ramp existed."""
+    def f(d):
+        cuts = [tuple(e) for e in d.get("cut_edges") or []]
+        tilt = d.get("cut_tilt_deg") or []
+        roots = set(d.get("roots") or [])
+        first = [tilt[k] for k, (p, c) in enumerate(cuts) if p in roots]
+        worst = max(first) if first else float("nan")
+        return bool(first) and worst <= tol, f"root cut tilt {worst:.2f} deg"
+    return (f"a leg's first plane is flat (<= {tol} deg)", f)
+
+
+def tilt_ramp_smooth(max_step=25.0):
+    """Consecutive cuts along each root-to-tip chain turn by small steps: no flat plane followed
+    by one snapped to the pipe (0 -> 71 deg was measured on Intake_manifold before the ramp)."""
+    def f(d):
+        cuts = [tuple(e) for e in d.get("cut_edges") or []]
+        tilt = d.get("cut_tilt_deg") or []
+        if len(tilt) != len(cuts):
+            return False, "no cut_tilt_deg in the dump"
+        into = {c: k for k, (p, c) in enumerate(cuts)}
+        worst, where = 0.0, None
+        for k, (p, c) in enumerate(cuts):
+            j = into.get(p)
+            if j is not None:
+                step = abs(tilt[k] - tilt[j])
+                if step > worst:
+                    worst, where = step, (j, k)
+        return worst <= max_step, f"worst step {worst:.1f} deg (cuts {where}), {len(cuts)} cuts"
+    return (f"cut tilt changes <= {max_step} deg per step", f)
+
+
 EXPECT = {
     "pipe_vertical":       [bore_traced(), cycles(0), on_axis(), spans_z(0.6, 59.4),
-                            reaches_bed(), root_on_bed(), cuts_square_to((0, 0, 1))],
+                            reaches_bed(), root_on_bed(), cuts_square_to((0, 0, 1)), tips_root()],
     "pipe_thin_wall":      [bore_traced(), cycles(0), on_axis(), spans_z(0.6, 59.4), reaches_bed()],
-    # axis lies along X at z = OD/2 = 10 after the part is laid on the bed
+    # axis lies along X at z = OD/2 = 10 after the part is laid on the bed. No tip is snapped (it
+    # has no leg); since 2026-10-04 one foot is planted under the middle instead.
     "pipe_horizontal":     [bore_traced(), cycles(0), on_axis((1, 0, 0), (0, 0, 10), 1.0),
-                            spans_x(0.6, 59.4), no_bed_snap()],
+                            spans_x(0.6, 59.4), no_bed_snap(), middle_root((30.0, 0.0)), no_foot_cut(),
+                            first_cuts_held(), tilt_ramp_smooth()],
     "pipe_elbow":          [bore_traced(), cycles(0), near_polyline(elbow_reference(), 2.5),
-                            reaches_bed(), root_on_bed()],
+                            reaches_bed(), root_on_bed(), tips_root(), first_plane_flat(), tilt_ramp_smooth()],
+    # standing on its bend: both ends rise, so the root is the bottom of the U. NOT asserted:
+    # cycles == 0 -- a 5-node wall loop on the left of the bend (x -11..-19, up to 10.8 mm off the
+    # axis) survives the bore splice, in tips mode too. Nor the partition: the legs' horizontal
+    # planes are infinite and cut both legs (5 chunks from ~40 planes either way).
+    "pipe_u":              [bore_traced(), middle_root((0.0, 0.0)), no_foot_cut(), first_cuts_held(),
+                            tilt_ramp_smooth()],
+    "pipe_bend_flat":      [bore_traced(), cycles(0), middle_root((40.0, 0.0)), no_foot_cut(),
+                            first_cuts_held(), tilt_ramp_smooth()],
     "pipe_flange_blind":   [bore_traced(), cycles(0), on_axis(), spans_z(0.6, 59.0),
                             reaches_bed(), root_on_bed()],
     "pipe_flange_through": [bore_traced(), cycles(0), on_axis(), spans_z(0.6, 59.0),
@@ -237,7 +327,7 @@ EXPECT = {
 
 # Meshes that are also checked on a rotated instance. Cheap ones that cover the shapes whose
 # bed behaviour differs: an upright bore, a bend, and a plain solid.
-ROTATED = ("pipe_vertical", "pipe_elbow", "cylinder_solid", "pipe_horizontal")
+ROTATED = ("pipe_vertical", "pipe_elbow", "cylinder_solid", "pipe_horizontal", "pipe_u")
 
 
 def join_params(a, b):
@@ -253,7 +343,7 @@ def rotated_root_on_bed(d, deg_x):
     import math
     a = math.radians(deg_x)
     ca, sa = math.cos(a), math.sin(a)
-    w = [(x, y * ca - z * sa, y * sa + z * ca) for (x, y, z) in d.nodes]
+    w = [(x, y * ca - z * sa, y * sa + z * ca) for (x, y, z) in d.all_nodes]
     roots = d.d.get("roots") or []
     if not w or not roots:
         return ("rotated root on the world bed", False, "no nodes or no root")

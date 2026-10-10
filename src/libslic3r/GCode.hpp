@@ -10,6 +10,7 @@
 #include "PrintConfig.hpp"
 #include "GCode/AvoidCrossingPerimeters.hpp"
 #include "GCode/CoolingBuffer.hpp"
+#include "Support/SegmentSupportBounds.hpp"
 #include "GCode/FanMover.hpp"
 #include "GCode/RetractWhenCrossingPerimeters.hpp"
 #include "GCode/SpiralVase.hpp"
@@ -236,7 +237,14 @@ public:
     // printing is enabled for this machine and virtual (3-axis) 5-axis output was not requested.
     // Note this must NOT be `enable_nonplanar && virtual_5axis`: with the feature off there are no
     // rotary axes at all, so B/C words would be invalid G-code on an ordinary 3-axis printer.
+    // BELT_MOD: a belt printer has no rotary axes; its tilt is a fixed machine property.
     bool            emit_rotary_axes() const { return m_config.enable_nonplanar.value && ! m_config.virtual_5axis.value; }
+    // BELT_MOD -- rotation that takes the bed frame to the gantry frame (identity on a flat bed):
+    // B/C words describe the tool axis relative to the machine's nominal build direction.
+    Matrix3d        m_world_to_gantry = Matrix3d::Identity();
+    // BELT_MOD -- the orientation the machine rests in between groups and at the end: the tool
+    // axis along the machine's build direction, which on a belt is the gantry normal, not world +Z.
+    Transform3d     home_trafo() const { Transform3d t = Transform3d::Identity(); t.linear() = m_world_to_gantry.transpose(); return t; }
     Vec2d           point_to_gcode(const Point &point) const;
     Vec3d                    point_to_gcode(const Point3& point) const;
     Point           gcode_to_point(const Vec2d &point) const;
@@ -293,6 +301,8 @@ public:
         const Layer* 		object_layer;
         const SupportLayer* support_layer;
         const PrintObject*  original_object; //BBS: used for shared object logic
+        // BELT_MOD -- a belt brim apron band at this print_z (BeltBrim.hpp); may be the only entry.
+        const BeltBrimBand* belt_brim_band { nullptr };
         const Layer* 		layer()   const
         {
             if (object_layer != nullptr)
@@ -321,6 +331,8 @@ public:
                 sum_z += support_layer->print_z;
                 count++;
             }
+            if (count == 0 && belt_brim_band != nullptr)   // BELT_MOD
+                return belt_brim_band->print_z;
 
             return sum_z / count;
         }
@@ -378,6 +390,15 @@ private:
         size_t instance_id,
         bool first_layer);
 
+    // BELT_MOD -- a brim-only apron layer below the object's first layer, and the emission of the
+    // apron bands carried by a set of layers (BeltBrim.hpp).
+    LayerResult process_belt_brim_layer(const Print &print, const std::vector<LayerToPrint> &layers,
+                                        const LayerTools &layer_tools, bool last_layer, size_t single_object_instance_idx);
+    std::string emit_belt_brim_bands(const Print &print, const std::vector<LayerToPrint> &layers,
+                                     size_t single_object_instance_idx, int only_extruder_id = -1);
+    std::string generate_belt_brim_on_layer(const Print &print, const PrintObject &object, size_t instance_id, const Layer *object_layer);
+    std::string generate_belt_brim_fills(const Print &print, const PrintObject &object, size_t instance_id,
+                                         const ExtrusionEntityCollection &fills, coordf_t print_z);
     LayerResult process_layer(
         const Print                     &print,
         // Set of object & print layers of the same PrintObject and with the same print_z.
@@ -425,6 +446,11 @@ private:
     bool            last_pos_defined() const { return m_last_pos_defined; }
 
     void            set_last_trafo(const Transform3d& trafo) { m_last_trafo = trafo; }
+    // BELT_MOD -- the object's belt brim filament (1-based), restricted to the filaments the writer
+    // was handed. An object whose every extrusion is flushable (flush_into_objects) contributes no
+    // filament to the tool ordering, so its own outer-wall filament may be unknown to the writer;
+    // the brim then takes the current filament instead of crashing in the tool change.
+    unsigned int    belt_brim_filament(const PrintObject &object) const;
 
     void            set_extruders(const std::vector<unsigned int> &extruder_ids);
     std::string     preamble();
@@ -586,9 +612,21 @@ private:
     };
 
     // Cache the per-filament island tour to avoid recomputing while the layer's island layout is
-    // unchanged. Key: filament_id. Value: {nodes the tour was computed from, resulting visits}.
-    std::map<unsigned int, std::pair<std::vector<IslandOrderNode>, std::vector<InstanceVisit>>>
-                                        m_ordering_cache;
+    // unchanged. Key: filament_id. Value: the nodes the tour was computed from, the per-instance
+    // island layout (count and whether the trailing catch-all island has anything to print), and
+    // the resulting visits.
+    // UNLAYERED_MOD: the layout is part of the key. Nodes only cover the chainable islands, so two
+    // layers with the same centroids but a different number of islands (thin walls, negative
+    // volumes come and go) matched the cache and the visit's catch-all index -- islands.size() - 1
+    // of the OLD layer -- ran past the new layer's islands (found by fuzzing: segfault in
+    // extrude_perimeters on multi-part objects).
+    struct IslandOrderCacheEntry
+    {
+        std::vector<IslandOrderNode>         nodes;
+        std::vector<std::pair<size_t, bool>> layout;
+        std::vector<InstanceVisit>           visits;
+    };
+    std::map<unsigned int, IslandOrderCacheEntry> m_ordering_cache;
 
     ExtrusionQualityEstimator m_extrusion_quality_estimator;
 
@@ -678,6 +716,52 @@ private:
     // ORCA: Add support for role based fan speed control
     std::array<bool, ExtrusionRole::erCount> m_is_role_based_fan_on;
     std::array<int, ExtrusionRole::erCount>  m_role_based_fan_marker_layer;
+
+    // BELT_MOD -- contact-aware first layer. "First layer" is decided per path by what the material
+    // rests on and how far above it the path lies, not by the slice layer index: on a belt every
+    // layer has a strip lying on the belt, and a non-root cut-plane segment's layer 0 rests on
+    // plastic. Active only for rotated frames and non-root segments, so planar output is unchanged.
+    struct PathContact {
+        enum Class { None, Bed, Object };
+        Class cls   = None;
+        int   index = 0;   // height above the contact surface in bands (the "layer index" for ramps)
+    };
+    struct ContactFrame {
+        const PrintObject *object  = nullptr;
+        Transform3d        trafo   = Transform3d::Identity();
+        bool               active  = false;
+        Vec3d              bed_n   = Vec3d::UnitZ();  // world z = bed_n . (gx, gy, z) + bed_k in _extrude's frame
+        double             bed_k   = 0.;
+        double             band    = 0.;              // first-layer boolean band (initial layer height)
+        double             thickness = 0.;            // ramp band thickness
+        double             offset  = 0.;              // first_layer_plane_offset
+        int                max_index = 1;             // indices above this are all the same to every consumer
+        bool               has_floor = false;         // non-root segment: object contact above its floor
+        SegmentSupportBounds floor;                   // slice-frame floor planes of that segment
+        double             object_band = 0.;          // object_contact_layers * thickness
+    };
+    ContactFrame                        m_contact_frame;
+    PathContact                         m_path_contact;
+    // Marker state for the CoolingBuffer (same scheme as the role-based fan markers).
+    PathContact::Class                  m_contact_marker_cls   = PathContact::None;
+    int                                 m_contact_marker_index = -1;
+    int                                 m_contact_marker_layer = -1;
+    void        update_contact_frame(const PrintObject *object, const Transform3d &trafo);
+    // Classifies `path` in the current contact frame. Returns true when the path crosses a band
+    // boundary and has been split into `parts` (each uniformly classified); otherwise sets
+    // m_path_contact for the whole path and returns false.
+    bool        classify_path_contact(const ExtrusionPath &path, std::vector<std::pair<ExtrusionPath, PathContact>> &parts);
+    bool                                m_path_contact_locked = false;   // emitting the pieces of a split path
+    // Contact-aware replacements for on_first_layer() / layer_id() inside _extrude.
+    bool        path_on_first_layer() const;
+    int         path_first_layer_index() const;
+    // Speed / flow on printed material, 0 = use the first-layer values.
+    double      path_object_contact_speed() const;
+    double      path_object_contact_flow_ratio() const;
+    std::string contact_fan_markers();
+    // Belt: initial-layer temperatures are held for belt_initial_temperature_length mm of belt travel.
+    bool        on_initial_temperature_layer(double print_z) const;
+    bool        on_initial_temperature_layer() const { return m_layer != nullptr ? this->on_initial_temperature_layer(m_layer->print_z) : this->on_first_layer(); }
     // Markers for the Pressure Equalizer to recognize the extrusion type.
     // The Pressure Equalizer removes the markers from the final G-code.
     bool                                m_enable_extrusion_role_markers;
@@ -702,6 +786,14 @@ private:
     float                               m_last_height{ 0.0f };
     float                               m_last_layer_z{ 0.0f };
     float                               m_max_layer_z{ 0.0f };
+    // UNLAYERED_MOD 2026-10-09: what G-code templates see as {max_layer_z}, and the height a by-object
+    // travel clears. m_max_layer_z is the highest print_z, but for a tilted or later multiplanar chunk
+    // print_z is a distance along that chunk's build normal, not a height above the bed: a virtual
+    // 5-axis Benchy on a Bambu H2S got max_layer_z 37.4 while the part ended at ~67.5, and the stock
+    // end G-code "G1 Z{max_layer_z + 0.5} ; lower z a little" drove the nozzle 30 mm down into it.
+    // The highest Z material was actually laid at (bed frame, z_offset removed) is the true top.
+    // Identical to m_max_layer_z for an ordinary planar print.
+    float                               max_layer_z_for_templates() const;
     float                               m_last_width{ 0.0f };
     // Bedslinger mass model: cumulative printed mass at the previous layer, used to derive
     // the current layer mass for the per-layer Y acceleration limit (curr_y_acceleration_limit).
@@ -720,6 +812,14 @@ private:
     bool                                m_last_pos_defined;
 
     Transform3d m_last_trafo;
+    // BELT_MOD -- belt brim: the apron band's Z while its paths are emitted (no Layer of its own),
+    // and the count of apron layers emitted (their layer index in the result).
+    std::optional<coordf_t> m_belt_brim_z;
+    size_t                  m_belt_brim_layer_idx { 0 };
+
+    // Orca: accumulated wave-extrusion time on the current layer (seconds).
+    // Used by wave_overhang_min_layer_time; reset at each layer change.
+    double                              m_wave_layer_accumulated_time = 0.;
 
     std::unique_ptr<CoolingBuffer>      m_cooling_buffer;
     std::unique_ptr<SpiralVase>         m_spiral_vase;

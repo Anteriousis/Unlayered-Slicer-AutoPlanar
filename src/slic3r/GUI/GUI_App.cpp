@@ -32,6 +32,11 @@
 #include <iterator>
 #include <exception>
 #include <cstdlib>
+#include <iostream>
+#include <functional>
+#include <set>
+#include <typeinfo>
+#include <boost/core/demangle.hpp>
 #include <regex>
 #include <thread>
 #include <string_view>
@@ -84,11 +89,17 @@
 
 #include "GUI.hpp"
 #include "GUI_Utils.hpp"
+#include "FocusRing.hpp"
+#include "Theme.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "3DScene.hpp"
 #include "MainFrame.hpp"
 #include "WebAppPanel.hpp"
 #include "Plater.hpp"
 #include "GLCanvas3D.hpp"
+#include "3DBed.hpp"
+#include "GLToolbar.hpp"
+#include "PartPlate.hpp"
 #include "EncodedFilament.hpp"
 
 #include "DeviceCore/DevManager.h"
@@ -127,13 +138,17 @@
 #include "BitmapCache.hpp"
 #include "Notebook.hpp"
 #include "Widgets/Label.hpp"
+#include "Widgets/SideButton.hpp"
+#include "Widgets/Button.hpp"
+#include "Widgets/TextInput.hpp"
+#include "Widgets/StaticBox.hpp"
 #include "Widgets/ProgressDialog.hpp"
 
 //BBS: DailyTip and UserGuide Dialog
 #include "WebDownPluginDlg.hpp"
 #include "WebGuideDialog.hpp"
 #include "ReleaseNote.hpp"
-#include "PrivacyUpdateDialog.hpp"
+#include "AutoUpdater.hpp"
 #include "ModelMall.hpp"
 #include "HintNotification.hpp"
 
@@ -337,7 +352,7 @@ public:
         // NOTE: both logo assets BAKE m_bg_color in. The mark is an interlaced "un" whose
         // crossings are carved by two knockout strokes painted in the background colour --
         // nanosvg supports no <mask>, so a real transparent knockout is not available. The
-        // light asset paints them #FFFFFF and the dark one #2D2D31, which is what
+        // light asset paints them #FFFFFF and the dark one #232327, which is what
         // darkModeColorFor("#FFFFFF") resolves to. If m_bg_color above ever changes, the
         // knockouts in resources/images/splash_logo{,_dark}.svg have to change with it or
         // they reappear as visible slashes across the mark. (load_svg is called WITHOUT its
@@ -791,6 +806,40 @@ std::vector<std::string> GUI_App::split_str(std::string src, std::string separat
     return result;
 }
 
+#ifdef _WIN32
+// Unlayered: the installer's optional "Bambu Lab printers" page records a ticked box as the DWORD
+// InstallBambuNetworkPlugin=1 under Software\<CPACK_PACKAGE_VENDOR>\<CPACK_PACKAGE_INSTALL_REGISTRY_KEY>
+// (see cmake/modules/NSIS.template.in) - HKCU for the default per-user installer, HKLM for the
+// system setup. The installer never fetches Bambu's binary itself; this hands the request to the
+// same download Preferences > Online uses. Returns true at most once per installer opt-in.
+static bool take_installer_network_plugin_request(AppConfig* app_config)
+{
+    static const wchar_t* key   = L"Software\\Unlayered 3D\\Unlayered Slicer";
+    static const wchar_t* value = L"InstallBambuNetworkPlugin";
+    DWORD data = 0;
+    DWORD size = sizeof(data);
+
+    // Per-user install: consume the request, so it is acted on once.
+    if (::RegGetValueW(HKEY_CURRENT_USER, key, value, RRF_RT_REG_DWORD, nullptr, &data, &size) == ERROR_SUCCESS) {
+        ::RegDeleteKeyValueW(HKEY_CURRENT_USER, key, value);
+        return data == 1;
+    }
+
+    // Per-machine install: HKLM cannot be cleared without elevation, so remember it per user. The
+    // NSIS installer is 32-bit and does not SetRegView 64, so its write lands in the 32-bit view.
+    if (app_config->get_bool("installer_network_plugin_offered"))
+        return false;
+    for (DWORD view : { DWORD(RRF_SUBKEY_WOW6432KEY), DWORD(RRF_SUBKEY_WOW6464KEY) }) {
+        size = sizeof(data);
+        if (::RegGetValueW(HKEY_LOCAL_MACHINE, key, value, RRF_RT_REG_DWORD | view, nullptr, &data, &size) == ERROR_SUCCESS && data == 1) {
+            app_config->set_bool("installer_network_plugin_offered", true);
+            return true;
+        }
+    }
+    return false;
+}
+#endif // _WIN32
+
 void GUI_App::post_init()
 {
     assert(initialized());
@@ -960,9 +1009,10 @@ void GUI_App::post_init()
     hms_query = new HMSQuery();
 
     m_show_gcode_window = app_config->get_bool("show_gcode_window");
-    // Unlayered: a prompt offering to install the Bambu network plug-in used to appear here on
-    // startup. installed_networking is false and no longer settable, so m_networking_need_update can
-    // never become true - but the prompt is removed rather than left unreachable.
+    // Only fires once the user has opted in (installed_networking) and the plug-in then failed to load.
+    if (m_networking_need_update) {
+        show_network_plugin_download_dialog(false);
+    }
 
     // Start preset sync after project opened, otherwise we could have preset change during project opening which could cause crash 
     if (app_config->get("sync_user_preset") == "true") {
@@ -986,6 +1036,17 @@ void GUI_App::post_init()
         CallAfter([this] {
             bool cw_showed = this->config_wizard_startup();
 
+#ifdef _WIN32
+            // After the setup wizard, so the two never compete for the screen on a first launch.
+            // take_installer_network_plugin_request() runs first so the registry value is always
+            // consumed, even when the wizard's own plug-in box already started the download.
+            if (take_installer_network_plugin_request(app_config) && !app_config->get_bool("installed_networking")
+                && !m_netplugin_download_offered) {
+                BOOST_LOG_TRIVIAL(info) << "post_init: installer opted in to the Bambu network plug-in, starting its download";
+                ShowDownNetPluginDlg();
+            }
+#endif
+
             // Unlayered: the preset_updater->sync() call that used to be here fetched vendor
             // profiles from OrcaSlicer and the network plug-in plus printer configs from Bambu.
             // Both are gone; profiles ship with the application.
@@ -994,6 +1055,11 @@ void GUI_App::post_init()
             // features; the application update check is the one outbound request it keeps, because
             // an installation that cannot learn about its own security fixes is worse than one that
             // asks a static file for a version number. Do not move this into the guard.
+            //
+            // The account updater first, so the check's result finds the stored sign-in loaded.
+            m_auto_updater = std::make_unique<AutoUpdater>(*this);
+            m_auto_updater->on_startup();
+            m_auto_updater->show_whats_new(cw_showed);
             this->check_new_version_sf();
             const auto cloud_provider = get_printer_cloud_provider();
             if (is_user_login(cloud_provider) && !app_config->get_stealth_mode()) {
@@ -1230,14 +1296,6 @@ static std::string decode(std::string const& extra, std::string const& path = {}
 
 int GUI_App::download_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
 {
-    // Unlayered: the Bambu network plugin is not part of this product and must never be fetched.
-    // Refusing by package name here makes that structural rather than a property of every call
-    // site staying correct. UpgradeNetworkJob treats result < 0 as a clean "Download failed".
-    if (name == "plugins") {
-        BOOST_LOG_TRIVIAL(info) << "[download_plugin] refused: the network plugin is not used in this build";
-        return -1;
-    }
-
     int result = 0;
     json j;
     std::string err_msg;
@@ -1412,13 +1470,6 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
 
 int GUI_App::install_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
 {
-    // Unlayered: see download_plugin(). This is also the function that would set
-    // installed_networking=true further down, which re-enables the cloud/HMS paths.
-    if (name == "plugins") {
-        BOOST_LOG_TRIVIAL(info) << "[install_plugin] refused: the network plugin is not used in this build";
-        return -1;
-    }
-
     bool cancel = false;
     std::string target_file_path = (fs::temp_directory_path() / package_name).string();
 
@@ -2750,6 +2801,13 @@ int GUI_App::OnExit()
         BOOST_LOG_TRIVIAL(error) << "Failed to clean up encrypt bbl network log file";
     }
 
+    // Last, so nothing above can still be holding a file the installer replaces. The installer
+    // itself also waits for this process to be gone before it starts.
+    if (m_auto_updater) {
+        m_auto_updater->on_app_exit();
+        m_auto_updater.reset();
+    }
+
     return wxApp::OnExit();
 }
 
@@ -2910,7 +2968,13 @@ bool GUI_App::on_init_inner()
     wxLog::SetLogLevel(wxLOG_Message);
 #endif
 
+    // Preference "ui_font_scale" (percent): applied to every wx font and to the ImGui font.
+    const float ui_font_scale = std::clamp(std::atoi(app_config->get("ui_font_scale").c_str()), 50, 300) / 100.f;
+    ::Label::setFontScale(ui_font_scale);
+    ImGuiWrapper::set_font_scale(ui_font_scale);
+    ::Label::setFontFamily(app_config->get("ui_font_family")); // "" = the default face
     ::Label::initSysFont();
+    m_imgui->set_opaque_overlays(app_config->get_bool("opaque_overlays"));
 
     // Register wxInspector plugins for Orca custom controls
     RegisterOrcaInspectorPlugins();
@@ -2985,6 +3049,7 @@ bool GUI_App::on_init_inner()
     BOOST_LOG_TRIVIAL(info) << get_system_info();
 
 // initialize label colors and fonts
+    ThemeManager::get().load(); // themes, migration of the old colour keys, working copy
     init_label_colours();
     init_fonts();
     wxGetApp().Update_dark_mode_flag();
@@ -3048,15 +3113,29 @@ bool GUI_App::on_init_inner()
     // If load_language() fails, the application closes.
     load_language(wxString(), true);
 #ifdef _MSW_DARK_MODE
-
+    // "color_scheme" is the user's choice (system/light/dark); dark_color_mode stays the derived
+    // flag that dark_mode() and the Windows dark-mode code read. First run seeds the choice from
+    // what each platform did before: Windows never followed the system, the others always did.
+    //
+    // Unlayered: a brand-new installation (no config file yet) starts in Dark on every platform. An
+    // upgrade keeps what it had, so nobody who chose Light is flipped.
+    if (app_config->get("color_scheme").empty()) {
+        if (!m_app_conf_exists)
+            app_config->set("color_scheme", "dark");
+        else {
+#ifdef __WINDOWS__
+            app_config->set("color_scheme", app_config->get("dark_color_mode") == "1" ? "dark" : "light");
+#else
+            app_config->set("color_scheme", "system");
+#endif
+        }
+    }
+    const bool init_dark_color_mode = resolve_color_scheme();
 #ifndef __WINDOWS__
-    wxSystemAppearance app = wxSystemSettings::GetAppearance();
-    GUI::wxGetApp().app_config->set("dark_color_mode", app.IsDark() ? "1" : "0");
-    GUI::wxGetApp().app_config->save();
-#endif // __APPLE__
-
-
-    bool init_dark_color_mode = dark_mode();
+    // Native widgets and dialogs follow the same choice. Must run before the first window.
+    const std::string scheme = app_config->get("color_scheme");
+    SetAppearance(scheme == "dark" ? Appearance::Dark : scheme == "light" ? Appearance::Light : Appearance::System);
+#endif
     bool init_sys_menu_enabled = app_config->get("sys_menu_enabled") == "1";
 #ifdef __WINDOWS__
      // Inform wxWidgets 3.3's dark mode system so it tracks NppDarkMode's state.
@@ -3193,6 +3272,14 @@ bool GUI_App::on_init_inner()
                         app_config->set("skip_version", "");
                     }
                 }
+                // The Unlayered account updater takes over whenever it can (a per-user Windows
+                // install with an account download in the manifest); otherwise the classic dialog
+                // below runs exactly as before.
+                if (m_auto_updater &&
+                    m_auto_updater->handle_new_version(version_info.version_str, version_info.description, version_info.url,
+                                                       version_info.account_download, evt.GetInt() != 0,
+                                                       skip_this_version))
+                    return;
                 if (!skip_this_version
                     || evt.GetInt() != 0) {
                     UpdateVersionDialog dialog(this->mainframe);
@@ -3282,8 +3369,7 @@ bool GUI_App::on_init_inner()
     Bind(EVT_UPDATE_MACHINE_LIST, &GUI_App::on_update_machine_list, this);
     Bind(EVT_USER_LOGIN, &GUI_App::on_user_login, this);
     Bind(EVT_USER_LOGIN_HANDLE, &GUI_App::on_user_login_handle, this);
-    Bind(EVT_CHECK_PRIVACY_VER, &GUI_App::on_check_privacy_update, this);
-    Bind(EVT_CHECK_PRIVACY_SHOW, &GUI_App::show_check_privacy_dlg, this);
+    // Unlayered: the Bambu-cloud privacy-policy dialog was removed with the account surface.
 
     Bind(EVT_SHOW_IP_DIALOG, &GUI_App::show_ip_address_enter_dialog_handler, this);
 
@@ -3454,6 +3540,7 @@ bool GUI_App::on_init_inner()
 #endif
     if (scrn) { scrn->SetText(_L("Showing main window") + dots, 95); wxYield(); }
     mainframe->Show(true);
+    retheme_from_base();
     // Close the splash now that the main UI is visible.
     if (scrn) { scrn->SetText(_L("Showing main window") + dots, 100); scrn->Destroy(); scrn = nullptr; }
     BOOST_LOG_TRIVIAL(info) << "main frame firstly shown";
@@ -3882,18 +3969,20 @@ bool GUI_App::on_init_network(bool try_backup)
             plugin.create_agent(data_directory);
         }
         if (plugin.has_agent()) {
-            BBLCloudServiceAgent bbl;
-            bbl.set_config_dir(data_directory);
-            bbl.init_log();
-            bbl.set_cert_file(resources_dir() + "/cert", "slicer_base64.cer");
-            bbl.set_country_code(app_config->get_country_code());
-            // Orca: disable Bambu telemetry before start() so the DLL never spins up tracking
-            // workers. This covers the case where the BBL plugin is loaded for LAN discovery
-            // but the user has not registered BBL_CLOUD_PROVIDER (so m_agent->track_enable
-            // would not reach this DLL instance).
-            bbl.track_enable(false);
-            bbl.track_remove_files();
-            bbl.start();
+            // Unlayered: configure the shared Bambu DLL agent for LAN use (discovery, local
+            // MQTT/FTP, camera). This was previously done through a throwaway BBLCloudServiceAgent
+            // instance; that cloud/account class has been removed, so call the plugin's own DLL
+            // entry points directly. Telemetry is forced off before start(). The cloud-only extra
+            // HTTP client-identity headers are intentionally skipped -- LAN makes no authenticated
+            // cloud HTTP calls -- which also keeps this path free of any account surface.
+            void* agent = plugin.get_agent();
+            if (auto f = plugin.get_set_config_dir())     f(agent, data_directory);
+            if (auto f = plugin.get_init_log())           f(agent);
+            if (auto f = plugin.get_set_cert_file())      f(agent, resources_dir() + "/cert", "slicer_base64.cer");
+            if (auto f = plugin.get_set_country_code())   f(agent, app_config->get_country_code());
+            if (auto f = plugin.get_track_enable())       f(agent, false);
+            if (auto f = plugin.get_track_remove_files()) f(agent);
+            if (auto f = plugin.get_start())              f(agent);
         }
     }
 
@@ -3908,7 +3997,30 @@ bool GUI_App::on_init_network(bool try_backup)
             m_user_manager = new Slic3r::UserManager();
     }
 
-    // Unlayered: a prompt offering to update the Bambu network plug-in used to be here.
+    // A version pinned to something other than the latest series is a deliberate choice, so it
+    // is exempt from the upgrade prompt the same way the legacy pin already is - otherwise the
+    // dialog reappears on every launch for as long as the pin is held.
+    const std::string pinned_version = app_config->get_network_plugin_version();
+    const bool pinned_to_older_series = !pinned_version.empty() &&
+        network_plugin_series(pinned_version) != network_plugin_series(get_latest_network_version());
+
+    if (should_load_networking_plugin && m_networking_compatible && !pinned_to_older_series) {
+        app_config->clear_remind_network_update_later();
+
+        if (has_network_update_available()) {
+            std::string latest = get_latest_network_version();
+
+            bool should_prompt = !app_config->is_network_update_prompt_disabled()
+                && !app_config->is_network_version_skipped(latest)
+                && !app_config->should_remind_network_update_later();
+
+            if (should_prompt) {
+                CallAfter([this]() {
+                    show_network_plugin_download_dialog(true);
+                });
+            }
+        }
+    }
 
     return true;
 }
@@ -4156,39 +4268,280 @@ const wxColour GUI_App::get_label_default_clr_modified()
     return dark_mode() ? wxColour(253, 111, 40) : wxColour(252, 77, 1);
 }
 
+// Roles offered in Preferences > Appearance > Theme colours: light-theme key -> label.
+// The key is what code passes to StateColor::darkModeColorFor(); the dark value comes from
+// gDarkColors unless the user overrides it.
+const std::vector<std::pair<std::string, const char*>>& GUI_App::theme_color_roles()
+{
+    static const std::vector<std::pair<std::string, const char*>> roles = {
+        { "#FFFFFF", L("Window background") },
+        { "#F8F8F8", L("Panel title strips") },
+        { "#3B4446", L("Tab bar") },
+        { "#262E31", L("Top bar") },
+        { "#CECECE", L("Selected tab") },
+        { "#DFDFDF", L("Buttons") },
+        { "#DBDBDB", L("Input borders") },
+        { "#FFFEFF", L("Input background") },
+        { "#363636", L("Labels") },
+        { "#262E30", L("Button and input text") },
+        { "#6B6B6B", L("Disabled text") },
+        { "#EEEEEE", L("Separators") },
+        { "#767676", L("Accent") },
+    };
+    return roles;
+}
+
+static std::string theme_color_config_key(bool dark, const std::string& light_key)
+{
+    return std::string(dark ? "theme_dark_" : "theme_light_") + light_key.substr(1);
+}
+
+void GUI_App::apply_theme_overrides()
+{
+    ThemeManager::get().on_base_changed();
+}
+
+static wxColour  to_wx(const ColorRGBA& c) { return wxColour(int(c.r() * 255.f + 0.5f), int(c.g() * 255.f + 0.5f), int(c.b() * 255.f + 0.5f)); }
+
+void GUI_App::apply_view_colors()
+{
+    ThemeManager::get().apply_to_state();
+}
+
+wxColour GUI_App::get_view_color(const std::string& which)
+{
+    const bool dark = dark_mode();
+    if (which == "plate_grid")  return to_wx(PartPlate::plate_line_color(dark));
+    if (which == "plate_model") return to_wx(Bed3D::model_color(dark));
+    if (which == "toolbar") {
+        const auto& t = ThemeManager::get().active().toolbar;
+        return t.empty() ? (dark ? wxColour(60, 60, 65) : wxColour(255, 255, 255)) : wxColour(t); // the shipped textures
+    }
+    return to_wx(GLCanvas3D::view_background_color(dark));
+}
+
+void GUI_App::set_view_color(const std::string& which, const wxColour& color)
+{
+    if (which == "plate_grid")       ThemeManager::get().set_plate_grid(color);
+    else if (which == "plate_model") ThemeManager::get().set_plate_model(color);
+    else if (which == "toolbar")     ThemeManager::get().set_toolbar(color);
+    else                             ThemeManager::get().set_view_background(color);
+}
+
+std::vector<std::pair<std::string, wxColour>> GUI_App::resolved_theme_colors()
+{
+    std::vector<std::pair<std::string, wxColour>> out;
+    for (const auto& [key, name] : theme_color_roles())
+        out.emplace_back(key, StateColor::darkModeColorFor(wxColour(key)));
+    for (const char* key : { "#F1F1F1", "#FEFFFF", "#D8D8D8", "#F4F4F4", "#323A3D", "#303A3C", "#6B6A6A", "#6B6B6A" })
+        out.emplace_back(key, StateColor::darkModeColorFor(wxColour(key)));
+    out.emplace_back("label", m_color_label_default);
+    out.emplace_back("highlight_label", m_color_highlight_label_default);
+    out.emplace_back("btn_label", m_color_default_btn_label);
+    out.emplace_back("window", m_color_window_default);
+    out.emplace_back("highlight", m_color_highlight_default);
+    return out;
+}
+
+// Windows built with a literal colour (most plain panels: they never consult the table on the
+// light base) are brought to the theme by the same pass that previews an edit, with the
+// built-in colours of the base as the "before" state. Run once a window tree is complete.
+void GUI_App::retheme_from_base()
+{
+    const bool dark = dark_mode();
+    const auto& table = StateColor::GetDarkMap();
+    // The windows carry only the colours they were built with: what an earlier preview taught
+    // the matcher would misattribute a colour that a role has since given up.
+    m_theme_history.clear();
+    std::vector<std::pair<std::string, wxColour>> before = resolved_theme_colors();
+    for (auto& [key, colour] : before) {
+        if (key.empty() || key[0] != '#')
+            continue;
+        const wxColour k(key);
+        if (!dark)
+            colour = k;
+        else if (auto it = table.find(k); it != table.end())
+            colour = it->second;
+    }
+    retheme_live(before);
+}
+
+void GUI_App::retheme_live(const std::vector<std::pair<std::string, wxColour>>& before)
+{
+    const auto after = resolved_theme_colors();
+    // Every colour a role has resolved to in this session: a window painted with one of them
+    // belongs to that role, however many changes ago it was painted. A colour that several
+    // roles have shared is ambiguous, unless exactly one of them is changing right now.
+    auto& history = m_theme_history;
+    std::map<std::string, wxColour> now;
+    std::set<std::string>           changed;
+    for (size_t i = 0; i < before.size() && i < after.size(); ++i) {
+        history[before[i].first].insert(before[i].second.GetRGB());
+        history[after[i].first].insert(after[i].second.GetRGB());
+        now[after[i].first] = after[i].second;
+        if (before[i].second != after[i].second)
+            changed.insert(after[i].first);
+    }
+    if (changed.empty())
+        return;
+    auto retarget = [&](const wxColour& current) -> std::optional<wxColour> {
+        const unsigned key = current.GetRGB();
+        std::vector<std::string> owners, hits;
+        for (const auto& [role, colours] : history)
+            if (colours.count(key)) {
+                owners.push_back(role);
+                if (changed.count(role))
+                    hits.push_back(role);
+            }
+        // Several candidates: the widgets that paint from the table are skipped below, so what is
+        // left is panels and labels; pick by a fixed priority (window background first for
+        // backgrounds, labels first for text) rather than refusing.
+        // (snapshot entries are keyed by the light colour of the role, label entries by name)
+        static const std::vector<std::string> priority = {
+            "#FFFFFF", "window", "#363636", "label", "#F8F8F8", "#F1F1F1", "#262E30", "btn_label", "#6B6B6B",
+            "#FFFEFF", "#DFDFDF", "#CECECE", "#3B4446", "#EEEEEE", "#DBDBDB", "#767676",
+        };
+        auto pick = [&](const std::vector<std::string>& roles) -> const std::string* {
+            if (roles.empty()) return nullptr;
+            for (const std::string& p : priority)
+                for (const std::string& r : roles)
+                    if (r == p) return &r;
+            return &roles[0];
+        };
+        const std::string* role = !hits.empty() ? pick(hits) : pick(owners);
+        if (role == nullptr || now[*role].GetRGB() == key)
+            return std::nullopt;
+        return now[*role];
+    };
+    // Widgets that paint themselves from the theme table follow it on their own; repainting
+    // them here would tie them to the wrong role (inputs share the window's grey by default).
+    auto paints_from_table = [](wxWindow* w) {
+        return dynamic_cast<StaticBox*>(w) != nullptr || dynamic_cast<TextInput*>(w) != nullptr ||
+               dynamic_cast<Button*>(w) != nullptr || dynamic_cast<SideButton*>(w) != nullptr;
+    };
+    std::function<void(wxWindow*)> walk = [&](wxWindow* w) {
+        if (!paints_from_table(w)) {
+            if (auto bg = retarget(w->GetBackgroundColour()))
+                w->SetBackgroundColour(*bg);
+            if (auto fg = retarget(w->GetForegroundColour()))
+                w->SetForegroundColour(*fg);
+        }
+        for (wxWindow* child : w->GetChildren())
+            walk(child);
+    };
+    for (wxWindow* top : wxTopLevelWindows) {
+        walk(top);
+        top->Refresh();
+    }
+}
+
+void GUI_App::set_auto_contrast_text(bool on)
+{
+    ThemeManager::get().set_auto_contrast_text(on);
+}
+
+void GUI_App::on_theme_changed(const std::vector<std::pair<std::string, wxColour>>& before)
+{
+    init_label_colours();
+    retheme_live(before);
+    update_label_colours();
+    if (mainframe != nullptr) {
+        wxSysColourChangedEvent evt;
+        mainframe->GetEventHandler()->ProcessEvent(evt);
+        mainframe->retheme_home_page();
+    }
+    if (plater_ != nullptr)
+        wxPostEvent(plater_, SimpleEvent(EVT_GLCANVAS_COLOR_MODE_CHANGED));
+}
+
+void GUI_App::apply_color_scheme(const std::string& scheme)
+{
+    app_config->set("color_scheme", scheme);
+    app_config->save();
+#ifdef __WINDOWS__
+    resolve_color_scheme();
+    Update_dark_mode_flag();
+    force_colors_update();
+    update_ui_from_settings();
+#else
+    // wx re-styles the native widgets and sends wxSysColourChangedEvent to every top-level
+    // window, the same route a desktop theme flip takes, which re-derives the flag and
+    // re-themes the custom widgets. If the toolkit cannot switch at runtime, drive that by hand.
+    const auto appearance = scheme == "dark" ? wxApp::Appearance::Dark : scheme == "light" ? wxApp::Appearance::Light : wxApp::Appearance::System;
+    if (SetAppearance(appearance) != wxApp::AppearanceResult::Ok && mainframe != nullptr) {
+        wxSysColourChangedEvent evt;
+        mainframe->GetEventHandler()->ProcessEvent(evt);
+    }
+    resolve_color_scheme();
+    Update_dark_mode_flag();
+#endif
+    if (plater_ != nullptr)
+        wxPostEvent(plater_, SimpleEvent(EVT_GLCANVAS_COLOR_MODE_CHANGED));
+}
+
+void GUI_App::set_theme_color(const std::string& light_key, const wxColour& color)
+{
+    ThemeManager::get().set_role_color(light_key, color);
+}
+
+void GUI_App::reset_theme_colors()
+{
+    ThemeManager::get().reset_working();
+}
+
 void GUI_App::init_label_colours()
 {
     bool is_dark_mode = dark_mode();
-    m_color_label_modified = is_dark_mode ? wxColour("#F1754E") : wxColour("#F1754E");
-    m_color_label_sys      = is_dark_mode ? wxColour("#B2B3B5") : wxColour("#363636");
+    StateColor::SetDarkMode(is_dark_mode);
+    apply_theme_overrides();
+    m_color_label_modified = is_dark_mode ? wxColour("#F1754E") : wxColour("#C9500E"); // light: the dark-theme orange sat at 2.8:1 on white
+    m_color_label_sys      = StateColor::darkModeColorFor(wxColour("#363636")); // the label row of gDarkColors, user override included
+    const Theme& theme = ThemeManager::get().active();
+    if (!theme.label_sys.empty())      m_color_label_sys      = StateColor::AvoidTableCollision(wxColour(theme.label_sys), is_dark_mode);
+    if (!theme.label_modified.empty()) m_color_label_modified = StateColor::AvoidTableCollision(wxColour(theme.label_modified), is_dark_mode);
 
 #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
     m_color_label_default           = is_dark_mode ? wxColour(250, 250, 250) : m_color_label_sys; // wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
     m_color_highlight_label_default = is_dark_mode ? wxColour(230, 230, 230): wxSystemSettings::GetColour(/*wxSYS_COLOUR_HIGHLIGHTTEXT*/wxSYS_COLOUR_WINDOWTEXT);
-    m_color_highlight_default       = is_dark_mode ? wxColour("#36363B") : wxColour("#F1F1F1"); // ORCA row highlighting
+    m_color_highlight_default       = is_dark_mode ? StateColor::darkModeColorFor(wxColour("#F4F4F4")) : wxColour("#F1F1F1"); // ORCA row highlighting (one step above the dark window)
     m_color_hovered_btn_label       = is_dark_mode ? wxColour(255, 255, 254) : wxColour(0,0,0);
     m_color_default_btn_label       = is_dark_mode ? wxColour(255, 255, 254): wxColour(0,0,0);
     m_color_selected_btn_bg         = is_dark_mode ? wxColour(84, 84, 91)   : wxColour(206, 206, 206);
 #else
     m_color_label_default = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
 #endif
-    m_color_window_default          = is_dark_mode ? wxColour(43, 43, 43)   : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
-    StateColor::SetDarkMode(is_dark_mode);
+    // The #FFFFFF row of gDarkColors; on the light base the theme's own window colour if it set
+    // one, else the system's.
+    const wxColour themed_window    = StateColor::darkModeColorFor(wxColour("#FFFFFF"));
+    m_color_window_default          = is_dark_mode || themed_window != wxColour("#FFFFFF") ? themed_window : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+    if (theme.auto_contrast_text) {
+        // The label colours above are fixed per theme; keep them readable on a user background.
+        const wxColour button_bg        = StateColor::darkModeColorFor(wxColour("#DFDFDF"));
+        m_color_label_default           = StateColor::AvoidTableCollision(StateColor::EnsureContrast(m_color_label_default, m_color_window_default, 4.5), is_dark_mode);
+        m_color_highlight_label_default = StateColor::AvoidTableCollision(StateColor::EnsureContrast(m_color_highlight_label_default, m_color_highlight_default, 4.5), is_dark_mode);
+        m_color_default_btn_label       = StateColor::AvoidTableCollision(StateColor::EnsureContrast(m_color_default_btn_label, button_bg, 4.5), is_dark_mode);
+        m_color_hovered_btn_label       = StateColor::AvoidTableCollision(StateColor::EnsureContrast(m_color_hovered_btn_label, button_bg, 4.5), is_dark_mode);
+    }
+    // A base flip (desktop or colour scheme) arrives here through the sys-colour event, not
+    // through ThemeManager's refresh: re-theme the windows painted for the previous base from the
+    // last snapshot, before the classic table pass runs, so a theme's own colours (a black
+    // window, white labels) are carried over rather than sent through the table.
+    const auto now = resolved_theme_colors();
+    if (!m_last_theme_colors.empty() && m_last_theme_colors.size() == now.size()) {
+        bool moved = false;
+        for (size_t i = 0; i < now.size() && !moved; ++i)
+            moved = now[i].second != m_last_theme_colors[i].second;
+        if (moved)
+            retheme_live(m_last_theme_colors);
+    }
+    m_last_theme_colors = now;
 }
 
 void GUI_App::update_label_colours_from_appconfig()
 {
-    if (app_config->has("label_clr_sys")) {
-        auto str = app_config->get("label_clr_sys");
-        if (str != "")
-            m_color_label_sys = wxColour(str);
-    }
-
-    if (app_config->has("label_clr_modified")) {
-        auto str = app_config->get("label_clr_modified");
-        if (str != "")
-            m_color_label_modified = wxColour(str);
-    }
+    const Theme& theme = ThemeManager::get().active();
+    if (!theme.label_sys.empty())      m_color_label_sys      = wxColour(theme.label_sys);
+    if (!theme.label_modified.empty()) m_color_label_modified = wxColour(theme.label_modified);
 }
 
 void GUI_App::update_publish_status()
@@ -4272,10 +4625,19 @@ void GUI_App::UpdateDarkUI(wxWindow* window, bool highlited/* = false*/, bool ju
             return;
     }
 
+    // SideButton paints itself from theme-aware StateColors and its SetForegroundColour()
+    // replaces that whole table; the generic foreground below would turn the Slice/Print
+    // labels grey (seen on Linux once the colour scheme is applied live).
+    if (dynamic_cast<SideButton*>(window))
+        return;
+
 
     /*if (m_is_dark_mode != dark_mode() )
         m_is_dark_mode = dark_mode();*/
 
+    // Theme values never coincide with the table's keys or values (StateColor::AvoidTableCollision),
+    // so mapping a window's current colour through the table is safe: a literal from
+    // construction maps, an applied theme colour passes through unchanged.
     if (m_is_dark_mode) {
 
         auto orig_col = window->GetBackgroundColour();
@@ -4309,6 +4671,11 @@ void GUI_App::UpdateDarkUI(wxWindow* window, bool highlited/* = false*/, bool ju
         window->SetForegroundColour(fg_col);
     }
     else {
+        // Only back from a dark value here. The light theme's overrides are not applied by this
+        // pass: it can put a colour into a window but never take it out again when the theme
+        // changes (a window carrying an old override value matches no key), which is the drift
+        // retheme_live() exists to avoid. Windows built with literal colours get the light theme
+        // from retheme_from_base() once their tree is complete.
         auto original_col = window->GetBackgroundColour();
         auto bg_col = StateColor::lightModeColorFor(original_col);
 
@@ -4348,6 +4715,17 @@ static void update_dark_children_ui(wxWindow* window, bool just_buttons_update =
 void GUI_App::UpdateDarkUIWin(wxWindow* win)
 {
     update_dark_children_ui(win);
+}
+
+bool GUI_App::resolve_color_scheme()
+{
+    const std::string scheme = app_config->get("color_scheme");
+    // "system" asks the desktop (the portal's colour-scheme on GTK), not the current widget
+    // colours: right after a runtime appearance switch those still reflect the old theme.
+    const bool        dark   = scheme == "dark" || (scheme != "light" && wxSystemSettings::GetAppearance().IsSystemDark());
+    app_config->set("dark_color_mode", dark ? "1" : "0");
+    app_config->save();
+    return dark;
 }
 
 void GUI_App::Update_dark_mode_flag()
@@ -4447,30 +4825,22 @@ void GUI_App::update_fonts(const MainFrame *main_frame)
     m_code_font.SetPointSize(m_small_font.GetPointSize());
 }
 
+// The two label colours are user-overridable from Preferences; an empty app-config value
+// means "theme default" (init_label_colours), which update_label_colours_from_appconfig honours.
 void GUI_App::set_label_clr_modified(const wxColour& clr)
 {
-    return;
-    //BBS
-    /*
-    if (m_color_label_modified == clr)
-        return;
-    m_color_label_modified = clr;
-    const std::string str = encode_color(ColorRGB(clr.Red(), clr.Green(), clr.Blue()));
-    app_config->save();
-    */
+    ThemeManager::get().set_label_modified(clr);
 }
 
 void GUI_App::set_label_clr_sys(const wxColour& clr)
 {
-    return;
-    //BBS
-    /*
-    if (m_color_label_sys == clr)
-        return;
-    m_color_label_sys = clr;
-    const std::string str = encode_color(ColorRGB(clr.Red(), clr.Green(), clr.Blue()));
-    app_config->save();
-    */
+    ThemeManager::get().set_label_sys(clr);
+}
+
+void GUI_App::reset_label_clrs()
+{
+    ThemeManager::get().set_label_modified(wxNullColour);
+    ThemeManager::get().set_label_sys(wxNullColour);
 }
 
 bool GUI_App::get_side_menu_popup_status()
@@ -4586,16 +4956,20 @@ void GUI_App::check_printer_presets()
 void switch_window_pools();
 void release_window_pools();
 
-void GUI_App::recreate_GUI(const wxString &msg_name)
+void GUI_App::recreate_GUI(const wxString &msg_name, bool restore_project, std::function<void()> before_teardown, std::function<void()> after_rebuild)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "recreate_GUI enter";
     m_is_recreating_gui = true;
 
-
-    mainframe->shutdown();
+    // The progress dialog goes up first, while the old window is still on screen: the window
+    // vanishing before anything says why looks like a crash.
     ProgressDialog dlg(msg_name, msg_name, 100, nullptr, wxPD_AUTO_HIDE);
     dlg.Pulse();
+    dlg.Update(2, _L("Preparing") + dots);
+    if (before_teardown)
+        before_teardown();
     dlg.Update(10, _L("Rebuild") + dots);
+    mainframe->shutdown();
 
     MainFrame *old_main_frame = mainframe;
     struct ClientData : wxClientData
@@ -4622,6 +4996,7 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
     m_printhost_job_queue.reset(new PrintHostJobQueue(mainframe->printhost_queue_dlg()));
     load_current_presets();
     mainframe->Show(true);
+    retheme_from_base();
     //mainframe->refresh_plugin_tips();
 
     dlg.Update(90, _L("Loading a mode view") + dots);
@@ -4633,7 +5008,12 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
     if (hms_query) hms_query->clear_hms_info();
 
     //BBS: trigger restore project logic here, and skip confirm
-    plater_->trigger_restore_project(1);
+    if (restore_project)
+        plater_->trigger_restore_project(1);
+    if (after_rebuild) {
+        dlg.Update(95, _L("Restoring the project") + dots);
+        after_rebuild();
+    }
 
     // #ys_FIXME_delete_after_testing  Do we still need this  ?
 //     CallAfter([]() {
@@ -5080,15 +5460,14 @@ std::string GUI_App::handle_web_request(std::string cmd)
         boost::optional<std::string> command = root.get_optional<std::string>("command");
         if (command.has_value()) {
             std::string command_str = command.value();
+            // Unlayered: Bambu login commands removed with the account surface.
             static const std::unordered_set<std::string> stealth_blocked_info_commands = {
                 "get_login_info",
                 "get_orca_login_info",
-                "get_bambu_login_info",
             };
             static const std::unordered_set<std::string> stealth_blocked_login_commands = {
                 "homepage_login_or_register",
                 "homepage_orca_login_or_register",
-                "homepage_bambu_login_or_register",
             };
             if (app_config->get_stealth_mode() && stealth_blocked_info_commands.count(command_str)) {
                 CallAfter([this] {
@@ -5114,8 +5493,6 @@ std::string GUI_App::handle_web_request(std::string cmd)
                             this->request_login(true);
                         else if (command_str == "homepage_orca_login_or_register")
                             this->request_login(true, ORCA_CLOUD_PROVIDER);
-                        else if (command_str == "homepage_bambu_login_or_register")
-                            this->request_login(true, BBL_CLOUD_PROVIDER);
                     }
                 });
                 return "";
@@ -5156,18 +5533,6 @@ std::string GUI_App::handle_web_request(std::string cmd)
             }
             else if (command_str.compare("get_orca_login_info") == 0) {
                 CallAfter([this] { get_login_info(ORCA_CLOUD_PROVIDER); });
-            }
-            else if (command_str.compare("get_bambu_login_info") == 0) {
-                CallAfter([this] { get_login_info(BBL_CLOUD_PROVIDER); });
-            }
-            else if (command_str.compare("homepage_bambu_login_or_register") == 0) {
-                CallAfter([this] { request_login(true, BBL_CLOUD_PROVIDER); });
-            }
-            else if (command_str.compare("homepage_bambu_logout") == 0) {
-                CallAfter([this] {
-                    BOOST_LOG_TRIVIAL(info) << "logout: homepage_bambu_logout";
-                    request_user_logout(BBL_CLOUD_PROVIDER);
-                });
             }
             else if (command_str.compare("homepage_orca_login_or_register") == 0) {
                 CallAfter([this] { request_login(true, ORCA_CLOUD_PROVIDER); });
@@ -5252,6 +5617,9 @@ std::string GUI_App::handle_web_request(std::string cmd)
                         this->request_open_project(url.value());
                     }
                 }
+            }
+            else if (command_str.compare("begin_network_plugin_download") == 0) {
+                CallAfter([] { wxGetApp().ShowDownNetPluginDlg(); });
             }
             else if (command_str.compare("get_web_shortcut") == 0) {
                 if (root.get_child_optional("key_event") != boost::none) {
@@ -5764,6 +6132,7 @@ struct Candidate
     std::string                 url;
     std::string                 notes;
     std::vector<AppUpdateAsset> assets;
+    std::vector<AccountDownload> account_downloads;
 };
 
 } // namespace
@@ -5772,7 +6141,12 @@ void GUI_App::check_new_version_sf(int by_user)
 {
     AppConfig*        app_config        = wxGetApp().app_config;
     const bool        check_stable_only = app_config->get_bool("check_stable_update_only");
-    const std::string url               = app_config->version_check_url();
+    // Platform and architecture, so the site answers with this platform's release: a Mac must not
+    // be told about a Windows build. Builds up to 0.1.2 send nothing and are all Windows, which is
+    // what the site assumes for them. Nothing else identifies the machine.
+    std::string url = app_config->version_check_url();
+    url += (url.find('?') == std::string::npos ? "?" : "&");
+    url += std::string("platform=") + updater_platform() + "&arch=" + updater_arch();
 
     const Semver current_version = get_version(UNLAYERED_VERSION, version_tag_matcher());
 
@@ -5789,7 +6163,11 @@ void GUI_App::check_new_version_sf(int by_user)
     BOOST_LOG_TRIVIAL(info) << "updater: checking " << url;
 
     auto http = Http::get(url);
-    http.header("Accept", "application/json")
+    // Verified TLS: since the manifest can now start an unattended install, it must come from the
+    // real site. (Its sha256 is the only check on the installer, so a forged manifest would be a
+    // forged installer.)
+    http.tls_verify(true)
+        .header("Accept", "application/json")
         .header("User-Agent", updater_user_agent())
         .timeout_connect(5)
         .timeout_max(15)
@@ -5858,6 +6236,22 @@ void GUI_App::check_new_version_sf(int by_user)
                     }
                 }
 
+                // Installers behind the Unlayered account (unlayered3d.com's manifest). Older builds
+                // ignore this key, which is the point: they see `assets: []` and open the page.
+                if (auto downloads = node.get_child_optional("unlayered_downloads")) {
+                    for (const auto& kv : *downloads) {
+                        AccountDownload d;
+                        d.platform = kv.second.get<std::string>("platform", "");
+                        d.arch     = kv.second.get<std::string>("arch", "");
+                        d.name     = kv.second.get<std::string>("name", "");
+                        d.url      = kv.second.get<std::string>("url", "");
+                        d.sha256   = boost::algorithm::to_lower_copy(kv.second.get<std::string>("sha256", ""));
+                        d.size     = kv.second.get<uint64_t>("size", 0);
+                        if (!d.name.empty() && !d.url.empty())
+                            candidate.account_downloads.push_back(std::move(d));
+                    }
+                }
+
                 const bool is_prerelease = node.get_optional<bool>("prerelease").get_value_or(false);
                 Candidate& slot          = is_prerelease ? best_pre : best_release;
                 if (!slot.valid || slot.version < candidate.version)
@@ -5921,6 +6315,10 @@ void GUI_App::check_new_version_sf(int by_user)
                                         << " asset(s) but none are installable on this platform; the "
                                            "dialog will offer the download page instead";
             }
+            version_info.account_download = select_account_download(chosen.account_downloads);
+            if (version_info.account_download)
+                BOOST_LOG_TRIVIAL(info) << "updater: " << version_info.version_str << " is available with the "
+                                        << "Unlayered account as " << version_info.account_download->name;
 
             wxCommandEvent* evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
             evt->SetString(chosen.version.to_string());
@@ -6168,75 +6566,11 @@ void GUI_App::set_skip_version(bool skip)
     }
 }
 
-void GUI_App::show_check_privacy_dlg(wxCommandEvent& evt)
-{
-    int online_login = evt.GetInt();
-    std::string provider = evt.GetString().ToStdString();
-    if (provider.empty()) provider = ORCA_CLOUD_PROVIDER;
-    PrivacyUpdateDialog privacy_dlg(this->mainframe, wxID_ANY, _L("Privacy Policy Update"));
-    privacy_dlg.Bind(EVT_PRIVACY_UPDATE_CONFIRM, [this, online_login, provider](wxCommandEvent &e) {
-        app_config->set("privacy_version", privacy_version_info.version_str);
-        app_config->set_bool("privacy_update_checked", true);
-        request_user_handle(online_login, provider);
-        });
-    privacy_dlg.Bind(EVT_PRIVACY_UPDATE_CANCEL, [this, provider](wxCommandEvent &e) {
-            app_config->set_bool("privacy_update_checked", false);
-            if (m_agent) {
-                BOOST_LOG_TRIVIAL(info) << "logout: Privacy update dialog cancelled.";
-                m_agent->user_logout(false, provider);
-                post_logout_to_webview(provider);
-            }
-        });
-
-    privacy_dlg.set_text(privacy_version_info.description);
-    privacy_dlg.on_show();
-}
-
-void GUI_App::on_show_check_privacy_dlg(int online_login, const std::string& provider)
-{
-    auto evt = new wxCommandEvent(EVT_CHECK_PRIVACY_SHOW);
-    evt->SetInt(online_login);
-    evt->SetString(wxString::FromUTF8(provider));
-    wxQueueEvent(this, evt);
-}
-
-bool GUI_App::check_privacy_update()
-{
-    if (privacy_version_info.version_str.empty() || privacy_version_info.description.empty()
-        || privacy_version_info.url.empty()) {
-        return false;
-    }
-
-    std::string local_privacy_ver = app_config->get("privacy_version");
-    auto curr_version = Semver::parse(local_privacy_ver);
-    auto remote_version = Semver::parse(privacy_version_info.version_str);
-    if (curr_version && remote_version) {
-        if (*remote_version > *curr_version || app_config->get("privacy_update_checked") != "true") {
-            return true;
-        }
-    }
-    return false;
-}
-
-void GUI_App::on_check_privacy_update(wxCommandEvent& evt)
-{
-    int online_login = evt.GetInt();
-    std::string provider = evt.GetString().ToStdString();
-    if (provider.empty()) provider = ORCA_CLOUD_PROVIDER;
-    bool result = check_privacy_update();
-    if (result)
-        on_show_check_privacy_dlg(online_login, provider);
-    else
-        request_user_handle(online_login, provider);
-}
-
 void GUI_App::check_privacy_version(int online_login, const std::string& provider)
 {
-    // Unlayered: this used to GET api.bambulab.com for a privacy-policy version and, when one was
-    // newer than the stored privacy_version, block sign-in behind an acceptance dialog. There is no
-    // Bambu account here and no policy to fetch, so it does what the stealth-mode branch always did:
-    // carry straight on to the caller's continuation. Kept rather than deleted because on_user_login
-    // calls it and expects the handover.
+    // Unlayered: Bambu cloud/account has been removed, so there is no privacy policy to fetch or
+    // confirm (the policy fetch and PrivacyUpdateDialog were Bambu-cloud-only). This remains solely
+    // as the login continuation hand-off for any remaining sign-in path.
     request_user_handle(online_login, provider);
 }
 
@@ -8408,6 +8742,8 @@ void GUI_App::open_exportpresetbundledialog(size_t open_on_tab, const std::strin
 
 void GUI_App::open_preferences(size_t open_on_tab, const std::string& highlight_option)
 {
+    if (m_is_recreating_gui) // the rebuild's progress dialog yields; a second rebuild inside it would tear down the frame being built
+        return;
     static constexpr const char* opengl_fxaa_setting_key = "opengl_fxaa_enabled";
     static constexpr const char* opengl_fps_cap_setting_key = "opengl_fps_cap";
     static constexpr const char* opengl_show_fps_overlay_setting_key = "opengl_show_fps_overlay";
@@ -8472,8 +8808,73 @@ void GUI_App::open_preferences(size_t open_on_tab, const std::string& highlight_
         }
     }
 
-    if (need_recreate_gui)
-        recreate_GUI(_L("Changing application language"));
+    if (need_recreate_gui) {
+        // A theme change is previewed by patching existing windows; the rebuilt window is
+        // constructed from the theme. The open project is carried across the rebuild through a
+        // temporary 3MF so nothing depends on the backup timer or its restore prompt.
+        const bool keep_project = plater_ != nullptr && !plater_->is_empty_project();
+        boost::filesystem::path kept;
+        wxString project_name;
+        bool     dirty = false;
+        std::set<Preset::Type> presets_dirty_before; // the tabs whose preset carried edits
+        if (keep_project) {
+            // Written before anything is torn down; if it cannot be written the window is left
+            // as previewed rather than rebuilt without the project. One file per process, so two
+            // instances rebuilding at once do not exchange projects.
+            project_name = plater_->get_project_filename(".3mf");
+            dirty        = plater_->is_project_dirty() || !plater_->up_to_date(false, false); // either tracker: attachments count
+            for (const Tab* tab : tabs_list)
+                if (tab->current_preset_is_dirty())
+                    presets_dirty_before.insert(tab->type());
+            kept         = boost::filesystem::temp_directory_path() / ("unlayered-rebuild-" + std::to_string(wxGetProcessId()) + ".3mf");
+            if (plater_->export_3mf(kept, SaveStrategy::Silence | SaveStrategy::FullPathSources) != 0) {
+                BOOST_LOG_TRIVIAL(error) << "Preferences: the project could not be saved for the rebuild (" << kept.string() << "); the window is not rebuilt";
+                return;
+            }
+        }
+        auto reload_project = [&]() {
+            if (kept.empty() || plater_ == nullptr)
+                return;
+            // As a project (model, per-plate settings, embedded config: positions and plates
+            // survive), silently, straight through load_files: load_project() would first ask
+            // about modified presets, and the crash-restore route skips the attachments.
+            plater_->load_files({ kept }, LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary | LoadStrategy::Silence);
+            if (plater_->is_empty_project()) {
+                BOOST_LOG_TRIVIAL(error) << "Preferences: the project was not restored after the rebuild; it is kept at " << kept.string();
+                MessageDialog(nullptr, format_wxstr(_L("The project could not be restored after the rebuild. It was saved to:\n%1%"), from_path(kept)),
+                              _L("Preferences"), wxOK | wxICON_WARNING).ShowModal();
+                return;
+            }
+            boost::system::error_code ec;
+            boost::filesystem::remove(kept, ec);
+            plater_->set_project_filename(project_name.IsEmpty() ? _L("Untitled") : project_name); // the project's name, not the temp file
+            // Loading the file as a project re-derives the presets from its embedded config and
+            // can leave one marked modified that was clean a moment ago; a preset the user had
+            // not edited goes back to its saved values (the project's own settings are separate).
+            bool discarded = false;
+            for (Tab* tab : tabs_list)
+                if (tab->current_preset_is_dirty() && !presets_dirty_before.count(tab->type())) {
+                    std::string keys;
+                    for (const std::string& k : tab->m_presets->current_dirty_options())
+                        keys += (keys.empty() ? "" : ", ") + k;
+                    BOOST_LOG_TRIVIAL(info) << "Preferences: preset " << tab->m_presets->get_edited_preset().name << " came back modified after the rebuild (" << keys << "); discarding";
+                    tab->m_presets->discard_current_changes();
+                    discarded = true;
+                }
+            if (discarded)
+                load_current_presets(false);
+            // As load_project() does after a load: the project-config baseline is what was just
+            // loaded, then the saved state is what it was before the rebuild.
+            plater_->reset_project_dirty_initial_presets();
+            plater_->update_project_dirty_from_presets();
+            plater_->set_plater_dirty(dirty);
+            if (!dirty)
+                plater_->up_to_date(true, false); // the saved baseline too, or closing asks to save again
+        };
+        recreate_GUI(pending_language.empty() ? _L("Applying the theme") : _L("Changing application language"),
+                     /*restore_project=*/!keep_project, std::function<void()>(),
+                     keep_project ? std::function<void()>(reload_project) : std::function<void()>());
+    }
 }
 
 bool GUI_App::has_unsaved_preset_changes() const
@@ -8901,6 +9302,130 @@ wxString GUI_App::filter_string(wxString str)
     return wxString::FromUTF8(result);
 }
 
+// A bare Alt tap (press and release with nothing in between) highlights the topbar's menus,
+// as a native menubar would. Alt is otherwise only a mouse modifier here (part selection,
+// gizmo hover), so any key or button pressed while it is held disarms the tap.
+int GUI_App::FilterEvent(wxEvent& event)
+{
+    const wxEventType type = event.GetEventType();
+    if (m_input_blocking_dialog && (type == wxEVT_LEFT_DOWN || type == wxEVT_RIGHT_DOWN || type == wxEVT_MIDDLE_DOWN ||
+                                    type == wxEVT_LEFT_DCLICK || type == wxEVT_KEY_DOWN || type == wxEVT_CHAR || type == wxEVT_MOUSEWHEEL)) {
+        // A dialog that is modal for wx but not for the window manager (Preferences on GTK):
+        // anything under the dialog (its popups have it as parent) passes; the rest is blocked.
+        bool inside = false;
+        for (wxWindow* w = wxDynamicCast(event.GetEventObject(), wxWindow); w != nullptr; w = w->GetParent())
+            if (w == m_input_blocking_dialog.get()) { inside = true; break; }
+        if (!inside && wxDynamicCast(event.GetEventObject(), wxWindow) != nullptr) {
+            if (std::getenv("UNLAYERED_FOCUS_TRACE") != nullptr) {
+                std::string chain;
+                for (wxWindow* w = wxDynamicCast(event.GetEventObject(), wxWindow); w != nullptr && chain.size() < 300; w = w->GetParent())
+                    chain += boost::core::demangle(typeid(*w).name()) + " < ";
+                std::cerr << "blocked: " << chain << " (blocking " << boost::core::demangle(typeid(*m_input_blocking_dialog.get()).name()) << ")" << std::endl;
+            }
+            return Event_Processed;
+        }
+    }
+    // UNLAYERED_FOCUS_TRACE=1 prints every keyboard-focus change with the window's parent chain
+    // to stderr; the only way to see where Tab actually lands inside custom widgets.
+    static const bool focus_trace = std::getenv("UNLAYERED_FOCUS_TRACE") != nullptr;
+    if (focus_trace && type == wxEVT_KEY_DOWN) {
+        // Every key press and which window it is delivered to.
+        auto* target = wxDynamicCast(event.GetEventObject(), wxWindow);
+        std::cerr << "key: " << static_cast<const wxKeyEvent&>(event).GetKeyCode() << " -> "
+                  << (target ? boost::core::demangle(typeid(*target).name()) : std::string("?"))
+                  << " focus=" << (wxWindow::FindFocus() ? boost::core::demangle(typeid(*wxWindow::FindFocus()).name()) : std::string("none")) << std::endl;
+    }
+    if (type == wxEVT_KEY_DOWN && static_cast<const wxKeyEvent&>(event).GetKeyCode() == WXK_TAB) {
+        // See drop_focus_from_decorative_containers: keeps Tab on real controls.
+        if (wxWindow* focused = wxWindow::FindFocus()) {
+            drop_focus_from_decorative_containers(wxGetTopLevelParent(focused));
+            order_tab_stops_by_position(wxGetTopLevelParent(focused));
+            // UNLAYERED_FOCUS_TRACE=dump: once, list every window under the top-level with the
+            // attributes traversal depends on, to see why a control is (not) a Tab stop.
+            static bool dumped = false;
+            if (focus_trace && !dumped && std::string(std::getenv("UNLAYERED_FOCUS_TRACE")) == "dump") {
+                dumped = true;
+                std::function<void(wxWindow*, int)> dump = [&](wxWindow* w, int depth) {
+                    const wxRect r = w->GetScreenRect();
+                    std::cerr << "tree: " << std::string(depth * 2, ' ') << boost::core::demangle(typeid(*w).name())
+                              << " [" << r.x << "," << r.y << " " << r.width << "x" << r.height << "]"
+                              << (w->IsShown() ? "" : " hidden") << (w->IsEnabled() ? "" : " disabled")
+                              << (w->AcceptsFocus() ? " focus" : "") << (w->AcceptsFocusFromKeyboard() ? " kbd" : "")
+                              << (w->HasFlag(wxWANTS_CHARS) ? " chars" : "");
+#ifdef __WXGTK__
+                    std::cerr << " gtk[" << (w->m_widget && gtk_widget_get_can_focus(w->m_widget) ? "canfocus " : "")
+                              << (w->m_wxwindow && w->m_wxwindow != w->m_widget && gtk_widget_get_can_focus(w->m_wxwindow) ? "canfocus2 " : "")
+                              << (w->m_widget && gtk_widget_get_visible(w->m_widget) ? "vis " : "") << (w->m_widget && gtk_widget_get_sensitive(w->m_widget) ? "sens " : "")
+                              << (w->m_widget && gtk_widget_get_mapped(w->m_widget) ? "mapped" : "") << "]";
+                    // wx installs an explicit GTK focus chain per container (RealizeTabOrder); a
+                    // child missing from it is unreachable by Tab whatever its own flags say.
+                    GList* chain = nullptr;
+                    const bool has_chain = w->m_wxwindow && GTK_IS_CONTAINER(w->m_wxwindow)
+                        && gtk_container_get_focus_chain(GTK_CONTAINER(w->m_wxwindow), &chain);
+                    if (has_chain) {
+                        std::cerr << " chain[";
+                        for (wxWindow* c : w->GetChildren())
+                            std::cerr << (g_list_find(chain, c->m_widget) ? "1" : "0");
+                        std::cerr << "]";
+                        g_list_free(chain);
+                    }
+#endif
+                    std::cerr << std::endl;
+                    for (wxWindow* c : w->GetChildren())
+                        dump(c, depth + 1);
+                };
+                dump(wxGetTopLevelParent(focused), 0);
+            }
+        }
+        FocusRing::get().on_key_navigation();
+    }
+#ifdef __WXGTK__
+    else if (focus_trace && type == wxEVT_KEY_UP && static_cast<const wxKeyEvent&>(event).GetKeyCode() == WXK_TAB) {
+        // Where GTK itself put the focus after this Tab, even when wx reported nothing.
+        if (wxWindow* focused = wxWindow::FindFocus()) {
+            wxWindow* top = wxGetTopLevelParent(focused);
+            if (GtkWidget* f = top && top->m_widget ? gtk_window_get_focus(GTK_WINDOW(top->m_widget)) : nullptr) {
+                GtkAllocation a; gtk_widget_get_allocation(f, &a);
+                std::cerr << "gtk-focus: " << G_OBJECT_TYPE_NAME(f) << " [" << a.x << "," << a.y << " " << a.width << "x" << a.height << "]"
+                          << " wx=" << boost::core::demangle(typeid(*focused).name()) << std::endl;
+            }
+        }
+    }
+#endif
+    else if (type == wxEVT_SET_FOCUS)
+        FocusRing::get().on_focus(wxDynamicCast(event.GetEventObject(), wxWindow));
+    else if (type == wxEVT_LEFT_DOWN || type == wxEVT_RIGHT_DOWN || type == wxEVT_MIDDLE_DOWN)
+        FocusRing::get().on_pointer();
+    if (focus_trace && type == wxEVT_SET_FOCUS) {
+        if (auto* win = wxDynamicCast(event.GetEventObject(), wxWindow)) {
+            std::string chain;
+            for (wxWindow* w = win; w != nullptr && chain.size() < 400; w = w->GetParent())
+                chain += boost::core::demangle(typeid(*w).name()) + (w->GetName().empty() ? "" : "(" + w->GetName().ToStdString() + ")") + " < ";
+            const wxRect r = win->GetScreenRect();
+            std::cerr << "focus: [" << r.x << "," << r.y << " " << r.width << "x" << r.height << (win->HasFlag(wxWANTS_CHARS) ? " chars" : "")
+                      << (win->GetChildren().empty() ? " leaf" : "") << "] " << chain << std::endl;
+        }
+    }
+#ifndef __APPLE__
+    if (type == wxEVT_KEY_DOWN || type == wxEVT_KEY_UP) {
+        const wxKeyEvent& key      = static_cast<const wxKeyEvent&>(event);
+        const bool        bare_alt = key.GetKeyCode() == WXK_ALT && !key.ControlDown() && !key.ShiftDown() && !key.MetaDown();
+        if (type == wxEVT_KEY_DOWN)
+            m_alt_tap_armed = bare_alt;
+        else if (bare_alt && m_alt_tap_armed) {
+            m_alt_tap_armed = false;
+            if (mainframe != nullptr && mainframe->topbar() != nullptr && mainframe->IsActive()) {
+                mainframe->topbar()->ToggleKeyboardMode();
+                return Event_Processed;
+            }
+        }
+    }
+    else if (type == wxEVT_LEFT_DOWN || type == wxEVT_RIGHT_DOWN || type == wxEVT_MIDDLE_DOWN || type == wxEVT_MOUSEWHEEL)
+        m_alt_tap_armed = false;
+#endif
+    return Event_Skip;
+}
+
 bool GUI_App::OnExceptionInMainLoop()
 {
     generic_exception_handle();
@@ -9159,23 +9684,8 @@ std::string GUI_App::url_encode(std::string value) {
     return Http::url_encode(value);
 }
 
-void GUI_App::popup_ping_bind_dialog()
-{
-    if (m_ping_code_binding_dialog == nullptr) {
-        m_ping_code_binding_dialog = new PingCodeBindDialog();
-        m_ping_code_binding_dialog->ShowModal();
-        remove_ping_bind_dialog();
-    }
-}
-
-void GUI_App::remove_ping_bind_dialog()
-{
-    if (m_ping_code_binding_dialog != nullptr) {
-        m_ping_code_binding_dialog->Destroy();
-        delete m_mall_publish_dialog;
-        m_ping_code_binding_dialog = nullptr;
-    }
-}
+// Unlayered: pin-code binding was a Bambu-cloud account operation and has been removed. LAN uses
+// the access-code bind (InputIpAddressDialog) instead.
 
 
 void GUI_App::remove_mall_system_dialog()
@@ -9332,6 +9842,15 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
         update_publish_status();
         mainframe->refresh_plugin_tips();
         // BBS: remove SLA related message
+    }
+
+    // Unlayered: the wizard's last page ("Stealth mode & Bambu Lab printers") has the Bambu network
+    // plug-in box ticked by default. Upstream recorded that answer and never acted on it; start the
+    // same download as Preferences > Online once the wizard has closed (2026-10-09).
+    if (res && wizard.network_plugin_requested() && !app_config->get_bool("installed_networking")) {
+        BOOST_LOG_TRIVIAL(info) << "run_wizard: the setup wizard opted in to the Bambu network plug-in, starting its download";
+        m_netplugin_download_offered = true;
+        CallAfter([this] { ShowDownNetPluginDlg(); });
     }
 
     return res;
@@ -9814,13 +10333,26 @@ bool virtual_5axis_enabled()
     return sel != nullptr && sel->value == AxisSelection::Virtual;
 }
 
-double virtual_max_tilt_deg()
+double virtual_max_tilt_deg(double reach_mm, std::optional<double> tilt_azimuth_rad)
 {
     if (! virtual_5axis_enabled())
         return 0.;
-    const auto* opt = wxGetApp().preset_bundle->printers.get_edited_preset().config
-                          .option<ConfigOptionFloat>("nonplanar_virtual_max_angle");
-    return opt == nullptr ? 0. : std::max(0., opt->value);
+    const DynamicPrintConfig& cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    auto get = [&cfg](const char* key) {
+        const auto* opt = cfg.option<ConfigOptionFloat>(key);
+        return opt == nullptr ? 0. : opt->value;
+    };
+
+    // The geometry-derived limit, identical to the one Print::validate() enforces -- one definition
+    // in libslic3r so a drag can never stop somewhere the slicer would have accepted, or vice versa.
+    const double derived = virtual_tilt_limit_deg(HotendEnvelope::from_config(cfg), get("nonplanar_gantry_height"),
+                                                  reach_mm, tilt_azimuth_rad);
+    // The optional hand-set ceiling on top. 0 means "not applied" for either of them, so this is
+    // "the stricter of the two that are switched on", not a plain min.
+    const double manual = std::max(0., get("nonplanar_virtual_max_angle"));
+    if (derived > 0. && manual > 0.)
+        return std::min(derived, manual);
+    return std::max(derived, manual);
 }
 
 bool has_filaments(const std::vector<string>& model_filaments) {

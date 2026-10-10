@@ -39,38 +39,8 @@
 			</svg>
 		</div>
 
-		<!-- Bambu Cloud, a secondary provider folded away under the main account -->
-		<div id="BambuCloudSection">
-			<div id="BambuCloudHeader" tabindex="0" role="button" aria-expanded="false" aria-controls="BambuCloudBody"
-				 onClick="ToggleBambuSection()">
-				<svg class="SectionChevron" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-					<path d="M4.5 2.5L8 6L4.5 9.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-				</svg>
-				<span class="SectionLabel trans" tid="orca6">Bambu Cloud</span>
-				<span id="BambuStatusDot"></span>
-			</div>
-
-			<div id="BambuCloudBody">
-				<div id="BambuAccount" class="AccountRow AccountRowCompact" tabindex="0" role="button" aria-haspopup="true" aria-expanded="false"
-					 onClick="OnAccountRowClick('bambu')">
-					<span class="AccountAvatar">
-						<img id="BambuAvatarIcon" class="AccountAvatarImg" alt="" onerror="OnAvatarLoadError(this)" />
-					</span>
-					<span class="AccountText">
-						<span id="BambuUserName" class="AccountName"></span>
-						<span class="AccountSecondary trans" tid="orca8">Not signed in</span>
-					</span>
-					<span class="AccountSignIn trans" tid="t26">Login</span>
-					<svg class="AccountChevron" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-						<path d="M3 4.75L6 7.75L9 4.75" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-					</svg>
-				</div>
-
-				<div id="NoPluginTip">
-					<div id="NoPluginText"><a class="RedFont trans" tid="t76">Network plugin not detected. Click </a><a Class="LinkBtn trans" onClick="BeginDownloadNetworkPlugin()" tid="t77">here</a><a class="RedFont trans" tid="t78"> to install it.</a></div>
-				</div>
-			</div>
-		</div>
+		<!-- Unlayered: the Bambu Cloud account panel has been removed. This build has no Bambu
+		     account/cloud surface; Bambu printers are used over LAN only. -->
 
 		<!-- Shared account menu, anchored under the row it was opened from.
 		     The row already carries the avatar, name and provider, so the menu only

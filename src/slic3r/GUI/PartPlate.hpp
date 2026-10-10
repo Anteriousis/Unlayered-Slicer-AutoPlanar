@@ -2,6 +2,7 @@
 #define __part_plate_hpp_
 
 #include <vector>
+#include <optional>
 #include <set>
 #include <array>
 #include <thread>
@@ -22,6 +23,7 @@
 #include "3DScene.hpp"
 #include "GLModel.hpp"
 #include "3DBed.hpp"
+#include "BedMeshOverlay.hpp"
 #include "MeshUtils.hpp"
 #include "libslic3r/ParameterUtils.hpp"
 
@@ -226,6 +228,10 @@ public:
 
     static void update_render_colors();
     static void load_render_colors();
+    // Theme: a user colour for the grid lines of the current plate on one base (nullopt = the
+    // built-in). The plate face itself is the bed model (Bed3D), coloured there.
+    static void set_grid_color_override(bool dark, const std::optional<ColorRGBA>& color);
+    static ColorRGBA plate_line_color(bool dark);
 
     PartPlate();
     PartPlate(PartPlateList *partplate_list, Vec3d origin, int width, int depth, double height, Plater* platerObj, Model* modelObj, bool printable=true, PrinterTechnology tech = ptFFF);
@@ -426,6 +432,10 @@ public:
     bool contains(const GLVolume& v) const;
     bool contains(const BoundingBoxf3& bb) const;
     bool intersects(const BoundingBoxf3& bb) const;
+    // BELT_MOD -- a belt printer with belt_printer_infinite_y: the plate is open along Y for the
+    // containment tests (the drawn plate keeps its shape).
+    bool belt_open_y() const;
+    void open_belt_y(BoundingBoxf3 &box) const { if (this->belt_open_y()) { box.min.y() = -1e5; box.max.y() = 1e5; } }
 
     void render(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_body = false, bool force_background_color = false, HeightLimitMode mode = HEIGHT_LIMIT_NONE, int hover_id = -1, bool render_cali = false, bool show_grid = true);
 
@@ -614,6 +624,8 @@ class PartPlateList : public ObjectBase
     bool m_intialized;
     std::string m_logo_texture_filename;
     GLTexture m_logo_texture;
+    // The printer's probed bed mesh, shared by every plate (each renders it at its own origin).
+    BedMeshOverlay m_bed_mesh_overlay;
     GLTexture m_del_texture;
     GLTexture m_del_hovered_texture;
     GLTexture m_move_front_hovered_texture;
@@ -858,6 +870,7 @@ public:
     void on_change_color_mode(bool is_dark) { m_is_dark = is_dark; }
     void render(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current = false, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true);
     void set_render_option(bool bedtype_texture, bool plate_settings);
+    BedMeshOverlay& bed_mesh_overlay() { return m_bed_mesh_overlay; }
     void set_render_cali(bool value = true) { render_cali_logo = value; }
     void register_raycasters_for_picking(GLCanvas3D& canvas)
     {

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "High contrast light",
+  "base": "light",
+  "colors": {
+    "window_background": "#FFFFFF",
+    "panel_title_strips": "#F0F0F0",
+    "tab_bar": "#000000",
+    "buttons": "#E0E0E0",
+    "input_borders": "#000000",
+    "input_background": "#FFFFFF",
+    "labels": "#000000",
+    "button_input_text": "#000000",
+    "disabled_text": "#505050",
+    "separators": "#000000"
+  },
+  "view_background": "#F4F4F4",
+  "plate_model": "#D0D0D0",
+  "plate_grid": "#8A8A8A",
+  "focus_ring": "#0000FF",
+  "auto_contrast_text": true
+}

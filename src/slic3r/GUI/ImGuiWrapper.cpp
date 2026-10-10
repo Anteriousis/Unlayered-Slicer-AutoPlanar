@@ -166,7 +166,9 @@ const ImVec4 ImGuiWrapper::COL_GREY_DARK         = { 0.333f, 0.333f, 0.333f, 1.0
 const ImVec4 ImGuiWrapper::COL_GREY_LIGHT        = { 0.4f, 0.4f, 0.4f, 1.0f };
 const ImVec4 ImGuiWrapper::COL_ORANGE_DARK       = { 0.757f, 0.404f, 0.216f, 1.0f };
 const ImVec4 ImGuiWrapper::COL_ORANGE_LIGHT      = to_ImVec4(ColorRGBA::ORANGE());
-const ImVec4 ImGuiWrapper::COL_WINDOW_BACKGROUND = { 0.1f, 0.1f, 0.1f, 0.8f };
+const ImVec4 ImGuiWrapper::COL_WINDOW_BACKGROUND_DEFAULT = { 0.1f, 0.1f, 0.1f, 0.8f };
+ImVec4       ImGuiWrapper::COL_WINDOW_BACKGROUND         = ImGuiWrapper::COL_WINDOW_BACKGROUND_DEFAULT;
+bool         ImGuiWrapper::COL_WINDOW_BACKGROUND_THEMED  = false;
 const ImVec4 ImGuiWrapper::COL_BUTTON_BACKGROUND = COL_ORANGE_DARK;
 const ImVec4 ImGuiWrapper::COL_BUTTON_HOVERED    = COL_ORANGE_LIGHT;
 const ImVec4 ImGuiWrapper::COL_BUTTON_ACTIVE     = COL_BUTTON_HOVERED;
@@ -183,13 +185,19 @@ const ImVec4 ImGuiWrapper::COL_SEPARATOR         = { 0.93f, 0.93f, 0.93f, 1.0f }
 const ImVec4 ImGuiWrapper::COL_SEPARATOR_DARK    = { 0.24f, 0.24f, 0.27f, 1.0f };
 const ImVec4 ImGuiWrapper::COL_TITLE_BG          = { 0.745f, 0.745f, 0.745f, 1.0f };
 const ImVec4 ImGuiWrapper::COL_WINDOW_BG         = { 1.000f, 1.000f, 1.000f, 1.0f };
-const ImVec4 ImGuiWrapper::COL_WINDOW_BG_DARK    = { 45 / 255.f, 45 / 255.f, 49 / 255.f, 1.f };
-const ImVec4 ImGuiWrapper::COL_TOOLBAR_BG        = { 250 / 255.f, 250 / 255.f, 250 / 255.f, 1.f }; // ORCA color matches with toolbar_background.png
-const ImVec4 ImGuiWrapper::COL_TOOLBAR_BG_DARK   = { 57  / 255.f, 60  / 255.f, 66  / 255.f, 1.f }; // ORCA color matches with toolbar_background_dark.png
-const ImVec4 ImGuiWrapper::COL_ORCA              = to_ImVec4(ColorRGBA::ORCA());
-const ImVec4 ImGuiWrapper::COL_ORCA_DARK         = { 0.f       , 103 / 255.f, 91  / 255.f, 1.f };
-const ImVec4 ImGuiWrapper::COL_ORCA_HOVER        = { 38 / 255.f, 166 / 255.f, 154 / 255.f, 1.f };
-const ImVec4 ImGuiWrapper::COL_ORCA_HOVER_DARK   = { 0.f       , 129 / 255.f, 114  / 255.f, 1.f };
+ImVec4 ImGuiWrapper::COL_WINDOW_BG_DARK          = { 35 / 255.f, 35 / 255.f, 39 / 255.f, 1.f }; // #232327, the dark window row of gDarkColors
+const ImVec4 ImGuiWrapper::COL_TOOLBAR_BG_DEFAULT      = { 250 / 255.f, 250 / 255.f, 250 / 255.f, 1.f }; // ORCA color matches with toolbar_background.png
+const ImVec4 ImGuiWrapper::COL_TOOLBAR_BG_DARK_DEFAULT = { 57  / 255.f, 60  / 255.f, 66  / 255.f, 1.f }; // ORCA color matches with toolbar_background_dark.png
+ImVec4 ImGuiWrapper::COL_TOOLBAR_BG      = ImGuiWrapper::COL_TOOLBAR_BG_DEFAULT;
+ImVec4 ImGuiWrapper::COL_TOOLBAR_BG_DARK = ImGuiWrapper::COL_TOOLBAR_BG_DARK_DEFAULT;
+const ImVec4 ImGuiWrapper::COL_ORCA_DEFAULT            = to_ImVec4(ColorRGBA::ORCA());
+const ImVec4 ImGuiWrapper::COL_ORCA_DARK_DEFAULT       = { 0.f       , 103 / 255.f, 91  / 255.f, 1.f };
+const ImVec4 ImGuiWrapper::COL_ORCA_HOVER_DEFAULT      = { 38 / 255.f, 166 / 255.f, 154 / 255.f, 1.f };
+const ImVec4 ImGuiWrapper::COL_ORCA_HOVER_DARK_DEFAULT = { 0.f       , 129 / 255.f, 114  / 255.f, 1.f };
+ImVec4 ImGuiWrapper::COL_ORCA            = ImGuiWrapper::COL_ORCA_DEFAULT;
+ImVec4 ImGuiWrapper::COL_ORCA_DARK       = ImGuiWrapper::COL_ORCA_DARK_DEFAULT;
+ImVec4 ImGuiWrapper::COL_ORCA_HOVER      = ImGuiWrapper::COL_ORCA_HOVER_DEFAULT;
+ImVec4 ImGuiWrapper::COL_ORCA_HOVER_DARK = ImGuiWrapper::COL_ORCA_HOVER_DARK_DEFAULT;
 const ImVec4 ImGuiWrapper::COL_MODIFIED          = { 253.f / 255.f, 111.f / 255.f, 40.f / 255.f, 1}; // ORCA same color with m_color_label_modified
 const ImVec4 ImGuiWrapper::COL_WARNING           = to_ImVec4(ColorRGB::WARNING());
 
@@ -350,6 +358,19 @@ bool button_with_pos(ImTextureID user_texture_id, const ImVec2 &size, const ImVe
     return pressed;
 }
 
+bool  ImGuiWrapper::s_opaque_overlays   = false;
+float ImGuiWrapper::s_font_scale        = 1.0f;
+int  ImGuiWrapper::s_text_shadow_depth = 0;
+
+void ImGuiWrapper::set_opaque_overlays(bool opaque)
+{
+    s_opaque_overlays = opaque;
+    init_style(); // the default window background carries the alpha
+}
+
+ImGuiWrapper::ScopedTextShadow::ScopedTextShadow() { ++s_text_shadow_depth; }
+ImGuiWrapper::ScopedTextShadow::~ScopedTextShadow() { --s_text_shadow_depth; }
+
 ImGuiWrapper::ImGuiWrapper()
 {
     ImGui::CreateContext();
@@ -458,7 +479,7 @@ void ImGuiWrapper::set_display_size(float w, float h)
 
 void ImGuiWrapper::set_scaling(float font_size, float scale_style, float scale_both)
 {
-    font_size *= scale_both;
+    font_size *= scale_both * s_font_scale;
     scale_style *= scale_both;
 
     if (m_font_size == font_size && m_style_scaling == scale_style) {
@@ -536,6 +557,10 @@ void ImGuiWrapper::new_frame()
 
     if (m_font_texture == 0) {
         init_font(true);
+    }
+    if (m_style_refresh_pending) {
+        m_style_refresh_pending = false;
+        init_style();
     }
 
     ImGuiIO& io = ImGui::GetIO();
@@ -1057,6 +1082,13 @@ bool ImGuiWrapper::bbl_sliderin(const char *label, int *v, int v_min, int v_max,
 
 void ImGuiWrapper::text(const char *label)
 {
+    if (s_text_shadow_depth > 0 && !s_opaque_overlays) {
+        const ImVec2 pos        = ImGui::GetCursorScreenPos();
+        const ImVec4 col        = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        const bool   light_text = 0.2126f * col.x + 0.7152f * col.y + 0.0722f * col.z > 0.5f;
+        ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x + 1.0f, pos.y + 1.0f),
+                                            light_text ? IM_COL32(0, 0, 0, 170) : IM_COL32(255, 255, 255, 170), label);
+    }
     ImGui::Text("%s", label);
 }
 
@@ -2600,7 +2632,7 @@ void ImGuiWrapper::push_toolbar_style(const float scale)
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(238 / 255.0f, 238 / 255.0f, 238 / 255.0f, 1.00f));  // 10
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(238 / 255.0f, 238 / 255.0f, 238 / 255.0f, 0.00f));        // 11
         ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, COL_GREEN_LIGHT);                                     // 12
-        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));//13
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(50 / 255.0f, 58 / 255.0f, 61 / 255.0f, 1.00f)); // 13 -- text colour: white vanished on the white window
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0.42f, 0.42f, 0.42f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
@@ -2683,7 +2715,7 @@ void ImGuiWrapper::push_common_window_style(const float scale) {
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(238 / 255.0f, 238 / 255.0f, 238 / 255.0f, 1.00f)); // 9
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(238 / 255.0f, 238 / 255.0f, 238 / 255.0f, 1.00f));  // 10
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(238 / 255.0f, 238 / 255.0f, 238 / 255.0f, 0.00f));        // 11
-        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));                           // 12
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(50 / 255.0f, 58 / 255.0f, 61 / 255.0f, 1.00f));  // 12 -- text colour, see push_toolbar_style
         ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImGuiWrapper::COL_GREEN_LIGHT);                           // 13
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.463f, 0.463f, 0.463f, 1.00f));                       // 14
     }
@@ -3113,8 +3145,10 @@ void ImGuiWrapper::init_style()
     //BBS modify style
     // Window
     style.WindowRounding = 0.0f;
-    set_color(ImGuiCol_WindowBg, COL_WINDOW_BACKGROUND);
-    set_color(ImGuiCol_TitleBgActive, COL_WINDOW_BACKGROUND);
+    ImVec4 window_bg = COL_WINDOW_BACKGROUND;
+    window_bg.w      = overlay_alpha(window_bg.w);
+    set_color(ImGuiCol_WindowBg, window_bg);
+    set_color(ImGuiCol_TitleBgActive, window_bg);
 
     // Generics
     set_color(ImGuiCol_FrameBg, COL_GREY_DARK);

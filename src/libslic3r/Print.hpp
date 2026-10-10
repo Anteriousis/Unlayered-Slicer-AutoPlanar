@@ -4,9 +4,12 @@
 #include "PrintBase.hpp"
 #include "Fill/FillAdaptive.hpp"
 #include "Fill/FillLightning.hpp"
+#include "PreSliceInfillStructures.hpp"
 
 #include "BoundingBox.hpp"
 #include "CutPlaneSegmentation.hpp"
+#include "Support/SupportDirection.hpp"
+#include "BeltBrim.hpp"   // BELT_MOD
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"
 #include "Point.hpp"
@@ -378,6 +381,15 @@ public:
     bool  is_root_segment() const  { return ! m_segment || m_segment->is_root(); }
     int   segment_index() const    { return m_segment ? m_segment->index : -1; }
     const std::optional<CutSegmentDescriptor>& segment() const { return m_segment; }
+    // How far up its build axis (instance frame, same measure as the descriptor's build_z_*) this
+    // segment slices: its own material, or higher where a later segment's cut face rises above it
+    // and the column carrying that segment must be printed here in otherwise empty layers. The
+    // slack leaves room for a demand contact to sit flush under the ceiling plus the support gap.
+    double segment_slice_top() const;
+    // The slack above support_z_max that segment_slice_top() adds: zero for a segment with no
+    // ceiling (nothing ever lands on it), else the support gap plus two of the tallest layers the
+    // schedule may use, so the flush demand contact below a ceiling has layers to sit in.
+    double segment_support_slack() const;
 
     // Declarative cut planes: support demand handed UP from this segment's children -- the load a
     // child could not carry to its own floor, expressed in THIS object's slice frame and indexed
@@ -385,10 +397,29 @@ public:
     // support generation and never serialized, so it is not part of the step state or the project
     // file. Empty for ordinary objects and for leaf segments.
     const std::vector<Polygons>& segment_support_demand() const { return m_segment_support_demand; }
-    void                         clear_segment_support_demand() { m_segment_support_demand.clear(); }
+    // The same, for the child's BODY: its material over this segment's empty space. Kept apart
+    // from support-on-support demand because the column under it must keep the normal top Z
+    // distance to the model, while a column under the child's support ends flush with the plane
+    // (and may reach past it by support_section_overlap).
+    const std::vector<Polygons>& segment_body_demand() const { return m_segment_body_demand; }
+    bool                         has_segment_demand() const { return ! m_segment_support_demand.empty() || ! m_segment_body_demand.empty(); }
+    // Union of both kinds at the first layer: what a floating segment or a below-floor extension
+    // has to carry down regardless of kind.
+    Polygons                     segment_demand_first_layer() const;
+    // The support-on-support column at height print_z: the support demand of the object layer
+    // whose slab contains it (the column only grows downward, so that layer's column covers every
+    // support layer within it). Empty when there is none.
+    Polygons                     segment_support_column_at(double print_z) const;
+
+    // UNLAYERED_MOD -- the support lean in effect WHILE this object's support is being generated
+    // (the layers are sheared for that duration, see Support/SupportDirection.hpp). Inactive at any
+    // other time, so readers outside support generation always see plain slice-frame geometry.
+    const SupportLean&           support_lean() const { return m_support_lean; }
+    void                         clear_segment_support_demand() { m_segment_support_demand.clear(); m_segment_body_demand.clear(); }
     // Union in one child's contribution. A parent may have several children (the partition is a
     // tree, not a stack), so this accumulates -- the old single-chunk cascade could assign.
     void                         add_segment_support_demand(const std::vector<Polygons> &demand);
+    void                         add_segment_body_demand(const std::vector<Polygons> &demand);
 
     // Declarative cut planes: where this segment's layer schedule was cut out of the FULL object
     // schedule, in the object's own build coordinates. A segment's layer print_z is rebased to its
@@ -397,9 +428,52 @@ public:
     // Zero for an ordinary object. Exact for a segment building along +Z; for a tilted segment a
     // slice plane covers a span of object heights and this is its representative height.
     double                       segment_schedule_base() const { return m_segment_schedule_base; }
+    // BELT_MOD -- belt schedule. This object's slice frame is raised by this much, so that print_z
+    // measures the same belt position for every object on the belt and the by-layer merge prints
+    // them in belt order (Print::update_belt_schedule()). 0 for the object whose lowest point leads.
+    double                       belt_schedule_offset() const { return m_belt_schedule_offset; }
+    // BBS: the probe behind the "needs support" warning (public so tests can ask it directly).
+    SupportNecessaryType         is_support_necessary();
+    // BELT_MOD -- belt brim (BeltBrim.cpp): bands laid on the belt over many layers, generated in
+    // posSupportMaterial and stored per object layer, plus an apron prologue of brim-only bands
+    // printed BELOW the object's first layer. Object-local slice frame, like the object's extrusions.
+    bool                         has_belt_brim() const;
+    unsigned int                 belt_brim_filament() const;          // 1-based, like outer_wall_filament_id
+    bool                         belt_brim_instances_compatible() const;
+    const std::vector<ExtrusionEntityCollection>& belt_brim_by_layer()       const { return m_belt_brim_by_layer; }
+    const std::vector<ExPolygons>&                belt_brim_areas_by_layer() const { return m_belt_brim_areas_by_layer; }
+    const std::vector<BeltBrimBand>&              belt_brim_prologue()       const { return m_belt_brim_prologue; }
+    void                         clear_belt_brim();
+    void                         set_belt_brim(std::vector<ExtrusionEntityCollection> &&by_layer,
+                                               std::vector<ExPolygons>                &&areas,
+                                               std::vector<BeltBrimBand>              &&prologue);
+    // BELT_MOD -- on a belt every instance is its own PrintObject (its offset depends on where it
+    // sits along the belt); this key, the ModelInstance's id, keeps it distinct across applies.
+    size_t                       belt_instance_key() const { return m_belt_instance_key; }
     // The B/C angles this object slices under: the per-object config for ordinary objects, the
     // segment's build normal (root: exactly 0/0) for cut-plane segments.
     void  effective_layer_rotation_bc(double &b_deg, double &c_deg) const;
+    // UNLAYERED_MOD -- horizontal run this object's tilt is measured over, in mm: the segment's own
+    // build_reach_max, or the whole footprint for a legacy per-object chunk. Feeds the gantry term
+    // of virtual_tilt_limit_deg().
+    double effective_build_reach() const;
+    // BELT_MOD -- this object's build direction in the world frame (a segment's stored normal
+    // through the instance's inverse transpose, or the per-object B/C for an ordinary object).
+    Vec3d build_normal_world() const;
+    // BELT_MOD -- true when this object's support must terminate on a plane that is NOT its
+    // slice-frame z = 0: a non-root cut-plane segment (rests on a tilted cut face), any object on
+    // a belt printer (rests on the belt, which the belt tilt turns into a tilted plane in the
+    // slice frame), or an ordinary object whose layer_rotation_b/c tilts its slice frame (rests on
+    // the plate, tilted in that frame the same way). The support generators use it wherever they
+    // used "non-root segment" to mean "the floor is tilted", and the G-code stage un-rotates such
+    // support like the object.
+    bool  support_floor_is_tilted() const;
+    // BELT_MOD -- the build plate (world z = 0) as a plane in this object's slice frame, in the
+    // form n . (x, y, print_z) + k >= 0 for material above the plate, with XY in plate coordinates
+    // and the lowest-sitting instance folded into k. Factored out of PrintObject::slice_volumes(),
+    // which clips layers with it, so SegmentSupportBounds can use the identical plane for a belt
+    // object's support floor.
+    void  bed_plane_in_slice_frame(Vec3d &n_bed, double &k_bed) const;
 
 
     const PrintInstances&        instances() const      { return m_instances; }
@@ -549,6 +623,7 @@ public:
   private:
     // to be called from Print only.
     friend class Print;
+    friend class ScopedSupportShear;
 
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
 	~PrintObject();
@@ -596,6 +671,11 @@ private:
     std::vector<std::set<int>> detect_extruder_geometric_unprintables() const;
 
     void slice_volumes();
+    // BELT_MOD -- belt purge prism: drop the layers above z once no toolchange needs them (the prism
+    // stops at the last colour swap), reversibly, since a wipe-tower-only invalidation replans
+    // without reslicing. See BeltPurge.cpp.
+    size_t belt_truncate_layers_above(coordf_t z);
+    void   belt_restore_truncated_layers();
     //BBS
     ExPolygons _shrink_contour_holes(double contour_delta, double hole_delta, const ExPolygons& polys) const;
     // BBS
@@ -611,14 +691,28 @@ private:
     void bridge_over_infill();
     void clip_fill_surfaces();
     void discover_horizontal_shells();
+    // Orca: wave-overhang floor-layer authority — runs after all surface-classification
+    // passes to authoritatively set surface types within the wave shadow (N=0 => all
+    // stInternal; N>=1 => N layers of uniform stInternalSolid above each wave strip).
+    void apply_wave_overhang_floor_layer_authority();
+    // Orca: wave-overhang bridge suppression — when wave_overhangs_instead_of_bridges
+    // is true, reclassify any stBottomBridge / stInternalBridge surfaces inside the
+    // overhang region to stInternalSolid so residuals (small pockets the wave
+    // generator couldn't grow into) print as solid infill instead of bridge pattern.
+    void apply_wave_overhang_bridge_suppression();
+    // Orca: tag perimeter ExtrusionPaths in wave-overhang layers and floor layers above
+    // so the G-code stage applies wave_overhang_perimeter_speed (wave layers) or
+    // wave_overhang_floor_perimeter_speed (floor layers) to those walls.
+    void tag_wave_overhang_perimeters();
     void combine_infill();
     void _generate_support_material();
     std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> prepare_adaptive_infill_data(
         const std::vector<std::pair<const Surface*, float>>& surfaces_w_bottom_z) const;
     FillLightning::GeneratorPtr prepare_lightning_infill_data();
-
-    // BBS
-    SupportNecessaryType is_support_necessary();
+    // Writes m_pre_slice_infill_structures.mesh_infill; skips regeneration
+    // when the mesh-relevant inputs are unchanged since the last slice
+    // (m_mesh_infill_cache_key).
+    void prepare_mesh_infill_data();
 
     // XYZ in scaled coordinates
     Vec3crd									m_size;
@@ -638,8 +732,15 @@ private:
     std::optional<CutSegmentDescriptor> m_segment;
     // See segment_support_demand(). Transient, per-layer, this object's slice frame.
     std::vector<Polygons>               m_segment_support_demand;
+    // See segment_body_demand().
+    std::vector<Polygons>               m_segment_body_demand;
+    // See support_lean(). Set and cleared by ScopedSupportShear only.
+    SupportLean                         m_support_lean;
     // See segment_schedule_base().
     double                              m_segment_schedule_base { 0. };
+    // BELT_MOD -- see belt_schedule_offset() / belt_instance_key().
+    double                              m_belt_schedule_offset { 0. };
+    size_t                              m_belt_instance_key { 0 };
 
     // Slic3r::Point objects in scaled G-code coordinates
     std::vector<PrintInstance>              m_instances;
@@ -653,6 +754,11 @@ private:
 
     SlicingParameters                       m_slicing_params;
     LayerPtrs                               m_layers;
+    LayerPtrs                               m_belt_truncated_layers;   // BELT_MOD, see belt_truncate_layers_above
+    // BELT_MOD -- belt brim, see has_belt_brim().
+    std::vector<ExtrusionEntityCollection>  m_belt_brim_by_layer;
+    std::vector<ExPolygons>                 m_belt_brim_areas_by_layer;
+    std::vector<BeltBrimBand>               m_belt_brim_prologue;
     SupportLayerPtrs                        m_support_layers;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
@@ -661,8 +767,9 @@ private:
     // so that next call to make_perimeters() performs a union() before computing loops
     bool                    				m_typed_slices = false;
 
-    std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> m_adaptive_fill_octrees;
-    FillLightning::GeneratorPtr m_lightning_generator;
+    PreSliceInfillStructures m_pre_slice_infill_structures;
+    // Session cache key for mesh_infill (see prepare_mesh_infill_data).
+    std::string              m_mesh_infill_cache_key;
 
     std::vector < VolumeSlices >            firstLayerObjSliceByVolume;
     std::vector<groupedVolumeSlices>        firstLayerObjSliceByGroups;
@@ -1054,6 +1161,8 @@ public:
 
     const PrintConfig&          config() const { return m_config; }
     const PrintObjectConfig&    default_object_config() const { return m_default_object_config; }
+    // UNLAYERED_MOD -- see PrintApply.cpp: an object with its own B/C rotation gets one PrintObject per instance.
+    bool                        object_slices_rotated(const ModelObject &model_object) const;
     const PrintRegionConfig& default_region_config() const { return m_default_region_config; }
     ConstPrintObjectPtrsAdaptor objects() const { return ConstPrintObjectPtrsAdaptor(&m_objects); }
     PrintObject*                get_object(size_t idx) { return const_cast<PrintObject*>(m_objects[idx]); }
@@ -1107,6 +1216,12 @@ public:
 
     // Wipe tower support.
     bool                        has_wipe_tower() const;
+    // BELT_MOD -- the belt purge prism, the belt replacement for the wipe tower (BeltPurge.cpp).
+    bool                        has_belt_purge_tower() const;
+    // BELT_MOD -- belt brim (BeltBrim.cpp): any object lays a brim onto the belt.
+    bool                        has_belt_brim() const;
+    // A belt tilted enough that the belt plane, not the bed plane, is the adhesion surface.
+    bool                        has_tilted_belt() const;
     const WipeTowerData&        wipe_tower_data(size_t filaments_cnt = 0) const;
     const ToolOrdering& 		tool_ordering() const { return m_tool_ordering; }
 
@@ -1363,12 +1478,15 @@ private:
 
     // Declarative cut planes: the segments derived from one ModelObject under one effective
     // instance transform form a FAMILY. Support inside a family must be generated child-first,
-    // because a child hands the load it cannot carry down to its parent, so the returned families
-    // are ordered deepest-first (an explicit postorder over the segment.parent graph). Ordinary
-    // objects and objects with no cut planes are never returned.
+    // because a segment hands the load it cannot carry down to every segment printed before it,
+    // so the returned families are ordered deepest-first (descending segment index, a valid
+    // postorder over the segment.parent graph). Ordinary objects and objects with no cut planes
+    // are never returned.
     std::vector<std::vector<PrintObject*>> segment_families() const;
-    // The PrintObject holding this segment's parent, or nullptr for a root/ordinary object.
-    PrintObject*        segment_parent_of(const PrintObject *object) const;
+    // Every segment of `object`'s family printed BEFORE it (lower segment index): the segments its
+    // support column can pass through on the way to the bed, and therefore the ones whose support
+    // depends on it. Empty for the root and for ordinary objects.
+    std::vector<PrintObject*> segments_below(const PrintObject *object) const;
     // Generate support for one family child-first, transferring each child's unsupported footprint
     // to its parent in between. PrintObject::generate_support_material() is private to PrintObject
     // and Print is its friend, which is why this lives here.
@@ -1376,6 +1494,7 @@ private:
 
     void                _make_skirt();
     void                _make_wipe_tower();
+    void                _plan_belt_purge();   // BELT_MOD
     void                finalize_first_layer_convex_hull();
     void                update_filament_self_index_cache();
     // Deduplicates, per filament, the (extruder type x volume type) variants the grouping
@@ -1465,6 +1584,8 @@ private:
     int     m_modified_count {0};
     //BBS
     ConflictResultOpt m_conflict_result;
+    // BELT_MOD -- recompute every object's belt_schedule_offset(); true when a slice was invalidated.
+    bool update_belt_schedule();
     FakeWipeTower     m_fake_wipe_tower;
     bool              m_has_auto_filament_map_result{false};
     

@@ -72,6 +72,7 @@ private:
     void mouseDown(wxMouseEvent& event);
     void mouseReleased(wxMouseEvent& event);
     void mouseCaptureLost(wxMouseCaptureLostEvent& event);
+    void keyDown(wxKeyEvent& event);
     int  hit_test_selection(const wxPoint& point) const;
     wxRect thumb_rect_for(int selection) const;
     void update_tooltip();

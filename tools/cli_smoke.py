@@ -60,7 +60,10 @@ CASES = [
         "object resting on the bed",
         lambda p: write_cube_stl(p, 0.0, 10.0),
         ["--info"],
-        "control for the case above: this one never took the sinking branch",
+        # Also pins PartPlate::belt_open_y(): check_outside() asks it for every instance, and it
+        # reads the printer preset through wxGetApp(), which has no wxApp behind it in CLI mode.
+        # The guard on m_plater (null headlessly) is what keeps this from segfaulting.
+        "control for the case above: this one never took the sinking branch; also the belt guard",
     ),
     (
         "sinking object, arrange forced on",

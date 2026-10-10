@@ -1113,8 +1113,14 @@ void MachineObject::parse_home_flag(int flag)
         m_fila_system->GetAmsSystemSetting().SetDetectRemainEnabled(((flag >> 7) & 0x1) != 0);
     }
 
-   // sdcard_state = MachineObject::SdcardState(get_flag_bits(flag, 8, 2));
-   m_storage->set_sdcard_state(get_flag_bits(flag, 8, 2));
+   // Unlayered: home_flag bits 8-9 are not a reliable SD indicator on current P1S firmware -- they
+   // read 0 while the status "sdcard" boolean reports true. DevStorage::ParseV1_0 has just set the
+   // authoritative state from that boolean (DeviceManager.cpp parse, immediately before this call),
+   // so only let home_flag PROMOTE to a present state; never let a 0 here clobber a good reading
+   // back to NO_SDCARD, which was blocking LAN prints with "Storage needs to be inserted".
+   const int home_flag_sdcard = get_flag_bits(flag, 8, 2);
+   if (home_flag_sdcard != DevStorage::NO_SDCARD)
+       m_storage->set_sdcard_state(home_flag_sdcard);
 
 
     if (time(nullptr) - ams_switch_filament_start > HOLD_TIME_3SEC)

@@ -191,6 +191,12 @@ ColorRGBA Bed3D::AXIS_X_COLOR = ColorRGBA::X();
 ColorRGBA Bed3D::AXIS_Y_COLOR = ColorRGBA::Y();
 ColorRGBA Bed3D::AXIS_Z_COLOR = ColorRGBA::Z();
 
+static std::optional<ColorRGBA> s_model_override[2]; // [dark theme]
+
+void Bed3D::set_model_color_override(bool dark, const std::optional<ColorRGBA>& color) { s_model_override[dark ? 1 : 0] = color; }
+
+ColorRGBA Bed3D::model_color(bool dark) { return s_model_override[dark ? 1 : 0].value_or(dark ? DEFAULT_MODEL_COLOR_DARK : DEFAULT_MODEL_COLOR); }
+
 void Bed3D::update_render_colors()
 {
     Bed3D::AXIS_X_COLOR = ImGuiWrapper::from_ImVec4(RenderColor::colors[RenderCol_Axis_X]);
@@ -385,7 +391,7 @@ void Bed3D::render_internal(GLCanvas3D& canvas, const Transform3d& view_matrix, 
 
     glsafe(::glEnable(GL_DEPTH_TEST));
 
-    m_model.set_color(m_is_dark ? DEFAULT_MODEL_COLOR_DARK : DEFAULT_MODEL_COLOR);
+    m_model.set_color(model_color(m_is_dark));
 
     switch (m_type)
     {
@@ -676,7 +682,7 @@ void Bed3D::render_model(const Transform3d& view_matrix, const Transform3d& proj
         return;
 
     if (m_model.get_filename() != m_model_filename && m_model.init_from_file(m_model_filename)) {
-        m_model.set_color(m_is_dark ? DEFAULT_MODEL_COLOR_DARK : DEFAULT_MODEL_COLOR);
+        m_model.set_color(model_color(m_is_dark));
 
         update_model_offset();
 
@@ -751,7 +757,7 @@ void Bed3D::render_default(bool bottom, const Transform3d& view_matrix, const Tr
         if (m_model.get_filename().empty() && !bottom) {
             // draw background
             glsafe(::glDepthMask(GL_FALSE));
-            ColorRGBA color = m_is_dark ? DEFAULT_MODEL_COLOR_DARK : DEFAULT_MODEL_COLOR;   // ORCA add dark mode support
+            ColorRGBA color = model_color(m_is_dark);   // ORCA add dark mode support
             color = ColorRGBA(color[0] * 0.8f, color[1] * 0.8f,color[2] * 0.8f, color[3]);  // ORCA shift color a darker tone to fix difference between flat / gouraud_light shader
             m_triangles.set_color(color);
             m_triangles.render();

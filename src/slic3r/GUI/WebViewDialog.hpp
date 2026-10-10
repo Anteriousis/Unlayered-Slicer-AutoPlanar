@@ -108,6 +108,11 @@ public:
 private:
 
     wxWebView* m_browser;
+public:
+    // The theme's window, label, disabled-text and separator colours as a style element on
+    // the page (only the roles the theme sets); with none set the element is empty.
+    void apply_theme_style();
+private:
     wxButton *  m_button_stop;
     wxTextCtrl *m_url;
 #if !BBL_RELEASE_TO_PUBLIC

@@ -88,66 +88,60 @@ Slic3r::ColorRGBA adjust_color_for_rendering(const Slic3r::ColorRGBA &colors)
         return colors;
 }
 
-Slic3r::ColorRGBA cut_segment_color(size_t idx)
+// UNLAYERED_MOD -- float HSV round trip for the chunk gradient below (Color.cpp keeps its own pair
+// file-static). h in [0, 360), s and v in [0, 1].
+static void chunk_rgb_to_hsv(float r, float g, float b, float &h, float &s, float &v)
 {
-    // The 16 ORCA filament palette colors (see Plater::get_next_color_for_filament — that function
-    // is stateful and must not be called here), pre-decoded to linear floats.
-    static constexpr size_t N = 16;
-    static const std::array<Slic3r::ColorRGBA, N> palette = { {
-        { 0x00 / 255.f, 0xC1 / 255.f, 0xAE / 255.f, 1.f }, // #00C1AE
-        { 0xF4 / 255.f, 0xE2 / 255.f, 0xC1 / 255.f, 1.f }, // #F4E2C1
-        { 0xED / 255.f, 0x1C / 255.f, 0x24 / 255.f, 1.f }, // #ED1C24
-        { 0x00 / 255.f, 0xFF / 255.f, 0x7F / 255.f, 1.f }, // #00FF7F
-        { 0xF2 / 255.f, 0x67 / 255.f, 0x22 / 255.f, 1.f }, // #F26722
-        { 0xFF / 255.f, 0xEB / 255.f, 0x31 / 255.f, 1.f }, // #FFEB31
-        { 0x78 / 255.f, 0x41 / 255.f, 0xCE / 255.f, 1.f }, // #7841CE
-        { 0x11 / 255.f, 0x58 / 255.f, 0x77 / 255.f, 1.f }, // #115877
-        { 0xED / 255.f, 0x1E / 255.f, 0x79 / 255.f, 1.f }, // #ED1E79
-        { 0x2E / 255.f, 0xBD / 255.f, 0xEF / 255.f, 1.f }, // #2EBDEF
-        { 0x34 / 255.f, 0x5B / 255.f, 0x2F / 255.f, 1.f }, // #345B2F
-        { 0x80 / 255.f, 0x00 / 255.f, 0x80 / 255.f, 1.f }, // #800080
-        { 0xFA / 255.f, 0x81 / 255.f, 0x73 / 255.f, 1.f }, // #FA8173
-        { 0x80 / 255.f, 0x00 / 255.f, 0x00 / 255.f, 1.f }, // #800000
-        { 0xF7 / 255.f, 0xB7 / 255.f, 0x63 / 255.f, 1.f }, // #F7B763
-        { 0xA4 / 255.f, 0xC4 / 255.f, 0x1E / 255.f, 1.f }, // #A4C41E
-    } };
-    if (idx < N)
-        return adjust_color_for_rendering(palette[idx]);
+    const float mx = std::max({ r, g, b });
+    const float mn = std::min({ r, g, b });
+    const float d  = mx - mn;
+    v = mx;
+    s = mx > 0.f ? d / mx : 0.f;
+    if (d <= 0.f)
+        h = 0.f;
+    else if (mx == r)
+        h = 60.f * std::fmod((g - b) / d + 6.f, 6.f);
+    else if (mx == g)
+        h = 60.f * ((b - r) / d + 2.f);
+    else
+        h = 60.f * ((r - g) / d + 4.f);
+}
 
-    // Past the curated palette the old code wrapped (idx % N), so section 16 was drawn in section
-    // 0's colour -- and two sections meeting at a cut plane could end up identical. Generate
-    // further colours instead: hues come from a bit-reversed (van der Corput) sequence so that
-    // consecutively numbered sections land far apart on the wheel, and three saturation/value
-    // bands separate hues that eventually come close. All integer arithmetic, so a section's
-    // colour is bit-identical on every platform -- which is what keeps the Prepare tab and the
-    // G-code preview (which calls this same function) in lockstep.
-    const unsigned k = unsigned(idx - N);
-    const unsigned seq = k / 3u;
-    unsigned rev = 0;
-    for (int bit = 0; bit < 10; ++ bit)
-        rev = (rev << 1) | ((seq >> bit) & 1u);
-    const unsigned h = (rev * 360u) >> 10;          // 0..359
-    static constexpr unsigned char band_s[3] = { 255, 190, 255 };
-    static constexpr unsigned char band_v[3] = { 235, 255, 165 };
-    const unsigned s = band_s[k % 3u];
-    const unsigned v = band_v[k % 3u];
-
-    // Integer HSV -> RGB.
-    const unsigned region = h / 60u;
-    const unsigned rem    = (h - region * 60u) * 255u / 60u;   // 0..254 within the sector
-    const unsigned p = (v * (255u - s)) / 255u;
-    const unsigned q = (v * (255u - (s * rem) / 255u)) / 255u;
-    const unsigned t = (v * (255u - (s * (255u - rem)) / 255u)) / 255u;
-    unsigned r = 0, g = 0, b = 0;
-    switch (region) {
-    case 0:  r = v; g = t; b = p; break;
-    case 1:  r = q; g = v; b = p; break;
-    case 2:  r = p; g = v; b = t; break;
-    case 3:  r = p; g = q; b = v; break;
-    case 4:  r = t; g = p; b = v; break;
-    default: r = v; g = p; b = q; break;
+static Slic3r::ColorRGBA chunk_hsv_to_rgba(float h, float s, float v)
+{
+    const float c = v * s;
+    const float x = c * (1.f - std::abs(std::fmod(h / 60.f, 2.f) - 1.f));
+    const float m = v - c;
+    float r = 0.f, g = 0.f, b = 0.f;
+    switch (int(h / 60.f) % 6) {
+    case 0:  r = c; g = x; break;
+    case 1:  r = x; g = c; break;
+    case 2:  g = c; b = x; break;
+    case 3:  g = x; b = c; break;
+    case 4:  r = x; b = c; break;
+    default: r = c; b = x; break;
     }
-    return adjust_color_for_rendering({ r / 255.f, g / 255.f, b / 255.f, 1.f });
+    return { r + m, g + m, b + m, 1.f };
+}
+
+Slic3r::ColorRGBA cut_segment_color(size_t idx, size_t count, const Slic3r::ColorRGBA &filament)
+{
+    // Chunk 0 (the root, printed first) is the filament's own colour; the last chunk is the same
+    // hue at 25% saturation, and the chunks between step evenly in print order. Saturation is the
+    // only thing that moves, so the part still reads as its filament and the fade reads as order.
+    static constexpr float END_SATURATION = 0.25f;
+    // Below this much saturation to spend there is nothing visible to fade through -- white, grey
+    // and black filaments have no hue -- so those fade in brightness instead, towards mid grey.
+    static constexpr float MIN_SATURATION_SPAN = 0.15f;
+
+    float h = 0.f, s = 0.f, v = 0.f;
+    chunk_rgb_to_hsv(filament.r(), filament.g(), filament.b(), h, s, v);
+    const float t = count > 1 ? float(std::min(idx, count - 1)) / float(count - 1) : 0.f;
+    if (s - END_SATURATION >= MIN_SATURATION_SPAN)
+        s += (END_SATURATION - s) * t;
+    else
+        v += ((v > 0.5f ? 0.5f * v : 0.5f + 0.5f * v) - v) * t;
+    return adjust_color_for_rendering(chunk_hsv_to_rgba(h, s, v));
 }
 
 namespace Slic3r {
@@ -221,6 +215,7 @@ ColorRGBA GLVolume::MODEL_MIDIFIER_COL   = {1.0f, 1.0f, 0.0f, 0.6f};
 ColorRGBA GLVolume::MODEL_NEGTIVE_COL    = {0.3f, 0.3f, 0.3f, 0.4f};
 ColorRGBA GLVolume::SUPPORT_ENFORCER_COL = {0.3f, 0.3f, 1.0f, 0.4f};
 ColorRGBA GLVolume::SUPPORT_BLOCKER_COL  = {1.0f, 0.3f, 0.3f, 0.4f};
+ColorRGBA GLVolume::INFILL_MESH_COL      = {1.0f, 0.75f, 0.2f, 0.4f};
 
 ColorRGBA GLVolume::MODEL_HIDDEN_COL  = {0.f, 0.f, 0.f, 0.3f};
 
@@ -435,6 +430,8 @@ ColorRGBA color_from_model_volume(const ModelVolume& model_volume)
         return GLVolume::SUPPORT_BLOCKER_COL;
     else if (model_volume.is_support_enforcer())
         return GLVolume::SUPPORT_ENFORCER_COL;
+    else if (model_volume.is_infill_mesh())
+        return GLVolume::INFILL_MESH_COL;
     return color;
 }
 
@@ -811,7 +808,9 @@ void GLVolume::render_cut_chunks() const
         GUI::GLModel& m = cut_chunk_preview->models[i];
         if (!m.is_initialized())
             continue;
-        ColorRGBA c = adjust_color_for_rendering(cut_segment_color(i));
+        // `color` is this part's filament colour (update_colors_by_extruder); the owner is the
+        // object's first model part, so a multi-filament object fades from its first part's filament.
+        ColorRGBA c = cut_segment_color(i, cut_chunk_preview->models.size(), color);
         if (selected)
             c = brighten_color(c, 1.25f);
         if (force_transparent)

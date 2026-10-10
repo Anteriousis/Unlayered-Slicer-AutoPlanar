@@ -46,11 +46,15 @@ const PrintObject *segment_with_index(const Slic3r::Print &print, int index)
     return nullptr;
 }
 
+// Layers carrying inherited load of either kind: the child's support (support-on-support) or the
+// child's body over this segment's empty space.
 size_t layers_with_demand(const PrintObject *object)
 {
+    const std::vector<Polygons> &support = object->segment_support_demand();
+    const std::vector<Polygons> &body    = object->segment_body_demand();
     size_t n = 0;
-    for (const Polygons &layer : object->segment_support_demand())
-        if (! layer.empty())
+    for (size_t i = 0; i < std::max(support.size(), body.size()); ++ i)
+        if ((i < support.size() && ! support[i].empty()) || (i < body.size() && ! body[i].empty()))
             ++ n;
     return n;
 }
@@ -127,6 +131,19 @@ SCENARIO("Support demand cascades up a chain of segments", "[cutplanes][cascade]
             // Demand that never becomes support would satisfy the checks above and still be inert.
             CHECK(! root->support_layers().empty());
         }
+
+        THEN("what reaches the root is the top segment's support, handed down as support-on-support") {
+            // The sphere starts well above the top segment's floor, so its overhang is carried by
+            // the top segment's own support, which ends on the plane; the body footprint at that
+            // floor is the pillar's cross-section, resting on material all the way down. The two
+            // kinds are kept apart because only support-on-support may end flush with the plane.
+            size_t body = 0, support = 0;
+            for (const Polygons &layer : root->segment_body_demand())    body    += ! layer.empty();
+            for (const Polygons &layer : root->segment_support_demand()) support += ! layer.empty();
+            INFO("root body-demand layers " << body << ", support-demand layers " << support);
+            CHECK(support > 0);
+            CHECK(body    == 0);
+        }
     }
 }
 
@@ -185,19 +202,23 @@ SCENARIO("A segment floating above its base plane is supported", "[cutplanes][ca
             CHECK(lowest < -4.);
         }
 
-        THEN("the root is not asked to carry a load its own top face already caught") {
-            // The child's column lands squarely on the root's top face, so nothing is handed down.
-            // Demand appearing here would mean the column had leaked past material already carrying
-            // it -- which is what the un-carved cascade used to do.
+        THEN("the root carries the column across the open span below the plane") {
+            // The plane sits 5mm above the root's material. The child's support ends at the plane,
+            // so the root has to build the rest -- above its own material, in layers that exist
+            // only for that (segment_slice_top()). The column is carved against the root's top
+            // face, so once it reaches material it stops asking.
             INFO("root layers with demand: " << layers_with_demand(root));
-            CHECK(layers_with_demand(root) == 0);
+            CHECK(layers_with_demand(root) > 0);
+            double root_material_top = 0., root_support_top = 0.;
+            for (const Layer *layer : root->layers())
+                if (! layer->lslices.empty())
+                    root_material_top = std::max(root_material_top, layer->print_z);
+            for (const SupportLayer *layer : root->support_layers())
+                if (! layer->support_islands.empty() || ! layer->base_areas.empty())
+                    root_support_top = std::max(root_support_top, layer->print_z);
+            INFO("root material top " << root_material_top << ", support top " << root_support_top);
+            CHECK(root_support_top > root_material_top + 3.);
         }
-
-        // KNOWN LIMITATION, deliberately not asserted away: this fixture puts the cut plane in open
-        // space, 5mm above the root and 5mm below the child. The child's support reaches the plane
-        // and the root's material starts 5mm lower, so that span belongs to neither segment -- a
-        // segment's support cannot extend past its own base plane, and a parent cannot build above
-        // its own top layer. A plane cutting through material (the ordinary case) has no such span.
     }
 }
 
@@ -337,7 +358,14 @@ SCENARIO("Editing a segmented object does not regenerate unrelated objects", "[c
                 const PrintObject *root = segment_with_index(print, 0);
                 REQUIRE(root != nullptr);
                 CHECK(! root->layers().empty());
-                CHECK_THAT(root->layers().back()->print_z, Catch::Matchers::WithinAbs(13., 0.3));
+                // The root's MATERIAL ends at the cut; a few empty layers may follow it (support
+                // reach, see segment_slice_top()).
+                double root_material_top = 0.;
+                for (const Layer *layer : root->layers())
+                    if (! layer->lslices.empty())
+                        root_material_top = std::max(root_material_top, layer->print_z);
+                CHECK_THAT(root_material_top, Catch::Matchers::WithinAbs(13., 0.3));
+                CHECK(root->layers().back()->print_z <= 14.);
             }
         }
     }
@@ -398,17 +426,18 @@ SCENARIO("Parent material permanently stops an inherited demand column", "[cutpl
         }
 
         THEN("no demand survives below the shelf that caught it") {
-            const std::vector<Polygons> &demand = root->segment_support_demand();
+            // The child's overhang past the shelf is its BODY over the root's empty space.
             size_t offending = 0;
             double lowest_with_demand = std::numeric_limits<double>::max();
-            for (size_t i = 0; i < demand.size() && i < root->layer_count(); ++ i) {
-                if (demand[i].empty())
-                    continue;
-                const double z = root->get_layer(int(i))->print_z;
-                lowest_with_demand = std::min(lowest_with_demand, z);
-                if (z < 2.5)        // below the shelf (z 3..5), where only the narrow foot remains
-                    ++ offending;
-            }
+            for (const std::vector<Polygons> *demand : { &root->segment_body_demand(), &root->segment_support_demand() })
+                for (size_t i = 0; i < demand->size() && i < root->layer_count(); ++ i) {
+                    if ((*demand)[i].empty())
+                        continue;
+                    const double z = root->get_layer(int(i))->print_z;
+                    lowest_with_demand = std::min(lowest_with_demand, z);
+                    if (z < 2.5)        // below the shelf (z 3..5), where only the narrow foot remains
+                        ++ offending;
+                }
             INFO("lowest layer carrying demand: " << lowest_with_demand
                  << ", layers with demand below the shelf: " << offending);
             CHECK(offending == 0);
@@ -488,6 +517,139 @@ SCENARIO("Tree support descends to a floating segment's base plane", "[cutplanes
                 CHECK(below_zero > 0);
                 CHECK(below_zero_with_fills > 0);
             }
+        }
+    }
+}
+
+SCENARIO("A column crossing a sibling's slab is handed to that sibling, not only to the parent", "[cutplanes][cascade]") {
+    GIVEN("a sphere on a pillar cut by two planes through one point, so a wedge sits between them") {
+        // Both planes pass through the same point in the pillar. Between them lies a thin wedge
+        // whose ceiling is the steeper plane -- the same plane the top segment rests on. The top
+        // segment's parent is the ROOT (its base plane mostly borders the root), so a cascade
+        // that hands the column only to the parent skips the wedge: the root clips its support
+        // at its ceilings, which is exactly the wedge's slab, and the sphere's overhang above
+        // the wedge's empty space is left unsupported there.
+        Slic3r::Print print;
+        Model         model;
+        ModelObject  *object = model.add_object();
+        object->name = "wedge_between_planes";
+        ModelVolume  *cube   = object->add_volume(Test::cube(20.), ModelVolumeType::MODEL_PART, false);
+        ModelVolume  *sphere = object->add_volume(Test::mesh(Test::TestMesh::sphere_50mm), ModelVolumeType::MODEL_PART, false);
+        const BoundingBoxf3 cb = cube->mesh().bounding_box();
+        const BoundingBoxf3 sb = sphere->mesh().bounding_box();
+        sphere->set_offset(Vec3d(cb.center().x() - sb.center().x(),
+                                 cb.center().y() - sb.center().y(),
+                                 cb.max.z()      - sb.min.z()));
+        object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+
+        // The planes cross 5mm off the pillar's centre, on the -X side, and the stack is user
+        // ordered so the flat plane peels first: the wedge is then the -X sliver above the flat
+        // plane and below the steep one, and the top segment is everything above the steep plane.
+        // The steep plane's cut face borders the root over the wider +X part, so the ROOT is the
+        // top's parent. The sphere overhangs the wedge's empty slab beyond the pillar, so the top's
+        // support has to be carried through the wedge.
+        CutPlaneStack stack;
+        stack.enabled      = true;
+        stack.user_ordered = true;
+        const Vec3d through(cb.center().x() - 5., cb.center().y(), 10.);
+        for (const Vec3d &n : { Vec3d(0.42, 0., 0.91), Vec3d(-0.10, 0., 0.995) }) {   // first peels LAST
+            CutPlane cp;
+            cp.point  = through;
+            cp.normal = n.normalized();
+            stack.planes.push_back(cp);
+        }
+        object->cut_planes = stack;
+        object->ensure_on_bed();
+
+        print.apply(model, cascade_config());
+        REQUIRE(print.objects().size() == 3);
+        print.process();
+
+        // The wedge is the non-root segment bounded by BOTH a floor and a ceiling.
+        const PrintObject *wedge = nullptr;
+        const PrintObject *top   = nullptr;
+        for (const PrintObject *segment : print.objects()) {
+            if (segment->is_root_segment())
+                continue;
+            bool has_ceiling = false;
+            for (const CutSegmentClip &clip : segment->segment()->clips)
+                has_ceiling |= clip.role == CutClipRole::Ceiling;
+            (has_ceiling ? wedge : top) = segment;
+        }
+        REQUIRE(wedge != nullptr);
+        REQUIRE(top   != nullptr);
+
+        THEN("the wedge is a sibling of the top segment, both resting on the root") {
+            INFO("wedge index " << wedge->segment_index() << " parent " << wedge->segment()->parent
+                 << ", top index " << top->segment_index() << " parent " << top->segment()->parent);
+            CHECK(wedge->segment()->parent == 0);
+            CHECK(top->segment()->parent   == 0);
+            CHECK(wedge->segment_index()   <  top->segment_index());
+        }
+
+        THEN("the top segment's load reaches the wedge as well as the root") {
+            INFO("wedge layers with demand: " << layers_with_demand(wedge));
+            CHECK(layers_with_demand(wedge) > 0);
+            CHECK(layers_with_demand(segment_with_index(print, 0)) > 0);
+        }
+
+        THEN("the wedge actually generates support from that load") {
+            CHECK(! wedge->support_layers().empty());
+        }
+    }
+}
+
+SCENARIO("Section support overlap lets a receiver's column reach past the plane", "[cutplanes][cascade]") {
+    GIVEN("the wedge fixture sliced with and without a one-layer overlap") {
+        auto build = [](double overlap, Slic3r::Print &print, Model &model) {
+            ModelObject  *object = model.add_object();
+            object->name = "wedge_between_planes";
+            ModelVolume  *cube   = object->add_volume(Test::cube(20.), ModelVolumeType::MODEL_PART, false);
+            ModelVolume  *sphere = object->add_volume(Test::mesh(Test::TestMesh::sphere_50mm), ModelVolumeType::MODEL_PART, false);
+            const BoundingBoxf3 cb = cube->mesh().bounding_box();
+            const BoundingBoxf3 sb = sphere->mesh().bounding_box();
+            sphere->set_offset(Vec3d(cb.center().x() - sb.center().x(), cb.center().y() - sb.center().y(), cb.max.z() - sb.min.z()));
+            object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+            CutPlaneStack stack;
+            stack.enabled      = true;
+            stack.user_ordered = true;
+            const Vec3d through(cb.center().x() - 5., cb.center().y(), 10.);
+            for (const Vec3d &n : { Vec3d(0.42, 0., 0.91), Vec3d(-0.10, 0., 0.995) }) {
+                CutPlane cp; cp.point = through; cp.normal = n.normalized(); stack.planes.push_back(cp);
+            }
+            object->cut_planes = stack;
+            object->ensure_on_bed();
+            DynamicPrintConfig config = cascade_config();
+            config.set_deserialize_strict({ { "support_section_overlap", overlap } });
+            print.apply(model, config);
+            REQUIRE(print.objects().size() == 3);
+            print.process();
+        };
+        // The highest support in the wedge relative to its own ceiling-bound layers: with the
+        // overlap the column is allowed to end one layer higher, so its top rises by about a layer.
+        auto wedge_support_top = [](const Slic3r::Print &print) {
+            double top = -1e9;
+            for (const PrintObject *segment : print.objects()) {
+                if (segment->is_root_segment()) continue;
+                bool has_ceiling = false;
+                for (const CutSegmentClip &clip : segment->segment()->clips) has_ceiling |= clip.role == CutClipRole::Ceiling;
+                if (! has_ceiling) continue;
+                for (const SupportLayer *layer : segment->support_layers())
+                    if (! layer->support_islands.empty())
+                        top = std::max(top, layer->print_z);
+            }
+            return top;
+        };
+        Slic3r::Print plain, overlapped;
+        Model         model_plain, model_overlapped;
+        build(0.,  plain,      model_plain);
+        build(0.2, overlapped, model_overlapped);
+        const double top_plain = wedge_support_top(plain), top_overlapped = wedge_support_top(overlapped);
+        INFO("wedge support top: plain " << top_plain << ", with 0.2 overlap " << top_overlapped);
+        REQUIRE(top_plain > -1e8);
+        THEN("the wedge's column ends higher with the overlap, by no more than the overlap plus a layer") {
+            CHECK(top_overlapped >= top_plain + 0.15);
+            CHECK(top_overlapped <= top_plain + 0.45);
         }
     }
 }

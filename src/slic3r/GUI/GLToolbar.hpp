@@ -2,12 +2,14 @@
 #define slic3r_GLToolbar_hpp_
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "GLTexture.hpp"
 #include "Event.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/Color.hpp"
 
 class wxEvtHandler;
 
@@ -264,6 +266,13 @@ class GLToolbar
 {
 public:
     static const float Default_Icons_Size;
+    // Theme: a user colour for the background of every toolbar in the 3D view on one base
+    // (nullopt = the shipped texture for that base).
+    static void set_background_color_override(bool dark, const std::optional<ColorRGBA>& color);
+    // Draws the override colour as one flat quad over the given rectangle and returns true, or
+    // returns false when the base in use has no override (the caller then draws its texture).
+    // Shared with the gizmo toolbar, which has a background texture of its own.
+    static bool render_background_override(float left, float top, float right, float bottom);
 
     enum EType : unsigned char
     {
@@ -395,6 +404,10 @@ public:
 
     unsigned int get_items_count() const { return (unsigned int)m_items.size(); }
     int get_item_id(const std::string& name) const;
+    // Keyboard stepping (GLCanvas3D): ids of the items a keyboard user can activate.
+    std::vector<int> get_keyboard_item_ids() const;
+    // Draws item `id` as hovered (-1: none), as if the pointer were over it.
+    void set_keyboard_hover(int id);
 
     void force_left_action(int item_id, GLCanvas3D& parent) { do_action(GLToolbarItem::Left, item_id, parent, false); }
     void force_right_action(int item_id, GLCanvas3D& parent) { do_action(GLToolbarItem::Right, item_id, parent, false); }

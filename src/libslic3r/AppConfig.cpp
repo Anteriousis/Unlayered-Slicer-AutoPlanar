@@ -48,7 +48,17 @@ namespace Slic3r {
 //     "assets": [ { "name": ..., "browser_download_url": ..., "size": ..., "sha256": ... } ] }
 // An empty or absent "assets" array means the installer is not directly downloadable, and the
 // update dialog offers to open "html_url" in a browser instead of installing in place.
-// There is no server behind this - do not go looking for one.
+//
+// Since 0.1.3 unlayered3d.com builds this live from the installer published in its admin panel
+// (pilot repo: app/slicer/latest.json/route.ts). It always sends "assets": [] - the installer sits
+// behind a sign-in, which builds up to 0.1.2 cannot do - and adds what newer builds read instead:
+//     "unlayered_downloads": [ { "platform": "windows", "arch": "x64", "name": ..., "size": ...,
+//                                "sha256": ..., "url": <site>/api/slicer/update/download?...,
+//                                "auth": "unlayered-account" } ]
+// whose "url" answers, given the account's device token (UnlayeredAccount), with a short-lived
+// signed link to the file. See AutoUpdater for the rest. The check appends
+// "?platform=<windows|mac|linux>&arch=<x64|arm64>" so each platform hears about its own release;
+// a request without it is answered as Windows, which every earlier build was.
 static const std::string VERSION_CHECK_URL = "https://unlayered3d.com/slicer/latest.json";
 
 // Where the firmware and printer-config updaters look for releases. Both speak the GitHub releases
@@ -385,12 +395,29 @@ void AppConfig::set_defaults()
     if (get("show_cut_chunk_colors").empty())
         set_bool("show_cut_chunk_colors", true);
 
+    if (get("opaque_overlays").empty())
+        set_bool("opaque_overlays", false);
+
+    if (get("ui_font_scale").empty())
+        set("ui_font_scale", "100");
+
+    // Colour-vision palette for the G-code preview: normal | protanopia | deuteranopia | tritanopia.
+    if (get("preview_color_vision").empty())
+        set("preview_color_vision", "normal");
+
+
+    // Keyboard focus outline (Preferences > Appearance).
+
+
     // Show the one-time "Filament Track Switch is ready" tip until it has been seen once.
     if (get("show_fila_switch_tips").empty())
         set_bool("show_fila_switch_tips", true);
 
     if (get("show_plate_gridlines").empty())
         set_bool("show_plate_gridlines", true);
+
+    if (get("show_bed_mesh").empty())
+        set_bool("show_bed_mesh", false);
 
     if (get("show_outline").empty())
         set_bool("show_outline", false);

@@ -303,7 +303,9 @@ SupportGeneratorLayersPtr generate_raft_base(
     // so that layer is mid-column rather than a build-plate base -- expanding it just leaves a
     // flange sticking out of the side of the support. The root segment rests on the plate and keeps
     // the expansion for adhesion, as does every ordinary object.
-    const bool  non_root_segment        = object.is_segment() && ! object.is_root_segment();
+    // BELT_MOD: the same holds for an object on a belt, whose first slice layer is the leading tip
+    // and whose support ends on the tilted belt plane (PrintObject::support_floor_is_tilted).
+    const bool  non_root_segment        = object.support_floor_is_tilted();
     const float inflate_factor_1st_layer = non_root_segment ? 0.f :
         std::max(0.f, float(scale_(object.config().raft_first_layer_expansion)) - inflate_factor_fine);
     SupportGeneratorLayer       *contacts         = top_contacts         .empty() ? nullptr : top_contacts         .front();

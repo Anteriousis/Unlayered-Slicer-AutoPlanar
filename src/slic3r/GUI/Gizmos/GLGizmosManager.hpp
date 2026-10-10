@@ -247,6 +247,10 @@ public:
     bool check_gizmos_closed_except(EType) const;
 
     void set_hover_id(int id);
+    // Keyboard stepping (GLCanvas3D): draw this gizmo's icon as hovered (Undefined: none).
+    void set_icon_hover(EType type) { m_hover = type; }
+    // Gizmos shown as icons in the current view, in bar order.
+    std::vector<size_t> get_icon_gizmo_idxs() const { return get_selectable_idxs(); }
 
     /// <summary>
     /// Distribute information about different data into active gizmo

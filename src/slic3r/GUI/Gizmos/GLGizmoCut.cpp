@@ -2416,19 +2416,8 @@ static GLModel::Geometry skeleton_to_geometry(const SkeletonGraph& G)
     return geo;
 }
 
-void GLGizmoCut3D::compute_skeleton()
+SkeletonParams GLGizmoCut3D::skeleton_params() const
 {
-    const ModelObject* mo = m_c->selection_info()->model_object();
-    if (!mo)
-        return;
-
-    // raw_mesh() applies each volume's own matrix. Merging vol->mesh() directly — which is
-    // what this did before — silently skeletonises a scrambled mesh for any object whose
-    // volumes are transformed, and gets the bed reference (its z_min) wrong with it.
-    const TriangleMesh mesh = mo->raw_mesh();
-    if (mesh.its.vertices.empty())
-        return;
-
     SkeletonParams params;
     params.method              = m_skel_method;
     params.quality_speed       = m_skel_quality_speed;
@@ -2445,6 +2434,26 @@ void GLGizmoCut3D::compute_skeleton()
     params.correct_convergence = m_skel_correct_convergence;
     params.tunnel_fill         = static_cast<TunnelFill>(m_skel_tunnel_fill);
     params.tunnel_min_aspect   = m_skel_tunnel_min_aspect;
+    params.bed_root            = static_cast<BedRootMode>(m_skel_bed_root);
+    params.root_lean           = m_skel_root_lean;
+    params.root_ramp           = m_skel_root_ramp;
+    return params;
+}
+
+void GLGizmoCut3D::compute_skeleton()
+{
+    const ModelObject* mo = m_c->selection_info()->model_object();
+    if (!mo)
+        return;
+
+    // raw_mesh() applies each volume's own matrix. Merging vol->mesh() directly — which is
+    // what this did before — silently skeletonises a scrambled mesh for any object whose
+    // volumes are transformed, and gets the bed reference (its z_min) wrong with it.
+    const TriangleMesh mesh = mo->raw_mesh();
+    if (mesh.its.vertices.empty())
+        return;
+
+    const SkeletonParams params = skeleton_params();
 
     // The instance transform, so the pipeline's "up" and "bed" are the real ones. A part rotated
     // to stand it up otherwise put the DAG root at the top of the model and snapped the bed node

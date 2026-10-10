@@ -35,7 +35,8 @@ the slicer runs on the user's own machine and the service does the slicing.
 |---|---|---|
 | `nonplanar_slice_url` | empty | Service root, e.g. `https://example.com/vise` or `http://localhost:8000`. Empty disables the feature. |
 
-Set it in Preferences ▸ General ▸ Nonplanar slicing, or directly in the slicer's `.conf`.
+Set it in the slicer's `.conf`, edited while the application is closed; there is no Preferences UI
+for it.
 `ORCA_NONPLANAR_SLICE_URL` overrides it for development and is never written back.
 
 **Transport.** `https` is accepted anywhere. Plain `http` is accepted **only** for loopback hosts

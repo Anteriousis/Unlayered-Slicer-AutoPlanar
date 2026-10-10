@@ -11,6 +11,8 @@
 #endif
 
 #include <set>
+#include <iostream>
+#include <cstdlib>
 
 wxDEFINE_EVENT(EVT_DISMISS, wxCommandEvent);
 
@@ -21,6 +23,7 @@ EVT_LEFT_UP(DropDown::mouseReleased)
 EVT_MOUSE_CAPTURE_LOST(DropDown::mouseCaptureLost)
 EVT_MOTION(DropDown::mouseMove)
 EVT_MOUSEWHEEL(DropDown::mouseWheelMoved)
+EVT_KEY_DOWN(DropDown::keyDown)
 
 // catch paint events
 EVT_PAINT(DropDown::paintEvent)
@@ -55,8 +58,11 @@ DropDown::DropDown(wxWindow *parent, std::vector<Item> &items, long style)
 void DropDown::Create(wxWindow *parent, long style)
 {
     PopupWindow::Create(parent, wxPU_CONTAINS_CONTROLS);
+    // The popup grabs input while shown; keys only reach a widget that can take focus
+    // (Popup() focuses the window itself), so the list can be driven from the keyboard.
+    SetCanFocus(true);
     SetBackgroundStyle(wxBG_STYLE_PAINT);
-    SetBackgroundColour(*wxWHITE);
+    SetBackgroundColour(wxColour("#FFFEFF")); // the input-background theme key: the list follows its combo
     state_handler.attach({&border_color, &text_color, &selector_border_color, &selector_background_color});
     state_handler.update_binds();
     if ((style & DD_NO_CHECK_ICON) == 0)
@@ -294,13 +300,16 @@ void DropDown::render(wxDC &dc)
 
     int selected_item = selectedItem();
     int hover_index   = hoverIndex();
+    if (static const bool trace = std::getenv("UNLAYERED_FOCUS_TRACE") != nullptr; trace)
+        std::cerr << "dropdown-paint: hover=" << hover_item << " kbd=" << keyboard_hover << " states=" << states << " sel=" << selected_item << std::endl;
 
     // draw hover rectangle
     wxRect rcContent = {{0, offset.y}, rowSize};
-    if (hover_item >= 0 && (states & StateColor::Hovered) && (hover_index < 0 || !(items[hover_index].style & DD_ITEM_STYLE_SPLIT_ITEM))) {
+    if (hover_item >= 0 && ((states & StateColor::Hovered) || keyboard_hover) && (hover_index < 0 || !(items[hover_index].style & DD_ITEM_STYLE_SPLIT_ITEM))) {
         rcContent.y += rowSize.y * hover_item;
         if (rcContent.GetBottom() > 0 && rcContent.y < size.y) {
-            if (selected_item == hover_item)
+            // A keyboard-moved row is filled like the selected one; a border alone is too faint.
+            if (selected_item == hover_item || keyboard_hover)
                 dc.SetBrush(wxBrush(selector_background_color.colorForStates(states | StateColor::Checked)));
             dc.SetPen(wxPen(selector_border_color.colorForStates(states)));
             rcContent.Deflate(4, 1);
@@ -443,14 +452,14 @@ void DropDown::render(wxDC &dc)
     }
 }
 
-int DropDown::hoverIndex()
+int DropDown::rowIndex(int row)
 {
-    if (hover_item < 0)
+    if (row < 0)
         return -1;
     // BUG FIX: Can't take the shortcut if subDropDown exists (which means there are groups)
     // because we need to detect group headers which return negative indices
     if (count == items.size() && subDropDown == nullptr)
-        return hover_item;
+        return row;
     int index = -1;
     std::set<wxString> groups;
     for (int i = 0; i < items.size(); ++i) {
@@ -467,7 +476,7 @@ int DropDown::hoverIndex()
             if (item.group_key != group)
                 continue;
         }
-        if (++index == hover_item)
+        if (++index == row)
             return (item.group_key.IsEmpty() || !group.IsEmpty()) ? i : -i - 2;
     }
     return -1;
@@ -680,7 +689,8 @@ void DropDown::mouseDown(wxMouseEvent& event)
     // Receivce unexcepted LEFT_DOWN on Mac after OnDismiss
     if (!IsShown())
         return;
-    // force calc hover item again
+    // force calc hover item again (past the stationary-pointer guard: a press is a real event)
+    last_mouse_pos = wxPoint(-1, -1);
     mouseMove(event);
     pressedDown = true;
     CaptureMouse();
@@ -727,6 +737,13 @@ void DropDown::mouseMove(wxMouseEvent &event)
         }
     }
 #endif
+    // GTK synthesises motion events when a tooltip or repaint changes what is under the
+    // pointer; those must not reset a highlight the keyboard just moved.
+    if (!pressedDown && pt == last_mouse_pos)
+        return;
+    if (static const bool trace = std::getenv("UNLAYERED_FOCUS_TRACE") != nullptr; trace)
+        std::cerr << "dropdown-motion: " << pt.x << "," << pt.y << " (was " << last_mouse_pos.x << "," << last_mouse_pos.y << ") hover=" << hover_item << std::endl;
+    last_mouse_pos = pt;
     if (pressedDown) {
         wxPoint pt2 = offset + pt - dragStart;
         wxSize  size = GetSize();
@@ -745,25 +762,12 @@ void DropDown::mouseMove(wxMouseEvent &event)
     if (!pressedDown || hover_item >= 0) {
         int hover = (pt.y - offset.y) / rowSize.y;
         if (hover >= (int) count) hover = -1;
+        keyboard_hover = false;
         if (hover == hover_item) return;
         hover_item = hover;
         int index  = hoverIndex();
         if (index < -1) {
-            auto & drop = *subDropDown;
-            drop.group  = items[-index - 2].group_key;
-            drop.need_sync = true;
-            drop.messureSize();
-#ifdef __WXGTK__
-            // wxGTK wraps popup contents in a native GtkWindow. Make the submenu
-            // transient for the currently mapped parent popup window before
-            // positioning/showing it, so wlroots/Hyprland sees the topmost parent.
-            if (m_widget && drop.m_widget)
-                gtk_window_set_transient_for(GTK_WINDOW(drop.m_widget), GTK_WINDOW(m_widget));
-#endif
-            drop.autoPosition();
-            drop.paintNow();
-            if (!drop.IsShown())
-                drop.Popup(&drop);
+            showSubDropDown(index);
         } else if (index >= 0) {
             if (subDropDown) {
                 subDropDown->group.clear();
@@ -774,6 +778,99 @@ void DropDown::mouseMove(wxMouseEvent &event)
         }
     }
     paintNow();
+}
+
+void DropDown::showSubDropDown(int index)
+{
+    auto & drop = *subDropDown;
+    drop.group  = items[-index - 2].group_key;
+    drop.need_sync = true;
+    drop.messureSize();
+#ifdef __WXGTK__
+    // wxGTK wraps popup contents in a native GtkWindow. Make the submenu
+    // transient for the currently mapped parent popup window before
+    // positioning/showing it, so wlroots/Hyprland sees the topmost parent.
+    if (m_widget && drop.m_widget)
+        gtk_window_set_transient_for(GTK_WINDOW(drop.m_widget), GTK_WINDOW(m_widget));
+#endif
+    drop.autoPosition();
+    drop.paintNow();
+    if (!drop.IsShown())
+        drop.Popup(&drop);
+}
+
+void DropDown::keyDown(wxKeyEvent &event)
+{
+    static const bool trace = std::getenv("UNLAYERED_FOCUS_TRACE") != nullptr;
+    if (trace)
+        std::cerr << "dropdown-key: " << event.GetKeyCode() << " hover=" << hover_item << " sel=" << selection << " count=" << count << " items=" << items.size() << std::endl;
+    // Keyboard operation of the open list: arrows move the highlight over selectable rows,
+    // Enter/Space pick it (or open a group), Escape closes, Tab closes and moves on.
+    const int rows = int(count);
+    auto selectable = [this](int row) {
+        int i = rowIndex(row);
+        return i < -1 || (i >= 0 && (items[i].style & (DD_ITEM_STYLE_SPLIT_ITEM | DD_ITEM_STYLE_DISABLED)) == 0);
+    };
+    auto step = [&](int from, int dir) {
+        for (int r = from + dir; r >= 0 && r < rows; r += dir)
+            if (selectable(r))
+                return r;
+        return from;
+    };
+    int row = hover_item >= 0 ? hover_item : selectedItem();
+    switch (event.GetKeyCode()) {
+    case WXK_DOWN: row = step(row, 1); break;
+    case WXK_UP:   row = step(row < 0 ? rows : row, -1); break;
+    case WXK_HOME: row = step(-1, 1); break;
+    case WXK_END:  row = step(rows, -1); break;
+    case WXK_RIGHT:
+        if (int i = hoverIndex(); i < -1 && subDropDown)
+            showSubDropDown(i);
+        return;
+    case WXK_LEFT:
+        if (mainDropDown)
+            Dismiss();
+        return;
+    case WXK_RETURN:
+    case WXK_SPACE:
+        if (int i = hoverIndex(); i < -1 && subDropDown) {
+            showSubDropDown(i);
+        } else if (i >= 0) {
+            sendDropDownEvent();
+            if (mainDropDown)
+                mainDropDown->hover_item = -1; // To Dismiss mainDropDown
+            DismissAndNotify();
+        }
+        return;
+    case WXK_ESCAPE:
+        DismissAndNotify();
+        return;
+    case WXK_TAB:
+        DismissAndNotify();
+        if (wxWindow *owner = mainDropDown ? mainDropDown->GetParent() : GetParent())
+            owner->Navigate(event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward);
+        return;
+    default:
+        event.Skip();
+        return;
+    }
+    if (row == hover_item || row < 0)
+        return;
+    hover_item = row;
+    keyboard_hover = true;
+    if (trace)
+        std::cerr << "dropdown-key: hover -> " << hover_item << std::endl;
+    // Keep the highlighted row in view.
+    const int height = GetSize().y;
+    if (offset.y + rowSize.y * (row + 1) > height)
+        offset.y = height - rowSize.y * (row + 1);
+    else if (offset.y + rowSize.y * row < 0)
+        offset.y = -rowSize.y * row;
+    if (int i = hoverIndex(); i >= 0)
+        SetToolTip(items[i].tip);
+    // paintNow() draws with a client DC, which GTK3 discards outside a paint event; the
+    // moved highlight was never visible. Queue a real repaint.
+    Refresh();
 }
 
 void DropDown::mouseWheelMoved(wxMouseEvent &event)
@@ -848,6 +945,7 @@ void DropDown::OnDismiss()
         return;
     dismissTime = boost::posix_time::microsec_clock::universal_time();
     hover_item  = -1;
+    keyboard_hover = false;
     wxCommandEvent e(EVT_DISMISS);
     GetEventHandler()->ProcessEvent(e);
 }

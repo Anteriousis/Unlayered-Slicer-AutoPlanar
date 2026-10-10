@@ -197,7 +197,8 @@ jobs:
 
           # The exact name CPack produces, from CPACK_PACKAGE_FILE_NAME. Asserted rather than
           # globbed: a glob that matches nothing turns a broken build into a silently empty release.
-          $installer = "build/Unlayered_Slicer_Windows_Installer_V$ver.exe"
+          # The release job builds x64 only; CMakeLists.txt appends the arch (_x64 / _arm64).
+          $installer = "build/Unlayered_Slicer_Windows_Installer_V${ver}_x64.exe"
           if (-not (Test-Path $installer)) {
               Write-Output "::error::CPack did not produce $installer. If CPACK_PACKAGE_FILE_NAME changed in CMakeLists.txt, update this step and select_platform_asset() in src/slic3r/Utils/AppUpdater.cpp together."
               exit 1

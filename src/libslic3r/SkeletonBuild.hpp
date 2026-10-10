@@ -96,6 +96,11 @@ struct SkeletonParams
     // ── tangents ──
     float tangent_W{0.5f};
     bool  correct_convergence{true};
+    // Re-aim cut normals so that no plane crosses its predecessor inside the part (see
+    // uncross_skeleton_cut_planes). `plane_gap` is how far apart, in mm, the two planes must
+    // still be where they come closest on either cut face, i.e. the thin edge of a wedge chunk.
+    bool  uncross_planes{true};
+    float plane_gap{0.5f};
 
     // ── hollow geometry ──
     TunnelFill tunnel_fill{TunnelFill::Threshold};
@@ -108,6 +113,17 @@ struct SkeletonParams
 
     // ── bed ──
     float bed_snap_band{0.0f};       // 0 = auto (see snap_to_bed)
+    // Where the root stands. Auto = under the middle of the part when it has no leg (a duct lying
+    // across the bed, a U on its bend), else on the downward tips as before. See snap_to_bed().
+    BedRootMode bed_root{BedRootMode::Auto};
+    // How far toward lying flat the cuts beside a middle root are held: their normals tilt at most
+    // 90 - root_lean deg from +Z. 45 makes the middle chunk a wedge whose faces overhang no more than
+    // 45 deg, and sets the seat (the uncut zone over the contact patch) to ~1.1x the centreline's
+    // height above the bed.
+    float root_lean{45.0f};
+    // Distance (mm) over which that hold -- and a leg root's flat first plane -- releases back to the
+    // spine tangent. 0 = auto: max(3 edge lengths, 30 % of the longest root-to-tip path).
+    float root_ramp{0.0f};
 
     // Test-only: synthesises an instance rotation (degrees, XYZ) in the CLI so the
     // rotated-instance path is reachable from the generated corpus. Not a GUI control.
@@ -132,11 +148,84 @@ struct SkeletonResult
     double snapped_nodes{0};
     double build_ms{0.0};      // wall-clock for the whole pipeline; per-phase goes to stdout
     std::string note;          // human-readable summary of what the tunnel stage decided
+    int    planes_reaimed{0};  // cut normals uncross_skeleton_cut_planes() turned off the tangent
+    double max_reaim_deg{0.0}; // ... and the largest of those turns
+    std::string         root_mode;    // "middle" / "tips", and why
+    int                 foot_node{-1}; // the planted foot under the middle, if any
+    std::vector<double> cut_tilt_deg; // per cut edge: world tilt of its plane normal from +Z
 };
 
 // Ordered root-first BFS over the DAG, one queue per root, round-robin interleaved so
 // parallel branches zigzag instead of one branch being fully cut before others begin.
-std::vector<std::pair<int,int>> build_skeleton_cut_edges(const SkeletonDAG& dag);
+//
+// The DAG must be in WORLD space: a planted foot (skeleton_foot_top) is recognised by its vertical
+// edge, and the edges inside its seat are not cut -- the foot edge itself included, whose plane would
+// otherwise lie flat at half the centreline's height and slice the bottom of the part lengthwise.
+std::vector<std::pair<int,int>> build_skeleton_cut_edges(const SkeletonDAG& dag, double root_lean_deg = 45.0);
+
+// Everything derived from a centreline graph -- roots, DAG, convergence, tangents, cut order, the
+// uncrossing pass -- recomputed from an object-LOCAL graph. The derivation runs in world space,
+// because roots, the bed, the foot and the lean toward the bed normal all mean world +Z; results come
+// back in the local frame the gizmo stores and authors cut planes in. build_skeleton() ends with this
+// and the gizmo calls it after every edit, so an edited skeleton keeps the root the build chose.
+struct SkeletonTopology
+{
+    SkeletonDAG                     dag;
+    SkeletonTangents                tangents;
+    std::vector<int>                roots;
+    std::vector<int>                convergence_nodes;
+    std::vector<std::pair<int,int>> cut_edges;
+    std::vector<double>             cut_tilt_deg;
+    int                             foot_node{-1};
+    int                             planes_reaimed{0};
+    double                          max_reaim_deg{0.0};
+};
+SkeletonTopology rebuild_skeleton_topology(const SkeletonGraph& local, const Transform3d& world,
+                                           const indexed_triangle_set& its_local, const SkeletonParams& p);
+
+// The plane a skeleton cut edge becomes, object-local: through the edge midpoint, facing the
+// smoothed tangent (the parent -> child print direction). The ONE definition of where a cut sits,
+// shared by the gizmo's cut, the re-aiming below and the CLI's partition check, so the plane that
+// was checked for crossings is the plane that gets cut.
+struct SkeletonCutPlane
+{
+    Vec3d point;
+    Vec3d normal; // unit
+};
+SkeletonCutPlane skeleton_edge_cut_plane(const SkeletonDAG& dag, const SkeletonTangents& tangents,
+                                         int par, int child);
+
+// Turn the cut normals (tangents.smoothed) just far enough that no cut plane crosses the plane
+// before it on its path INSIDE the part. Returns how many normals changed.
+//
+// Cut planes are infinite: the segmentation is an arrangement of half-spaces. On a bend whose
+// radius is smaller than the part's reach towards the inside of the bend -- a wide duct turning
+// about its short axis -- normals that simply follow the spine tangent meet on a line that runs
+// through the material, every chunk of the bend becomes a sliver crossed by its neighbours, and
+// derive_cut_segments() folds the whole zone into one chunk. Measured on driver_intake.stl:
+// 20 of 55 planes crossed by 1-14 others inside their own cut face; the bend printed as one piece.
+//
+// Each plane keeps its point on the spine; only its normal turns. Two neighbours are clear when
+// the earlier one's cut face lies wholly behind the later plane and the later one's wholly in
+// front of the earlier, both by `min_gap` mm. A forward pass swings each crossing plane from its
+// tangent back towards its predecessor (parallel can never cross) as little as clears it, which
+// makes the planes LAG after the trouble; a backward pass does the same towards each successor,
+// which makes them LEAD before it. The two are averaged so the correction is shared by the planes
+// on both sides, then a forward pass repairs anything the average left crossing. Through a tight
+// bend the planes therefore fan about a hinge just outside the inner wall -- every chunk a wedge,
+// thin edge inside the bend -- starting before the bend and settling back onto the tangent after.
+// "Cut face" is the region of the plane's cross-section that holds the cut point (a bore's
+// centreline sits in the hole, still inside the outer contour).
+//
+// `mesh` and the DAG/tangents must share a frame; build_skeleton() calls this once both are back
+// in the object-local frame the cut planes are authored in. Only a chain continuation (its parent
+// node has no other child) is tested against its predecessor: branches leaving a junction are left
+// as they are, and can still cross each other or the trunk. Skipped above 64 cuts, where the
+// segmentation refuses the cut anyway.
+int uncross_skeleton_cut_planes(const indexed_triangle_set& mesh, const SkeletonDAG& dag,
+                                const std::vector<std::pair<int,int>>& cut_edges,
+                                SkeletonTangents& tangents, double min_gap = 0.5,
+                                double* max_turn_deg = nullptr);
 
 // Number of independent cycles: E - V + (connected components).
 int skeleton_cycle_count(const SkeletonGraph& G);

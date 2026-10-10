@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "Neon",
+  "base": "dark",
+  "colors": {
+    "window_background": "#0B0F1F",
+    "panel_title_strips": "#141A33",
+    "tab_bar": "#070A16",
+    "top_bar": "#0E1130",
+    "selected_tab": "#4A3FB5",
+    "buttons": "#1B2147",
+    "input_borders": "#FF2FA8",
+    "input_background": "#11162B",
+    "labels": "#4DE8FF",
+    "button_input_text": "#FF6AD5",
+    "disabled_text": "#8A8DBE",
+    "separators": "#2A2F66",
+    "accent": "#7B2FF2"
+  },
+  "view_background": "#05071A",
+  "plate_model": "#0D1030",
+  "plate_grid": "#101538",
+  "toolbar": "#141A3A",
+  "label_sys": "#4DE8FF",
+  "label_modified": "#FF2FA8",
+  "focus_ring": "#FF2FA8",
+  "auto_contrast_text": true
+}

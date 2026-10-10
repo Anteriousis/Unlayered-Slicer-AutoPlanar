@@ -86,6 +86,8 @@ private:
     };
 
     std::vector<Item> m_items;
+    // UNLAYERED_MOD: the source layer id of m_items.back(); see update().
+    uint32_t m_last_layer_id{ 0 };
     Range m_view_range;
     // UNLAYERED_MOD: cached "no layer is tilted", so callers can take the cheap Z-based paths.
     bool m_all_planar{ true };

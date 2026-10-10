@@ -31,6 +31,8 @@
 
 #include "I18N.hpp"
 #include "GUI_App.hpp"
+#include "Theme.hpp"
+#include "Widgets/StateColor.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "BackgroundSlicingProcess.hpp"
@@ -38,6 +40,7 @@
 #include "2DBed.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include <cctype>
 #include "Camera.hpp"
 #include "GUI_Colors.hpp"
 #include "GUI_ObjectList.hpp"
@@ -140,6 +143,18 @@ void PartPlate::update_render_colors()
     PartPlate::DEFAULT_COLOR        = ImGuiWrapper::from_ImVec4(RenderColor::colors[RenderCol_Plate_Default]);
     PartPlate::LINE_TOP_COLOR       = ImGuiWrapper::from_ImVec4(RenderColor::colors[RenderCol_Plate_Line_Top]);
     PartPlate::LINE_BOTTOM_COLOR    = ImGuiWrapper::from_ImVec4(RenderColor::colors[RenderCol_Plate_Line_Bottom]);
+}
+
+static std::optional<ColorRGBA> s_grid_override[2]; // [dark theme]
+
+void PartPlate::set_grid_color_override(bool dark, const std::optional<ColorRGBA>& color)
+{
+    s_grid_override[dark ? 1 : 0] = color;
+}
+
+ColorRGBA PartPlate::plate_line_color(bool dark)
+{
+    return s_grid_override[dark ? 1 : 0].value_or(dark ? LINE_TOP_SEL_DARK_COLOR : LINE_TOP_SEL_COLOR);
 }
 
 void PartPlate::load_render_colors()
@@ -1010,7 +1025,7 @@ void PartPlate::render_grid(bool bottom) {
         color = LINE_BOTTOM_COLOR;
 	else {
 		if (m_selected)
-            color = m_partplate_list->m_is_dark ? LINE_TOP_SEL_DARK_COLOR : LINE_TOP_SEL_COLOR;
+            color = plate_line_color(m_partplate_list->m_is_dark);
 		else
             color = m_partplate_list->m_is_dark ? LINE_TOP_DARK_COLOR : LINE_TOP_COLOR;
 	}
@@ -2793,6 +2808,7 @@ bool PartPlate::check_outside(int obj_id, int instance_id, BoundingBoxf3* boundi
 	BoundingBoxf3 instance_box = bounding_box? *bounding_box: object->instance_convex_hull_bounding_box(instance_id);
 	Polygon hull = instance->convex_hull_2d();
 	BoundingBoxf3 plate_box = get_plate_box();
+	this->open_belt_y(plate_box);   // BELT_MOD
 	if (instance_box.max.z() > plate_box.min.z())
 		plate_box.min.z() += instance_box.min.z(); // not considering outsize if sinking
 
@@ -3477,6 +3493,19 @@ Polygon PartPlate::get_shared_printable_polygon() const
 	return m_extruder_areas.empty() ? Polygon::new_scale(m_shape) : get_shared_poly(m_extruder_areas);
 }
 
+// BELT_MOD
+bool PartPlate::belt_open_y() const
+{
+	// Headless (CLI) plates have no plater and no wxApp behind wxGetApp(); the CLI's own belt
+	// handling lives in Print::validate().
+	if (m_plater == nullptr || wxGetApp().preset_bundle == nullptr)
+		return false;
+	const DynamicPrintConfig &printer = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+	const auto *belt       = printer.option<ConfigOptionBool>("belt_printer");
+	const auto *infinite_y = printer.option<ConfigOptionBool>("belt_printer_infinite_y");
+	return belt != nullptr && belt->value && infinite_y != nullptr && infinite_y->value;
+}
+
 bool PartPlate::contains(const Vec3d& point) const
 {
 	return m_bounding_box.contains(point);
@@ -3496,6 +3525,7 @@ bool PartPlate::contains(const BoundingBoxf3& bb) const
 	print_volume.min(1) -= Slic3r::BuildVolume::BedEpsilon;
 	print_volume.max(0) += Slic3r::BuildVolume::BedEpsilon;
 	print_volume.max(1) += Slic3r::BuildVolume::BedEpsilon;
+	this->open_belt_y(print_volume);   // BELT_MOD
 	return print_volume.contains(bb);
 }
 
@@ -3508,6 +3538,7 @@ bool PartPlate::intersects(const BoundingBoxf3& bb) const
 	print_volume.min(1) -= Slic3r::BuildVolume::BedEpsilon;
 	print_volume.max(0) += Slic3r::BuildVolume::BedEpsilon;
 	print_volume.max(1) += Slic3r::BuildVolume::BedEpsilon;
+	this->open_belt_y(print_volume);   // BELT_MOD
 	return print_volume.intersects(bb);
 }
 
@@ -3568,6 +3599,10 @@ void PartPlate::render(const Transform3d& view_matrix, const Transform3d& projec
         else
             render_logo(bottom);
     }
+
+    // Height map above the plate decorations and below anything printed (objects sit at z >= 0).
+    if (!bottom && !only_body && !force_background_color && m_partplate_list && wxGetApp().show_bed_mesh())
+        m_partplate_list->m_bed_mesh_overlay.render(view_matrix, projection_matrix, m_origin, GROUND_Z + 0.025f);
 
     render_icons(bottom, only_body, hover_id);
     if (!force_background_color) {
@@ -4231,6 +4266,23 @@ Vec2d PartPlateList::compute_shape_position(int index, int cols)
 //generate icon textures
 void PartPlateList::generate_icon_textures()
 {
+    // Themed plate icons: the icon's rounded background takes the buttons colour and its glyph
+    // the button-text colour when the theme sets them; otherwise the shipped files as they are.
+    GLTexture::ColorSubstitutions recolor;
+    {
+        const auto& colors = ThemeManager::get().active().colors;
+        auto hex = [](const char* key) { return StateColor::darkModeColorFor(wxColour(key)).GetAsString(wxC2S_HTML_SYNTAX).Lower().ToStdString(); };
+        if (colors.count("buttons"))
+            recolor.emplace_back(m_is_dark ? "#54545a" : "#e9e9e9", hex("#DFDFDF"));
+        if (colors.count("button_input_text"))
+            recolor.emplace_back(m_is_dark ? "#b3b3b3" : "#545454", hex("#262E30"));
+        // The hovered glyph is the accent's icon ramp; a theme that sets the focus outline colour
+        // uses it as the hover highlight here too (the lock icon keeps its own polarity).
+        if (const std::string& focus = ThemeManager::get().active().focus_ring; !focus.empty()) {
+            std::string f = focus; for (char& c : f) c = (char) std::tolower((unsigned char) c);
+            recolor.emplace_back(m_is_dark ? "#B8B8B8" : "#5D5D5D", f);
+        }
+    }
 	// use higher resolution images if graphic card and opengl version allow
 	GLint max_tex_size = OpenGLManager::get_gl_info().get_max_tex_size(), icon_size = max_tex_size / 8;
 	std::string path = resources_dir() + "/images/";
@@ -4241,7 +4293,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_del_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_close_dark.svg" : "plate_close.svg");
-		if (!m_del_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_del_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4249,7 +4301,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_del_hovered_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_close_hover_dark.svg" : "plate_close_hover.svg");
-		if (!m_del_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_del_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4258,7 +4310,7 @@ void PartPlateList::generate_icon_textures()
 	// if (m_move_front_texture.get_id() == 0)
     {
         file_name = path + (m_is_dark ? "plate_move_front_dark.svg" : "plate_move_front.svg");
-        if (!m_move_front_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+        if (!m_move_front_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
         }
     }
@@ -4266,7 +4318,7 @@ void PartPlateList::generate_icon_textures()
     // if (m_move_front_hovered_texture.get_id() == 0)
     {
         file_name = path + (m_is_dark ? "plate_move_front_hover_dark.svg" : "plate_move_front_hover.svg");
-        if (!m_move_front_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+        if (!m_move_front_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
         }
     }
@@ -4274,7 +4326,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_arrange_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_arrange_dark.svg" : "plate_arrange.svg");
-		if (!m_arrange_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_arrange_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4282,7 +4334,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_arrange_hovered_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_arrange_hover_dark.svg" : "plate_arrange_hover.svg");
-		if (!m_arrange_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_arrange_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4290,7 +4342,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_orient_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_orient_dark.svg" : "plate_orient.svg");
-		if (!m_orient_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_orient_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4298,7 +4350,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_orient_hovered_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_orient_hover_dark.svg" : "plate_orient_hover.svg");
-		if (!m_orient_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_orient_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4306,7 +4358,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_locked_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_locked_dark.svg" : "plate_locked.svg");
-		if (!m_locked_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_locked_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4314,7 +4366,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_locked_hovered_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_locked_hover_dark.svg" : "plate_locked_hover.svg");
-		if (!m_locked_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_locked_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4322,7 +4374,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_lockopen_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_unlocked_dark.svg" : "plate_unlocked.svg");
-		if (!m_lockopen_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_lockopen_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4330,7 +4382,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_lockopen_hovered_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_unlocked_hover_dark.svg" : "plate_unlocked_hover.svg");
-		if (!m_lockopen_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_lockopen_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4338,21 +4390,21 @@ void PartPlateList::generate_icon_textures()
 	//if (m_bedtype_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_settings_dark.svg" : "plate_settings.svg");
-		if (!m_plate_settings_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_plate_settings_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
 
 	{
         file_name = path + (m_is_dark ? "plate_set_filament_map_dark.svg" : "plate_set_filament_map.svg");
-        if (!m_plate_set_filament_map_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+        if (!m_plate_set_filament_map_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
         }
     }
 
 	{
         file_name = path + (m_is_dark ? "plate_set_filament_map_hover_dark.svg" : "plate_set_filament_map_hover.svg");
-        if (!m_plate_set_filament_map_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+        if (!m_plate_set_filament_map_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
         }
     }
@@ -4360,7 +4412,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_bedtype_changed_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_settings_changed_dark.svg" : "plate_settings_changed.svg");
-		if (!m_plate_settings_changed_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_plate_settings_changed_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4368,7 +4420,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_bedtype_hovered_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_settings_hover_dark.svg" : "plate_settings_hover.svg");
-		if (!m_plate_settings_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_plate_settings_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4376,7 +4428,7 @@ void PartPlateList::generate_icon_textures()
 	//if (m_bedtype_changed_hovered_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_settings_changed_hover_dark.svg" : "plate_settings_changed_hover.svg");
-		if (!m_plate_settings_changed_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_plate_settings_changed_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -4384,14 +4436,14 @@ void PartPlateList::generate_icon_textures()
 	// if (m_plate_name_edit_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_name_edit_dark.svg" : "plate_name_edit.svg");
-		if (!m_plate_name_edit_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_plate_name_edit_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		 }
 	}
     // if (m_plate_name_edit_hovered_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_name_edit_hover_dark.svg" : "plate_name_edit_hover.svg");
-		if (!m_plate_name_edit_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+		if (!m_plate_name_edit_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size, recolor)) {
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
 		}
 	}
@@ -5979,8 +6031,10 @@ void PartPlateList::render(const Transform3d& view_matrix, const Transform3d& pr
 	}
 
 	static bool last_dark_mode_status = m_is_dark;
-	if (m_is_dark != last_dark_mode_status) {
+	static unsigned last_theme_generation = ThemeManager::get().generation();
+	if (m_is_dark != last_dark_mode_status || ThemeManager::get().generation() != last_theme_generation) {
 		last_dark_mode_status = m_is_dark;
+		last_theme_generation = ThemeManager::get().generation(); // the icons carry theme colours
 		generate_icon_textures();
 	} else if(m_del_texture.get_id() == 0)
 		generate_icon_textures();

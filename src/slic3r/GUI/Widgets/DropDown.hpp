@@ -65,6 +65,8 @@ private:
     ScalableBitmap arrow_bitmap;
 
     bool pressedDown = false;
+    bool keyboard_hover = false; // hover_item was set from the keyboard, paint it without the pointer
+    wxPoint last_mouse_pos{-1, -1};
     boost::posix_time::ptime dismissTime;
     wxPoint                  offset; // x not used
     wxPoint                  dragStart;
@@ -121,9 +123,12 @@ private:
 
     void render(wxDC& dc);
 
-    int hoverIndex();
+    int hoverIndex() { return rowIndex(hover_item); }
+    int rowIndex(int row);
 
     int selectedItem();
+
+    void showSubDropDown(int index);
 
     friend class ComboBox;
     void messureSize();
@@ -135,6 +140,7 @@ private:
     void mouseCaptureLost(wxMouseCaptureLostEvent &event);
     void mouseMove(wxMouseEvent &event);
     void mouseWheelMoved(wxMouseEvent &event);
+    void keyDown(wxKeyEvent &event);
 
     void sendDropDownEvent();
 

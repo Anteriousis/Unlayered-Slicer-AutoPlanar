@@ -92,7 +92,8 @@ std::map<std::string, std::vector<SimpleSettingData>>  SettingsFactory::OBJECT_C
                     {"support_bottom_z_distance", "",20},{"support_top_z_distance", "",21},{"support_base_pattern", "",22},{"support_base_pattern_spacing", "",23},
                     {"support_interface_top_layers", "",24},{"support_interface_bottom_layers", "",25},{"support_interface_spacing", "",26},{"support_bottom_interface_spacing", "",27},
                     {"support_object_xy_distance", "",28}, {"bridge_no_support", "",29},{"max_bridge_length", "",30},{"support_critical_regions_only", "",31},{"support_remove_small_overhang","",32},
-                    {"support_object_first_layer_gap","",33}, {"test_input", "", 34}
+                    {"support_object_first_layer_gap","",33}, {"test_input", "", 34},
+                    {"support_direction", "", 35}, {"support_direction_b", "", 36}, {"support_direction_c", "", 37}, {"support_direction_max_lean", "", 38}, {"support_section_overlap", "", 39}
                     }},
     { L("Speed"), {{"support_speed", "",12}, {"support_interface_speed", "",13}
                   }}
@@ -123,6 +124,11 @@ std::map<std::string, std::vector<SimpleSettingData>> SettingsFactory::PART_CATE
        {"sparse_infill_density", "", 1},
        {"fill_multiline", "", 1},
        {"sparse_infill_pattern", "", 1},
+       {"sparse_infill_svg_path", "", 1},
+       {"sparse_infill_svg_scale", "", 1},
+       {"sparse_infill_single_wall", "", 1},
+       {"infill_mesh_global_orientation", "", 1},
+       {"infill_mesh_path", "", 1},
        {"sparse_infill_smooth_factor", "", 1},
        {"lateral_lattice_angle_1", "", 1},
        {"lateral_lattice_angle_2", "", 1},
@@ -335,13 +341,14 @@ wxBitmap SettingsFactory::get_category_bitmap(const std::string& category_name, 
 //-------------------------------------
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
-static const constexpr std::array<std::pair<const char *, const char *>, 5> ADD_VOLUME_MENU_ITEMS = {{
+static const constexpr std::array<std::pair<const char *, const char *>, 6> ADD_VOLUME_MENU_ITEMS = {{
     //       menu_item Name              menu_item bitmap name
         {L("Add Part"),              "menu_add_part" },           // ~ModelVolumeType::MODEL_PART
         {L("Add Negative Part"),     "menu_add_negative" },       // ~ModelVolumeType::NEGATIVE_VOLUME
         {L("Add Modifier"),          "menu_add_modifier"},         // ~ModelVolumeType::PARAMETER_MODIFIER
         {L("Add Support Blocker"),   "menu_support_blocker"},     // ~ModelVolumeType::SUPPORT_BLOCKER
         {L("Add Support Enforcer"),  "menu_support_enforcer"},     // ~ModelVolumeType::SUPPORT_ENFORCER
+        {L("Add Infill Mesh"),       "menu_add_modifier"},         // ~ModelVolumeType::INFILL_MESH (research/mesh-infill)
 }};
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
@@ -828,7 +835,8 @@ wxMenuItem* MenuFactory::append_menu_item_change_type(wxMenu* menu)
         { ModelVolumeType::NEGATIVE_VOLUME,    _L("Negative Part") },
         { ModelVolumeType::PARAMETER_MODIFIER, _L("Modifier") },
         { ModelVolumeType::SUPPORT_BLOCKER,    _L("Support Blocker") },
-        { ModelVolumeType::SUPPORT_ENFORCER,   _L("Support Enforcer") }
+        { ModelVolumeType::SUPPORT_ENFORCER,   _L("Support Enforcer") },
+        { ModelVolumeType::INFILL_MESH,        _L("Infill Mesh") }
     };
 
     for (const auto& info : types) {
@@ -862,7 +870,7 @@ wxMenuItem* MenuFactory::append_menu_item_change_type(wxMenu* menu)
                     auto vol = (*objs)[obj_idx]->volumes[vol_idx];
 
                     // disable Support Enforcer/Blocker if selection contains svg or text
-                    if (vol != nullptr && (vol->is_svg() || vol->is_text()) && (type == ModelVolumeType::SUPPORT_BLOCKER || type == ModelVolumeType::SUPPORT_ENFORCER)){
+                    if (vol != nullptr && (vol->is_svg() || vol->is_text()) && (type == ModelVolumeType::SUPPORT_BLOCKER || type == ModelVolumeType::SUPPORT_ENFORCER || type == ModelVolumeType::INFILL_MESH)){
                         evt.Enable(false);
                         break;
                     }

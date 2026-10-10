@@ -56,6 +56,11 @@ public:
         std::vector<FileInfo> available_files;
         // path -> why it was left out of the package.
         std::vector<std::pair<std::string, std::string>> skipped;
+        // The firmware the whole package needs (sys_required_firmware), where that came from, and
+        // whether the board is known to be older. An install checks again on the ticked files.
+        std::string required_firmware;
+        std::string required_firmware_reason;
+        bool        firmware_too_old = false;
 
         // Filled by an install run.
         std::vector<std::string> written;

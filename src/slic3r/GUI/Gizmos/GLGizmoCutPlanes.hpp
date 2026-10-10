@@ -6,6 +6,7 @@
 #include "libslic3r/CutPlaneSegmentation.hpp"
 
 #include <memory>
+#include <optional>
 
 namespace Slic3r {
 
@@ -53,6 +54,9 @@ protected:
     void on_set_state() override;
     void data_changed(bool is_serializing) override;
     void on_stop_dragging() override;
+    // UNLAYERED_MOD -- overridden purely to hold the plane at the printer's tilt limit while it is
+    // being dragged, so it stops where it is drawn instead of snapping back when released.
+    void on_dragging(const UpdateData &data) override;
     void on_render() override;
     bool on_mouse(const wxMouseEvent &mouse_event) override;
     void on_load(cereal::BinaryInputArchive &ar) override;
@@ -134,6 +138,27 @@ private:
     // Write the current gizmo pose back into planes[m_active_plane]. The caller is responsible
     // for the undo snapshot. No-op in free mode.
     void commit_gizmo_to_active_plane();
+
+    // UNLAYERED_MOD -- the virtual-5-axis tilt limit, in degrees from vertical, that applies here.
+    // 0 means there is none: not a virtual printer, or one whose gantry height nobody has set.
+    //
+    // Per stored plane, because the limit depends on how far the chunk seated on that plane reaches
+    // (m_plane_reach); and for the whole-object build direction, where the object prints as one
+    // tilted piece so its own footprint is the run.
+    //
+    // And per direction, because the hotend is not round: `azimuth` is the way the build normal
+    // leans (tilt_azimuth()), absent = unknown, which yields the strictest direction.
+    double plane_tilt_limit_deg(int plane_index, std::optional<double> azimuth = std::nullopt) const;
+    double object_tilt_limit_deg(std::optional<double> azimuth = std::nullopt) const;
+    // The azimuth a build normal leans toward, or none when it is vertical and leans nowhere.
+    static std::optional<double> tilt_azimuth(const Vec3d &n_world);
+    static std::optional<double> tilt_azimuth_bc(double b_deg, double c_deg);
+    // Lean `n_world` back to `limit_deg` from vertical, keeping its azimuth. Returned unchanged
+    // when it is already inside the limit, or when there is no limit.
+    static Vec3d clamp_build_normal_to_tilt(const Vec3d &n_world, double limit_deg);
+    // Hold the live gizmo pose at the active plane's limit. Called every drag frame.
+    // True when it had to lean the pose back (and records that in m_tilt_limit_hit_*).
+    bool clamp_rotation_to_tilt_limit();
 
     // Invalidate the current slice after a cut-plane mutation (posts a background-process event).
     void schedule_background_process();
@@ -223,6 +248,18 @@ private:
     // Per stored plane: did it actually contribute a clip to the derived partition? A plane can be
     // valid and still cut nothing (it misses the mesh), which the plane list annotates.
     std::vector<bool>             m_plane_splits;
+    // UNLAYERED_MOD -- per stored plane: the horizontal extent of the largest chunk seated on it,
+    // which is the run the virtual-5-axis gantry limit is measured over (see build_reach_max). Only
+    // as fresh as the last preview rebuild, so mid-drag on a heavy mesh it describes the pose the
+    // preview last settled at. That is deliberate and safe in both directions: it keeps the limit
+    // from sliding around under the user's cursor, and Print::validate() re-checks the exact
+    // clipped pieces before anything is sliced. 0 = not known, which applies the hotend term alone.
+    std::vector<double>           m_plane_reach;
+    // The tilt limit (deg) that last held a plane back -- a drag, a typed angle or a face pick --
+    // for plane m_tilt_limit_hit_plane; 0 once a tilt drag comes back inside it. Drives the red
+    // "limit reached" line in the panel, so a plane that stops following the mouse says why.
+    double                        m_tilt_limit_hit_deg{0.};
+    int                           m_tilt_limit_hit_plane{-1};
     // Why the last derivation produced nothing, and whether it included a not-yet-committed plane.
     CutSegmentationStatus         m_preview_status { CutSegmentationStatus::StackInactive };
     bool                          m_preview_provisional { false };

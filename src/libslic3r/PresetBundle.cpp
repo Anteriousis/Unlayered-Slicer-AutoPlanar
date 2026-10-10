@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <set>
 #include <fstream>
+#include <regex>
 #include <unordered_set>
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/clamp.hpp>
@@ -1667,6 +1668,53 @@ std::string PresetBundle::find_resource_vendor_for_preset(const std::string &typ
     return {};
 }
 
+namespace {
+// Unlayered: what an archive's bundle_structure.json says about how to import it.
+struct ExportArchiveInfo
+{
+    // A per-preset export (.orca_printer / .orca_filament, or Bambu Studio's equivalents): a
+    // user moving their own presets between installs, not a bundle.
+    bool        single_preset_export{false};
+    std::string display_name; // the bundle's own "name", if it carries one
+};
+
+// Orca Cloud (#13414) turned every archive carrying a bundle_structure.json into a read-only local
+// bundle with a submenu of its own. The "Export preset bundle" dialog writes one archive per
+// printer or filament, so importing 20 of them gave 20 one-entry submenus of presets the user
+// could no longer save over. Those go back to being user presets, as before Orca Cloud. A
+// deliberate multi-preset bundle (the .orca_bundle export, whose printer_preset_name is the
+// literal "export") or one that names itself stays a bundle.
+ExportArchiveInfo read_export_archive_info(const std::string &structure_path)
+{
+    ExportArchiveInfo info;
+    try {
+        boost::nowide::ifstream ifs(structure_path);
+        json                    j;
+        ifs >> j;
+        if (j.contains("name") && j["name"].is_string())
+            info.display_name = j["name"].get<std::string>();
+        if (j.contains("id") || !info.display_name.empty())
+            return info;
+        const std::string type = j.value("bundle_type", std::string());
+        info.single_preset_export = type == "filament config bundle" ||
+                                    (type == "printer config bundle" && j.value("printer_preset_name", std::string("export")) != "export");
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " cannot read " << structure_path << ": " << e.what();
+    }
+    return info;
+}
+
+// Both export dialogs write bundle_id as "<cloud user id or offline>_<name>_<timestamp>" and give no
+// display name, so a bundle imported from one was named by that id. Returns the embedded name, or
+// an empty string when `id` is not shaped like that.
+std::string name_from_export_bundle_id(const std::string &id)
+{
+    static const std::regex re(R"(^(?:[0-9A-Za-z-]+)_(.+)_(?:\d{14}|\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2})$)");
+    std::smatch             m;
+    return std::regex_match(id, m, re) ? m[1].str() : std::string();
+}
+} // namespace
+
 PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string> &              files,
                                                         std::function<int(std::string const &)> override_confirm,
                                                         ForwardCompatibilitySubstitutionRule    rule,
@@ -1729,6 +1777,20 @@ PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string>
                 if (metadata.load_from_json(metadata_path.string())) {
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Found bundle_id: " << metadata.id << " from " << BUNDLE_STRUCTURE_JSON_NAME;
                     has_bundle_structure = true;
+                }
+            }
+            // Unlayered: see read_export_archive_info().
+            if (has_bundle_structure) {
+                const ExportArchiveInfo info = read_export_archive_info(metadata_path.string());
+                if (info.single_preset_export) {
+                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << file << " is a per-preset export, importing as user presets";
+                    has_bundle_structure = false;
+                } else if (info.display_name.empty()) {
+                    // Name the bundle after the archive the user picked, not the export's id.
+                    std::string stem = file.substr(file.find_last_of("/\\") + 1);
+                    stem             = stem.substr(0, stem.find_last_of('.'));
+                    if (!stem.empty())
+                        metadata.name = stem;
                 }
             }
 
@@ -7958,6 +8020,9 @@ bool BundleMetadata::load_from_json(const std::string& path)
 
         if (j.contains("name")) this->name = j["name"].get<std::string>();
         else if (j.contains("bundle_id")) this->name = j["bundle_id"].get<std::string>();                 // backwards compat w bundle_structure.json
+        // Unlayered: bundles imported before the fix saved that id as their name.
+        if (std::string embedded = name_from_export_bundle_id(this->name); !embedded.empty())
+            this->name = std::move(embedded);
 
         if (j.contains("version")) this->version = j["version"].get<std::string>();
 

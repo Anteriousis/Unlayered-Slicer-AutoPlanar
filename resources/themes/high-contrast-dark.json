@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "name": "High contrast dark",
+  "base": "dark",
+  "colors": {
+    "window_background": "#000000",
+    "panel_title_strips": "#101010",
+    "tab_bar": "#000000",
+    "selected_tab": "#303030",
+    "buttons": "#202020",
+    "input_borders": "#FFFFFF",
+    "input_background": "#000000",
+    "labels": "#FFFFFF",
+    "button_input_text": "#FFFFFF",
+    "disabled_text": "#A0A0A0",
+    "separators": "#808080"
+  },
+  "view_background": "#000000",
+  "plate_model": "#202020",
+  "plate_grid": "#6A6A6A",
+  "focus_ring": "#FFFF00",
+  "auto_contrast_text": true
+}

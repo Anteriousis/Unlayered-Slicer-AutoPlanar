@@ -211,11 +211,16 @@ std::unique_ptr<NetworkAgent> create_agent_from_config(const std::string& log_di
             orca_cloud->configure_urls(app_config);
         }
 
-        // Initialize third-party cloud agents from config
+        // Initialize third-party cloud agents from config.
+        // Unlayered: the Bambu (BBL) cloud agent is never created -- this build has no Bambu
+        // account/cloud surface, only LAN printing via the BBL *printer* agent, which does not use a
+        // cloud agent. See create_cloud_agent(): BBL_CLOUD_PROVIDER now returns nullptr.
         auto providers = app_config->get_cloud_providers();
         for (const auto& provider : providers) {
             if (provider == ORCA_CLOUD_PROVIDER)
                 continue; // Primary agent already created above
+            if (provider == BBL_CLOUD_PROVIDER)
+                continue; // Bambu cloud removed; LAN uses the printer agent only
             auto third_party_agent = NetworkAgentFactory::create_cloud_agent(provider, log_dir);
             if (third_party_agent) {
                 agent->add_cloud_agent(provider, std::move(third_party_agent));

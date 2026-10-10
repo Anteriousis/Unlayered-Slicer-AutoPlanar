@@ -161,3 +161,21 @@ TEST_CASE("Bounds built from a derived segment agree with its cut planes", "[cut
     CHECK(bounds.valid_region_polygon(-1.).empty());
     CHECK(bounds.valid_region_polygon(9.).empty());   // 8 mm band: 6..14 rebased to 0..8
 }
+
+TEST_CASE("The root's first support layer survives the bed plane raised by its own height", "[SegmentSupportBounds]")
+{
+    // The bed plane is raised by bed_clearance so support rests one first-layer height above the
+    // plate, and the first support layer is printed at exactly that height. The root's build_z_min
+    // is measured on the mesh and carries a few microns of noise below zero, which used to put the
+    // plane a hair ABOVE the first layer and drop that layer entirely.
+    CutSegmentDescriptor root;
+    root.index       = 0;
+    root.parent      = -1;
+    root.build_z_min = -2e-6;
+    root.build_z_max = 20.;
+    const double first_layer = 0.2;
+    const SegmentSupportBounds bounds(root, Transform3d::Identity(), first_layer);
+    REQUIRE(bounds.is_active());
+    CHECK(! bounds.valid_region_polygon(first_layer).empty());
+    CHECK(  bounds.valid_region_polygon(first_layer - 0.1).empty());
+}

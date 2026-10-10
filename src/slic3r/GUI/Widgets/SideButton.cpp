@@ -7,6 +7,7 @@
 BEGIN_EVENT_TABLE(SideButton, wxWindow)
 EVT_LEFT_DOWN(SideButton::mouseDown)
 EVT_LEFT_UP(SideButton::mouseReleased)
+EVT_KEY_DOWN(SideButton::keyDown)
 EVT_PAINT(SideButton::paintEvent)
 END_EVENT_TABLE()
 
@@ -48,7 +49,10 @@ SideButton::SideButton(wxWindow* parent, wxString text, wxString icon, long stly
     border_color.append(0x767676, StateColor::Normal);
     border_color.setTakeFocusedAsHovered(false);
 
-    text_color.append(0xACACAC, StateColor::Disabled);
+    // Disabled text must still be readable on the ghost pill: #ACACAC would take the generic
+    // dimmed-text dark row (#65656A, 1.8:1 on #414144). Own key with its own dark row instead
+    // (4.7:1 light, 5.6:1 dark), still a step below the enabled white.
+    text_color.append(wxColour("#D0D0D1"), StateColor::Disabled);
     text_color.append(0xFEFEFE, StateColor::Pressed);
     text_color.append(0xFEFEFE, StateColor::Hovered);
     text_color.append(0xFEFEFE, StateColor::Normal);
@@ -213,7 +217,9 @@ void SideButton::dorender(wxDC& dc, wxDC& text_dc)
 
     // draw background
     dc.SetPen(wxNullPen);
-    dc.SetBrush(StateColor::darkModeColorFor(bottom_color));
+    // The corners outside the pill show whatever the parent shows: paint them with the parent's
+    // current background so they can never lag behind a theme change.
+    dc.SetBrush(wxBrush(GetParent() != nullptr ? GetParent()->GetBackgroundColour() : StateColor::darkModeColorFor(bottom_color)));
     dc.DrawRectangle(0, 0, size.x, size.y);
 
     int states = state_handler.states();
@@ -349,6 +355,15 @@ void SideButton::mouseReleased(wxMouseEvent& event)
         if (wxRect({0, 0}, GetSize()).Contains(event.GetPosition()))
             sendButtonEvent();
     }
+}
+
+void SideButton::keyDown(wxKeyEvent& event)
+{
+    // Space/Enter press the button, like a native one.
+    if ((event.GetKeyCode() == WXK_SPACE || event.GetKeyCode() == WXK_RETURN) && IsEnabled())
+        sendButtonEvent();
+    else
+        event.Skip();
 }
 
 void SideButton::sendButtonEvent()

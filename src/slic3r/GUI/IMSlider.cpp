@@ -25,10 +25,22 @@ static const float  GROOVE_WIDTH      = 12.0f;
 static const ImVec2 ONE_LAYER_MARGIN  = ImVec2(20.0f, 20.0f);
 static const ImVec2 ONE_LAYER_BUTTON_SIZE  = ImVec2(56.0f, 56.0f);
 
-static const ImU32 BACKGROUND_COLOR_DARK  = IM_COL32(65, 65, 71, 255);
-static const ImU32 BACKGROUND_COLOR_LIGHT = IM_COL32(255, 255, 255, 255);
-static const ImU32 GROOVE_COLOR_DARK      = IM_COL32(45, 45, 49, 255);
-static const ImU32 GROOVE_COLOR_LIGHT     = IM_COL32(206, 206, 206, 255);
+static const ImU32 BACKGROUND_COLOR_DARK  = IM_COL32(43, 43, 48, 255); // #2B2B30, one step above the dark window
+static ImU32 background_color_light() // the light window colour, theme override included
+{
+    const wxColour c = StateColor::darkModeColorFor(wxColour("#FFFFFF"));
+    return IM_COL32(c.Red(), c.Green(), c.Blue(), 255);
+}
+static ImU32 groove_color_dark() // the dark window colour, user override included
+{
+    const wxColour c = StateColor::darkModeColorFor(wxColour("#FFFFFF"));
+    return IM_COL32(c.Red(), c.Green(), c.Blue(), 255);
+}
+static ImU32 groove_color_light() // the selected-tab grey, theme override included
+{
+    const wxColour c = StateColor::darkModeColorFor(wxColour("#CECECE"));
+    return IM_COL32(c.Red(), c.Green(), c.Blue(), 255);
+}
 static const ImU32 BRAND_COLOR            = IM_COL32(118, 118, 118, 255);
 
 static int m_tick_value = -1;
@@ -473,8 +485,8 @@ bool IMSlider::switch_one_layer_mode()
 }
 
 void IMSlider::draw_background_and_groove(const ImRect& bg_rect, const ImRect& groove) {
-    const ImU32 bg_rect_col = m_is_dark ? BACKGROUND_COLOR_DARK : BACKGROUND_COLOR_LIGHT;
-    const ImU32 groove_col = m_is_dark ? GROOVE_COLOR_DARK : GROOVE_COLOR_LIGHT;
+    const ImU32 bg_rect_col = m_is_dark ? BACKGROUND_COLOR_DARK : background_color_light();
+    const ImU32 groove_col = m_is_dark ? groove_color_dark() : groove_color_light();
 
     // draw bg of slider
     ImGui::RenderFrame(bg_rect.Min, bg_rect.Max, bg_rect_col, false, 0.5 * bg_rect.GetWidth());
@@ -504,11 +516,13 @@ bool IMSlider::horizontal_slider(const char* str_id, int* value, int v_min, int 
     const ImVec2 text_padding        = ImVec2(5.0f, 2.0f) * m_scale;
 
     const ImU32 handle_clr = BRAND_COLOR;
-    const ImU32 handle_border_clr = m_is_dark ? BACKGROUND_COLOR_DARK : BACKGROUND_COLOR_LIGHT;
-    const wxColour label_bg = StateColor::darkModeColorFor(wxGetApp().get_window_default_clr());
+    const ImU32 handle_border_clr = m_is_dark ? BACKGROUND_COLOR_DARK : background_color_light();
+    // Dark: below the window colour so the label box reads as a box; the text is the theme's
+    // label colour (pushed in render()), not the grey accent it used to be.
+    const wxColour label_bg = m_is_dark ? wxColour("#1B1B1E") : wxGetApp().get_window_default_clr();
     const wxColour label_border = StateColor::darkModeColorFor(wxColour("#CECECE"));
     const wxColour rail_inner_bg = m_is_dark ? StateColor::darkModeColorFor(wxColour("#CECECE")) : wxGetApp().get_highlight_default_clr();
-    const wxColour rail_border = m_is_dark ? StateColor::darkModeColorFor(wxColour("#F0F0F1")) : wxColour("#CECECE");
+    const wxColour rail_border = m_is_dark ? StateColor::darkModeColorFor(wxColour("#F0F0F1")) : StateColor::darkModeColorFor(wxColour("#CECECE"));
     const ImU32 label_bg_clr = IM_COL32(label_bg.Red(), label_bg.Green(), label_bg.Blue(), 238);
     const ImU32 label_border_clr = IM_COL32(label_border.Red(), label_border.Green(), label_border.Blue(), 255);
     const ImU32 label_shadow_clr = m_is_dark ? IM_COL32(0, 0, 0, 84) : IM_COL32(0, 0, 0, 38);
@@ -586,13 +600,13 @@ void IMSlider::draw_colored_band(const ImRect& groove, const ImRect& slideable_r
 
     auto draw_band = [this](const ImU32& clr, const ImRect& band_rc)
     {
-        if (clr == (m_is_dark ? BACKGROUND_COLOR_DARK : BACKGROUND_COLOR_LIGHT)) {
+        if (clr == (m_is_dark ? BACKGROUND_COLOR_DARK : background_color_light())) {
             ImRect rc = band_rc;
             rc.Min += ImVec2(1, 1) * m_scale;
             rc.Max -= ImVec2(1, 1) * m_scale;
-            ImGui::RenderFrame(band_rc.Min, band_rc.Max, m_is_dark ? GROOVE_COLOR_DARK : GROOVE_COLOR_LIGHT, false, band_rc.GetWidth() * 0.5);
+            ImGui::RenderFrame(band_rc.Min, band_rc.Max, m_is_dark ? groove_color_dark() : groove_color_light(), false, band_rc.GetWidth() * 0.5);
             //cover round corner
-            ImGui::RenderFrame(ImVec2(band_rc.Min.x, band_rc.Max.y - band_rc.GetWidth() * 0.5), band_rc.Max, m_is_dark ? GROOVE_COLOR_DARK : GROOVE_COLOR_LIGHT, false);
+            ImGui::RenderFrame(ImVec2(band_rc.Min.x, band_rc.Max.y - band_rc.GetWidth() * 0.5), band_rc.Max, m_is_dark ? groove_color_dark() : groove_color_light(), false);
 
             ImGui::RenderFrame(rc.Min, rc.Max, clr, false, rc.GetWidth() * 0.5);
             //cover round corner
@@ -605,11 +619,11 @@ void IMSlider::draw_colored_band(const ImRect& groove, const ImRect& slideable_r
         }
     };
     auto draw_main_band = [&main_band, this](const ImU32& clr) {
-        if (clr == (m_is_dark ? BACKGROUND_COLOR_DARK : BACKGROUND_COLOR_LIGHT)) {
+        if (clr == (m_is_dark ? BACKGROUND_COLOR_DARK : background_color_light())) {
             ImRect rc = main_band;
             rc.Min += ImVec2(1, 1) * m_scale;
             rc.Max -= ImVec2(1, 1) * m_scale;
-            ImGui::RenderFrame(main_band.Min, main_band.Max, m_is_dark ? GROOVE_COLOR_DARK : GROOVE_COLOR_LIGHT, false, main_band.GetWidth() * 0.5);
+            ImGui::RenderFrame(main_band.Min, main_band.Max, m_is_dark ? groove_color_dark() : groove_color_light(), false, main_band.GetWidth() * 0.5);
             ImGui::RenderFrame(rc.Min, rc.Max, clr, false, rc.GetWidth() * 0.5);
         }
         else {
@@ -704,7 +718,7 @@ void IMSlider::draw_ticks(const ImRect& slideable_region) {
     ImVec2 icon_size     = ImVec2(14.0f, 14.0f) * m_scale;
 
     const ImU32 tick_clr = IM_COL32(144, 144, 144, 255);
-    const ImU32 tick_hover_box_clr = m_is_dark ? IM_COL32(65, 65, 71, 255) : IM_COL32(216, 216, 216, 255);
+    const ImU32 tick_hover_box_clr = m_is_dark ? IM_COL32(43, 43, 48, 255) : IM_COL32(216, 216, 216, 255);
 
     auto get_tick_pos = [this, slideable_region](int tick)
     {
@@ -897,14 +911,16 @@ bool IMSlider::vertical_slider(const char* str_id, int* higher_value, int* lower
     const ImVec2 text_padding        = ImVec2(5.0f, 2.0f) * m_scale;
     ImVec2 text_size;
 
-    const ImU32 white_bg = m_is_dark ? BACKGROUND_COLOR_DARK : BACKGROUND_COLOR_LIGHT;
+    const ImU32 white_bg = m_is_dark ? BACKGROUND_COLOR_DARK : background_color_light();
     const ImU32 handle_clr = BRAND_COLOR;
-    const ImU32 handle_border_clr = m_is_dark ? BACKGROUND_COLOR_DARK : BACKGROUND_COLOR_LIGHT;
-    const wxColour label_bg = StateColor::darkModeColorFor(wxGetApp().get_window_default_clr());
+    const ImU32 handle_border_clr = m_is_dark ? BACKGROUND_COLOR_DARK : background_color_light();
+    // Dark: below the window colour so the label box reads as a box; the text is the theme's
+    // label colour (pushed in render()), not the grey accent it used to be.
+    const wxColour label_bg = m_is_dark ? wxColour("#1B1B1E") : wxGetApp().get_window_default_clr();
     const wxColour label_bg_active = StateColor::darkModeColorFor(wxColour("#ECECEC"));
     const wxColour label_border = StateColor::darkModeColorFor(wxColour("#CECECE"));
     const wxColour rail_inner_bg = m_is_dark ? StateColor::darkModeColorFor(wxColour("#CECECE")) : wxGetApp().get_highlight_default_clr();
-    const wxColour rail_border = m_is_dark ? StateColor::darkModeColorFor(wxColour("#F0F0F1")) : wxColour("#CECECE");
+    const wxColour rail_border = m_is_dark ? StateColor::darkModeColorFor(wxColour("#F0F0F1")) : StateColor::darkModeColorFor(wxColour("#CECECE"));
     const ImU32 label_bg_clr = IM_COL32(label_bg.Red(), label_bg.Green(), label_bg.Blue(), 238);
     const ImU32 label_bg_active_clr = IM_COL32(label_bg_active.Red(), label_bg_active.Green(), label_bg_active.Blue(), 246);
     const ImU32 label_border_clr = IM_COL32(label_border.Red(), label_border.Green(), label_border.Blue(), 255);
@@ -1227,7 +1243,8 @@ bool IMSlider::render(int canvas_width, int canvas_height)
     ImGui::PushStyleVar(ImGuiStyleVar_::ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_::ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::PushStyleColor(ImGuiCol_::ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_::ImGuiCol_Text, ImGuiWrapper::COL_ORCA); // ORCA: Use orca color for slider value text
+    // Value labels in the theme's text colour: the grey accent sat at 3.5:1 (dark) / 4.5:1 (light).
+    ImGui::PushStyleColor(ImGuiCol_::ImGuiCol_Text, m_is_dark ? ImVec4(226 / 255.0f, 226 / 255.0f, 229 / 255.0f, 1.0f) : ImVec4(50 / 255.0f, 58 / 255.0f, 61 / 255.0f, 1.0f));
 
     int windows_flag = ImGuiWindowFlags_NoTitleBar
                        | ImGuiWindowFlags_NoCollapse

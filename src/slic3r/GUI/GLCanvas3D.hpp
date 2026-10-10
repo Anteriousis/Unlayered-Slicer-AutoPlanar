@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <memory>
+#include <optional>
 #include <chrono>
 #include <cstdint>
 
@@ -177,7 +178,6 @@ wxDECLARE_EVENT(EVT_GLCANVAS_UPDATE_GEOMETRY, Vec3dsEvent<2>);
 wxDECLARE_EVENT(EVT_GLCANVAS_MOUSE_DRAGGING_STARTED, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_MOUSE_DRAGGING_FINISHED, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_UPDATE_BED_SHAPE, SimpleEvent);
-wxDECLARE_EVENT(EVT_GLCANVAS_TAB, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_RESETGIZMOS, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_MOVE_SLIDERS, wxKeyEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_EDIT_COLOR_CHANGE, wxKeyEvent);
@@ -186,7 +186,6 @@ wxDECLARE_EVENT(EVT_GLCANVAS_UNDO, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_REDO, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_SWITCH_TO_OBJECT, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_SWITCH_TO_GLOBAL, SimpleEvent);
-wxDECLARE_EVENT(EVT_GLCANVAS_COLLAPSE_SIDEBAR, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_RELOAD_FROM_DISK, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_RENDER_TIMER, wxTimerEvent/*RenderTimerEvent*/);
 wxDECLARE_EVENT(EVT_GLCANVAS_TOOLBAR_HIGHLIGHTER_TIMER, wxTimerEvent);
@@ -591,7 +590,8 @@ private:
     bool m_dynamic_background_enabled;
     bool m_multisample_allowed;
     bool m_moving;
-    bool m_tab_down;
+    // Keyboard stepping through the toolbar and gizmo icons; -1 = the view itself.
+    int  m_kbd_tool{ -1 };
     bool m_camera_movement;
     //BBS: add toolpath outside
     bool m_toolpath_outside{ false };
@@ -745,7 +745,13 @@ public:
     // Cached, world-space mesh of the usable build volume: a single cylinder on the rotary axis.
     // Rebuilt only when its dimensions or the plate center change (keyed by m_..._key).
     GLModel m_chunk_build_volumes;
+    // Unlayered: the SVG infill art tiled over the current plate at print scale, shown while the
+    // Strength page's SVG settings are being edited (Tab -> Plater::set_svg_infill_preview).
+    GLModel m_svg_infill_preview;
     std::string m_chunk_build_volumes_key;
+    // UNLAYERED_MOD -- unit arrow (along +Z, 1 unit long) drawn per selected instance whose object
+    // leans its support; see _render_support_direction_arrows().
+    GLModel m_support_direction_arrow;
     // Depth-based shadow map used to cast object shadows onto other objects and themselves.
     unsigned int m_shadow_map_fbo{ 0 };
     unsigned int m_shadow_map_texture_id{ 0 };
@@ -790,6 +796,11 @@ public:
     float get_explosion_ratio() { return m_explosion_ratio; }
     void reset_explosion_ratio() { m_explosion_ratio = 1.0; }
     void on_change_color_mode(bool is_dark, bool reinit = true);
+    // Preferences > Appearance: a user colour for the view background of one theme (nullopt =
+    // built-in), and the colour in effect.
+    static void set_background_color_override(bool dark, const std::optional<ColorRGBA>& color);
+    static ColorRGBA view_background_color(bool dark);
+
     const bool get_dark_mode_status() { return m_is_dark; }
     void set_as_dirty() { m_dirty = true; }
     void requires_check_outside_state() { m_requires_check_outside_state = true; }
@@ -1205,6 +1216,9 @@ public:
         m_sequential_print_clearance.set_polygons(Polygons(), std::vector<std::pair<Polygon, float>>());
     }
 
+    // Replace the SVG infill preview lines (mm, drawn at height z); empty clears it.
+    void set_svg_infill_preview(const Polylines& lines, double z);
+
     void set_sequential_print_clearance_visible(bool visible) {
         m_sequential_print_clearance.set_visible(visible);
     }
@@ -1256,6 +1270,9 @@ private:
     bool _init_collapse_toolbar();
 
     bool _set_current();
+    bool _keyboard_tool_step(int direction); // false: stepped past the ends, leave the view
+    void _keyboard_tool_activate();
+    void _keyboard_tool_clear();
     void _resize(unsigned int w, unsigned int h);
 
     //BBS: add part plate related logic
@@ -1277,10 +1294,15 @@ private:
     void _render_ssao_pass(unsigned int width, unsigned int height);
     void _render_background();
     void _render_bed(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_axes);
+    void _render_svg_infill_preview(const Transform3d& view_matrix, const Transform3d& projection_matrix);
     // Draws the usable build volume as a translucent cylinder on the rotary axis, sized by the
     // radius / max_build_height / min_build_height printer settings. Shown when at least one chunk
     // (a ModelObject carrying a layer_rotation_b override) is present. Visualization only.
     void _render_chunk_build_volumes(const Transform3d& view_matrix, const Transform3d& projection_matrix);
+    // Support direction arrows: one per selected instance whose object sets support_direction to
+    // "World vertical" or "Custom", pointing along the resolved WORLD direction from above the
+    // instance. Visualization only; support_lean() resolves the same direction for slicing.
+    void _render_support_direction_arrows(const Transform3d& view_matrix, const Transform3d& projection_matrix);
     // Build the light-space depth shadow map (consumed by gouraud/phong for object & self shadows)
     // and cast it onto the build plate. Realistic view only.
     void _render_shadows(const Transform3d& view_matrix, const Transform3d& projection_matrix);
@@ -1323,6 +1345,7 @@ private:
     void _render_paint_toolbar() const;
     float _render_assembly_tooltip_button(ImGuiWrapper* imgui_wrapper) const;
     void _render_assemble_control();
+    void _render_bed_mesh_legend();
     void _render_assemble_info() const;
 #if ENABLE_SHOW_CAMERA_TARGET
     void _render_camera_target();

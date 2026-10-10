@@ -4,6 +4,7 @@
 #include "SlicingProgressNotification.hpp"
 #include "GUI.hpp"
 #include "ImGuiWrapper.hpp"
+#include "Widgets/StateColor.hpp"
 #include "wxExtensions.hpp"
 #include "ObjectDataViewModel.hpp"
 #include "GUI_ObjectList.hpp"
@@ -236,8 +237,16 @@ void NotificationManager::PopNotification::use_bbl_theme()
  //   OldStyle.Colors[ImGuiCol_WindowBg] = m_WindowBkgColor;
  //   OldStyle.Colors[ImGuiCol_Text]     = m_TextColor;
 
-	m_WindowBkgColor = m_is_dark ? ImVec4(45 / 255.f, 45 / 255.f, 49 / 255.f, 1.f) : ImVec4(1, 1, 1, 1);
+	// The dark card is one step above the shipped dark window; when the theme sets the window
+	// colour the card follows it and the text is pushed to read on it.
+	const bool themed_dark = m_is_dark && ImGuiWrapper::COL_WINDOW_BACKGROUND_THEMED;
+	m_WindowBkgColor = themed_dark ? ImGuiWrapper::COL_WINDOW_BG_DARK : m_is_dark ? ImVec4(45 / 255.f, 45 / 255.f, 49 / 255.f, 1.f) : ImVec4(1, 1, 1, 1);
 	m_TextColor = m_is_dark ? ImVec4(224 / 255.f, 224 / 255.f, 224 / 255.f, 1.f) : ImVec4(.2f, .2f, .2f, 1.0f);
+	if (themed_dark) {
+		const wxColour bg(int(m_WindowBkgColor.x * 255), int(m_WindowBkgColor.y * 255), int(m_WindowBkgColor.z * 255));
+		const wxColour text = StateColor::EnsureContrast(wxColour(224, 224, 224), bg, 4.5);
+		m_TextColor = ImVec4(text.Red() / 255.f, text.Green() / 255.f, text.Blue() / 255.f, 1.f);
+	}
 	m_HyperTextColor = m_is_dark ? ImVec4(0.463, 0.463, 0.463, 1) : ImVec4(0.463, 0.463, 0.463, 1);
 	m_HyperTextColorHover = m_is_dark ? ImVec4(136.f / 255.f, 136.f / 255.f, 136.f / 255.f, 1) : ImVec4(136.f / 255.f, 136.f / 255.f, 136.f / 255.f, 1); //#888888 / #888888;
 
@@ -3447,10 +3456,14 @@ void NotificationManager::bbl_close_seqprintinfo_notification()
 
 void NotificationManager::bbl_show_plugin_install_notification(const std::string &text)
 {
-    // Unlayered: this used to end with " Click here to install it." and an action that opened the
-    // Bambu network plug-in installer. The plug-in is not installable here, so the notification
-    // states the consequence without offering an action that would do nothing.
-    NotificationData data{NotificationType::BBLPluginInstallHint, NotificationLevel::WarningNotificationLevel, 0, text};
+    std::string hyper_text;
+    auto callback = [](wxEvtHandler *) {
+        wxCommandEvent *evt = new wxCommandEvent(EVT_INSTALL_PLUGIN_NETWORKING);
+        wxQueueEvent(wxGetApp().plater(), evt);
+        return false;
+    };
+    hyper_text =  _u8L(" Click here to install it.");
+    NotificationData data{NotificationType::BBLPluginInstallHint, NotificationLevel::WarningNotificationLevel, 0, text, hyper_text, callback};
 
     for (std::unique_ptr<PopNotification> &notification : m_pop_notifications) {
         if (notification->get_type() == NotificationType::BBLPluginInstallHint) {

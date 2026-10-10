@@ -99,6 +99,10 @@ namespace GUI {
 
         bool load_from_file(const std::string& filename, bool use_mipmaps, ECompressionType compression_type, bool apply_anisotropy);
         bool load_from_svg_file(const std::string& filename, bool use_mipmaps, bool compress, bool apply_anisotropy, unsigned int max_size_px);
+        // Same, with literal colour substitutions ("#rrggbb" -> "#rrggbb") applied to the SVG text
+        // before it is parsed: the plate icons take the theme's colours this way.
+        using ColorSubstitutions = std::vector<std::pair<std::string, std::string>>;
+        bool load_from_svg_file(const std::string& filename, bool use_mipmaps, bool compress, bool apply_anisotropy, unsigned int max_size_px, const ColorSubstitutions& substitutions);
         //BBS load GLTexture from raw pixel data
         bool load_from_raw_data(std::vector<unsigned char> data, unsigned int w, unsigned int h, bool apply_anisotropy = false);
         // meanings of states: (std::pair<int, bool>)
@@ -131,11 +135,12 @@ namespace GUI {
         bool all_compressed_data_sent_to_gpu() const { return m_compressor.all_compressed_data_sent_to_gpu(); }
 
         static void render_texture(unsigned int tex_id, float left, float right, float bottom, float top);
-        static void render_sub_texture(unsigned int tex_id, float left, float right, float bottom, float top, const Quad_UVs& uvs);
+        // opaque: ignore the texture's alpha (preference "opaque_overlays").
+        static void render_sub_texture(unsigned int tex_id, float left, float right, float bottom, float top, const Quad_UVs& uvs, bool opaque = false);
 
     private:
         bool load_from_png(const std::string& filename, bool use_mipmaps, ECompressionType compression_type, bool apply_anisotropy);
-        bool load_from_svg(const std::string& filename, bool use_mipmaps, bool compress, bool apply_anisotropy, unsigned int max_size_px);
+        bool load_from_svg(const std::string& filename, bool use_mipmaps, bool compress, bool apply_anisotropy, unsigned int max_size_px, const ColorSubstitutions* substitutions = nullptr);
 
         friend class Compressor;
     };

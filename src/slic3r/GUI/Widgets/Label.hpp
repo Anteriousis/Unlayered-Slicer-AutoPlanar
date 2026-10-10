@@ -57,6 +57,13 @@ public:
 	static void initSysFont();
 
     static wxFont sysFont(int size, bool bold = false);
+    // Multiplier for every sysFont() size (preference "ui_font_scale"); set before initSysFont().
+    static void   setFontScale(float scale);
+    static float  getFontScale();
+    // Preference "ui_font_family": "" (the default face), "comic" (Comic Sans MS where installed,
+    // else the bundled Comic Neue), "dyslexic" (the bundled OpenDyslexic). Set before initSysFont().
+    static void   setFontFamily(const std::string& family);
+    static std::string getFontFamily();
 
     static wxSize split_lines(wxDC &dc, int width, const wxString &text, wxString &multiline_text, int max_count = 0);
 };

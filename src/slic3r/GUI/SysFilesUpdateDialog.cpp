@@ -536,6 +536,23 @@ void SysFilesUpdateDialog::on_job_finished(wxCommandEvent &evt)
             m_status->SetLabel(wxString::Format(_L("%d file(s) ready to write."),
                                                 int(m_job_result->available_files.size())));
         }
+
+        // Said up front rather than only when Install fails. Install stays enabled: the job
+        // judges the ticked files, so unticking the file that needs the newer firmware still works.
+        if (m_job_result->firmware_too_old) {
+            const wxString need    = wxString::FromUTF8(m_job_result->required_firmware.c_str());
+            const wxString running = wxString::FromUTF8(m_job_result->board.firmware_version.c_str());
+            m_status->SetLabel(wxString::Format(_L("Update the printer's firmware first: these files need %s or newer."), need));
+            wxString text = m_notes->GetValue();
+            if (!text.IsEmpty())
+                text += "\n\n";
+            text += wxString::Format(_L("FIRMWARE TOO OLD: these files need printer firmware %s or newer (%s), and the "
+                                        "printer is running %s. Installing them now would stop the printer's startup "
+                                        "file part way, leaving it with no heaters or tool. Use the Firmware button "
+                                        "first."),
+                                     need, wxString::FromUTF8(m_job_result->required_firmware_reason.c_str()), running);
+            m_notes->SetValue(text);
+        }
         break;
     }
 

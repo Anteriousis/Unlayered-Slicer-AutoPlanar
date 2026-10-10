@@ -268,8 +268,25 @@ ModeSwitchButton::ModeSwitchButton(wxWindow* parent, wxWindowID id)
     Bind(wxEVT_LEFT_UP, &ModeSwitchButton::mouseReleased, this);
     Bind(wxEVT_LEFT_DCLICK, &ModeSwitchButton::mouseDown, this);
     Bind(wxEVT_MOUSE_CAPTURE_LOST, &ModeSwitchButton::mouseCaptureLost, this);
+    Bind(wxEVT_KEY_DOWN, &ModeSwitchButton::keyDown, this);
 
     Rescale();
+}
+
+void ModeSwitchButton::keyDown(wxKeyEvent& event)
+{
+    // Keyboard operation, like a radio group: arrows step, Space/Enter cycles.
+    int selection = m_selection;
+    switch (event.GetKeyCode()) {
+    case WXK_LEFT: case WXK_UP:    selection = std::max(0, m_selection - 1); break;
+    case WXK_RIGHT: case WXK_DOWN: selection = std::min(2, m_selection + 1); break;
+    case WXK_HOME:                 selection = 0; break;
+    case WXK_END:                  selection = 2; break;
+    case WXK_SPACE: case WXK_RETURN: selection = (m_selection + 1) % 3; break;
+    default: event.Skip(); return;
+    }
+    if (selection != m_selection)
+        SelectAndNotify(selection);
 }
 
 void ModeSwitchButton::SetSelection(int selection)

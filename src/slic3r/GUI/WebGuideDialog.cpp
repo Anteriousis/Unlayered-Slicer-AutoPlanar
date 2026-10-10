@@ -620,6 +620,7 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
         }
         else if (strCmd == "network_plugin_install") {
             std::string sAction = j["data"]["action"];
+            m_netplugin_answered = true;
 
             if (sAction == "yes") {
                 if (!network_plugin_ready)
@@ -632,6 +633,7 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
         }
         else if (strCmd == "save_stealth_mode") {
             wxString strAction = j["data"]["action"];
+            m_stealth_answered = true;
 
             if (strAction == "yes") {
                 StealthMode = true;
@@ -744,11 +746,14 @@ int GuideFrame::SaveProfile()
     //     m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "privacyuse", "0");
 
     m_MainPtr->app_config->set("region", m_Region);
-    // Unlayered: the wizard no longer asks about stealth mode -- the page that did (guide 4unlayered)
-    // is out of the flow. Do NOT write it from the StealthMode member here: that page set the
-    // member from an unchecked checkbox on load, so finishing the wizard used to force
-    // stealth_mode=false over the on-by-default value AppConfig::set_defaults() writes. Leaving
-    // app_config alone keeps the default on and preserves whatever the user chose in Preferences.
+    // Unlayered: the last first-run page (guide 4unlayered, "Stealth mode & Bambu Lab printers",
+    // back in the flow 2026-10-09 at Alex's request: one page, stealth unticked, plug-in ticked)
+    // asks about stealth mode. Write the answer only when that page actually reported it: a wizard
+    // opened on another start page (filaments only, printers only) must keep whatever the user
+    // chose in Preferences. The one-shot stealth migrations in AppConfig::set_defaults() have
+    // already run by the time the wizard shows, so an "off" written here sticks.
+    if (m_stealth_answered)
+        m_MainPtr->app_config->set_bool("stealth_mode", StealthMode);
 
     //finish
     m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "finish", "1");

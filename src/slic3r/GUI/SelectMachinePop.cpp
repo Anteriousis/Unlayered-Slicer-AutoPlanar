@@ -349,12 +349,12 @@ SelectMachinePopup::SelectMachinePopup(wxWindow *parent)
     m_sizer_other_devices = new wxBoxSizer(wxVERTICAL);
 
 
-    m_panel_ping_code = new PinCodePanel(m_scrolledWindow, 0, wxID_ANY, wxDefaultPosition, SELECT_MACHINE_ITEM_SIZE);
+    // Unlayered: "Bind with Pin Code" is a Bambu-cloud account action and has been removed. Only the
+    // LAN access-code bind ("Bind with Access Code") remains.
     m_panel_direct_connection = new PinCodePanel(m_scrolledWindow, 1, wxID_ANY, wxDefaultPosition, SELECT_MACHINE_ITEM_SIZE);
 
     m_sizxer_scrolledWindow->Add(own_title, 0, wxEXPAND | wxLEFT, FromDIP(15));
     m_sizxer_scrolledWindow->Add(m_sizer_my_devices, 0, wxEXPAND, 0);
-    m_sizxer_scrolledWindow->Add(m_panel_ping_code, 0, wxEXPAND, 0);
     m_sizxer_scrolledWindow->Add(m_panel_direct_connection, 0, wxEXPAND, 0);
     m_sizxer_scrolledWindow->Add(other_title, 0, wxEXPAND | wxLEFT, FromDIP(15));
     m_sizxer_scrolledWindow->Add(m_sizer_other_devices, 0, wxEXPAND, 0);
@@ -854,11 +854,7 @@ void SelectMachinePopup::OnLeftUp(wxMouseEvent &event)
             }
         }
 
-        //pin code
-        auto pc_rect = m_panel_ping_code->ClientToScreen(wxPoint(0, 0));
-        if (mouse_pos.x > pc_rect.x && mouse_pos.y > pc_rect.y && mouse_pos.x < (pc_rect.x + m_panel_ping_code->GetSize().x) && mouse_pos.y < (pc_rect.y + m_panel_ping_code->GetSize().y)) {
-            wxGetApp().popup_ping_bind_dialog();
-        }
+        // Unlayered: pin-code (Bambu cloud) bind removed; only access-code LAN bind remains.
 
         //bind with access code
         auto dc_rect = m_panel_direct_connection->ClientToScreen(wxPoint(0, 0));
@@ -1072,10 +1068,8 @@ PinCodePanel::PinCodePanel(wxWindow* parent, int type, wxWindowID winid /*= wxID
 
  void PinCodePanel::on_mouse_left_up(wxMouseEvent& evt)
  {
-     if (m_type == 0) {
-         wxGetApp().popup_ping_bind_dialog();
-     }
-     else if (m_type == 1) {
+     // Unlayered: type 0 (pin-code / Bambu cloud bind) removed; only access-code LAN bind remains.
+     if (m_type == 1) {
          InputIpAddressDialog dlgo;
          dlgo.ShowModal();
      }

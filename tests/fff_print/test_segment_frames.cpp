@@ -8,6 +8,9 @@
 
 #include "test_helpers.hpp"
 
+#include <cmath>
+#include <limits>
+
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
 
@@ -33,7 +36,8 @@ struct SegmentedCube
                   const Vec3d &volume_shift  = Vec3d::Zero(),
                   const Vec3d &scale         = Vec3d::Ones(),
                   const Vec3d &mirror        = Vec3d::Ones(),
-                  double       rotation_z    = 0.)
+                  double       rotation_z    = 0.,
+                  const std::vector<std::pair<std::string, std::string>> &extra_config = {})
     {
         ModelObject *object = model.add_object();
         object->name = "frame_cube";
@@ -69,6 +73,8 @@ struct SegmentedCube
             { "print_sequence",     "by group" },
             { "layer_change_gcode", "G92 E0" },
         });
+        for (const auto &[key, value] : extra_config)
+            config.set_deserialize_strict(key, value);
         print.apply(model, config);
     }
 
@@ -316,4 +322,162 @@ SCENARIO("SegmentSupportBounds built from a real PrintObject", "[cutplanes][fram
 
         }
     }
+}
+
+TEST_CASE("A belt root segment slices all of its material and every segment's support stays above the belt", "[cutplanes][frames][belt]") {
+    // On a belt the root builds along the tilted gantry normal, projected from the instance origin,
+    // so part of any object has a negative build-axis coordinate without being sunk at all. Reading
+    // that as "under the plate" (the flat-bed sinking rule) left every layer on the belt side of the
+    // instance origin unsliced: the leading half of the part next to the belt went missing.
+    const double layer_height = 0.2;
+    // Centred on the object origin in XY, as an imported model is: the belt-side half of the cube
+    // then projects negative on the gantry normal.
+    SegmentedCube fixture(Vec3d(0.3, 0.2, 1.).normalized(), Vec3d(-10., -10., 0.), Vec3d::Ones(), Vec3d::Ones(), 0., {
+        { "belt_printer",              "1" },
+        { "belt_slice_rotation",       "x" },
+        { "belt_frame_tilt_angle",     "45" },
+        { "belt_slice_rotation_angle", "45" },
+        { "printable_area",            "0x0,250x0,250x500,0x500" },
+        { "layer_height",              "0.2" },
+        { "initial_layer_print_height", "0.2" },
+    });
+    REQUIRE(fixture.print.objects().size() == 2);
+    fixture.process();
+
+    const PrintObject *root  = root_of(fixture.print);
+    const PrintObject *child = non_root_of(fixture.print);
+    REQUIRE(root  != nullptr);
+    REQUIRE(child != nullptr);
+
+    const CutSegmentDescriptor &seg = *root->segment();
+    INFO("root build_z_min = " << seg.build_z_min << ", build_z_max = " << seg.build_z_max);
+    // The precondition for the defect: the cube's belt-side half projects negative.
+    REQUIRE(seg.build_z_min < -1.);
+
+    // The root is rebased onto its own minimum: its lowest material sits at slice z = 0, where the
+    // first layer cuts it, instead of below the slicing range.
+    double lowest = std::numeric_limits<double>::max();
+    for (double x : { -10., 10. })
+        for (double y : { -10., 10. })
+            for (double z : { 0., 20. })
+                lowest = std::min(lowest, (root->object_to_slice() * Vec3d(x, y, z)).z());
+    CHECK_THAT(lowest, WithinAbs(0., 1e-6));
+    REQUIRE(! root->layers().empty());
+    CHECK_THAT(root->layers().front()->print_z, WithinAbs(layer_height, 1e-6));
+    CHECK(! root->layers().front()->lslices.empty());
+
+    // A non-root segment's own floor is its base plane, which runs on below the belt. The belt has
+    // to bound its support too. Probe a point just above that base plane but under the belt.
+    const SegmentSupportBounds child_bounds(*child);
+    REQUIRE(child_bounds.is_active());
+    Vec3d  n_bed;
+    double k_bed;
+    child->bed_plane_in_slice_frame(n_bed, k_bed);   // bed-frame z = n_bed . p + k_bed
+    const double gxy = std::hypot(n_bed.x(), n_bed.y());
+    // The child is tilted against the gantry, so the belt is not horizontal in its frame.
+    REQUIRE(gxy > 0.1);
+    const double z = 0.5;                            // above the child's own floor at slice z = 0
+    const double t = (-1. - k_bed - n_bed.z() * z) / gxy;
+    const Vec2d  xy = t * Vec2d(n_bed.x(), n_bed.y()) / gxy;
+    INFO("probe " << xy.x() << "," << xy.y() << "," << z << " sits 1 mm under the belt");
+    CHECK_THAT(n_bed.dot(Vec3d(xy.x(), xy.y(), z)) + k_bed, WithinAbs(-1., 1e-9));
+    CHECK(! contains(child_bounds.valid_region_polygon(z), Point::new_scale(xy.x(), xy.y())));
+}
+
+namespace {
+
+// A 20 mm cube with ONE steep plane, 70 degrees from vertical, meeting the plate along x = 14
+// (object-local). The far piece -- x > 14 at the plate, leaning back to x > 6.7 at the top -- is a
+// non-root segment that slices along that tilted normal, so its angled layers run down to the
+// build plate. `sink` lowers the instance into the plate, the way an un-seated import sits.
+struct PlateReachingCube
+{
+    Slic3r::Print print;
+    Model         model;
+
+    explicit PlateReachingCube(double sink)
+    {
+        ModelObject *object = model.add_object();
+        object->name = "plate_reaching_cube";
+        object->add_volume(Test::cube(20.), ModelVolumeType::MODEL_PART, false);
+        ModelInstance *instance = object->add_instance();
+        instance->set_offset(Vec3d(120., 120., - sink));
+
+        CutPlaneStack stack;
+        stack.enabled = true;
+        CutPlane cp;
+        cp.point  = Vec3d(14., 10., 0.);
+        cp.normal = Vec3d(std::cos(Geometry::deg2rad(20.)), 0., std::sin(Geometry::deg2rad(20.)));
+        stack.planes.push_back(cp);
+        object->cut_planes = stack;
+
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "enable_nonplanar",           "1" },
+            { "print_sequence",             "by group" },
+            { "layer_change_gcode",         "G92 E0" },
+            { "layer_height",               "0.2" },
+            { "initial_layer_print_height", "0.2" },
+        });
+        print.apply(model, config);
+    }
+};
+
+// Lowest world z of any BEAD BOTTOM of `object`: every slice point, evaluated on its layer's own
+// slice plane, less the h/2 * |cos(tilt)| a bead reaches below that plane (tilt = the segment's
+// build normal against world Z). The plate clip promises this is never below 0.
+double lowest_slice_point_above_margin(const PrintObject &object)
+{
+    const Vec3d n_world = (object.trafo().linear().inverse().transpose() * object.segment()->build_normal).normalized();
+    const double cos_tilt = std::abs(n_world.z());
+    double lowest = std::numeric_limits<double>::max();
+    for (const Layer *layer : object.layers())
+        for (const ExPolygon &expoly : layer->lslices)
+            for (const Point &pt : to_points(expoly)) {
+                const Vec3d local = object.slice_to_object() * Vec3d(unscale<double>(pt.x()), unscale<double>(pt.y()), layer->slice_z);
+                lowest = std::min(lowest, (object.trafo() * local).z() - 0.5 * layer->height * cos_tilt);
+            }
+    return lowest;
+}
+
+} // namespace
+
+TEST_CASE("A tilted segment that reaches the build plate stops at the plate", "[cutplanes][frames]")
+{
+    // 0 = resting on the plate, 2 = sunk 2 mm into it. Either way the tilted segment owns material
+    // down at the plate; sunk, it also owns material UNDER it, which used to be printed there.
+    const double sink = GENERATE(0., 2.);
+    DYNAMIC_SECTION("sink " << sink) {
+        PlateReachingCube fixture(sink);
+        REQUIRE(fixture.print.objects().size() == 2);
+        fixture.print.process();
+
+        const PrintObject *root  = root_of(fixture.print);
+        const PrintObject *child = non_root_of(fixture.print);
+        REQUIRE(root  != nullptr);
+        REQUIRE(child != nullptr);
+
+        // Only the tilted segment gets the plate as a clip; the root already stops at the plate
+        // through its clamped slice-frame base.
+        CHECK(child->segment()->has_bed_clip());
+        CHECK(! root->segment()->has_bed_clip());
+
+        // No bead of the tilted segment reaches below the plate.
+        REQUIRE(! child->layers().empty());
+        CHECK(lowest_slice_point_above_margin(*child) >= -1e-3);
+
+        // And it starts where material starts: no empty leading layer left behind by the clip.
+        CHECK(! child->layers().front()->lslices.empty());
+    }
+}
+
+TEST_CASE("A tilted segment well above the build plate gets no plate clip", "[cutplanes][frames]")
+{
+    // The original fixture's gentle plane through the middle of the cube: its far piece starts
+    // about 6 mm above the plate, out of reach of the plate clip.
+    SegmentedCube fixture(Vec3d(0.25, 0.15, 1.).normalized());
+    REQUIRE(fixture.print.objects().size() == 2);
+    const PrintObject *child = non_root_of(fixture.print);
+    REQUIRE(child != nullptr);
+    CHECK(! child->segment()->has_bed_clip());
 }

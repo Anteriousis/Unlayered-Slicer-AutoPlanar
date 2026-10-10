@@ -368,6 +368,26 @@ def build_corpus():
                                        [(math.sin(p), 0.0, -math.cos(p)) for p in phis], 10.0, 6.0), 1,
                          "90deg elbow OD20 ID12 bend R30, inlet on the bed")
 
+    # U-bend standing on its bend: no leg anywhere -- both ends point up -- so the root belongs
+    # under the bottom of the U, with the cuts fanning out both ways.
+    R, cz = 30.0, 40.0  # bend radius; bend centre height, so the centreline bottoms out at z = 10
+    legs = np.linspace(80.0, cz, 9)[:-1]
+    arc = np.linspace(math.pi, 2.0 * math.pi, 37)
+    centers = ([(-R, 0.0, z) for z in legs] +
+               [(R * math.cos(p), 0.0, cz + R * math.sin(p)) for p in arc] +
+               [(R, 0.0, z) for z in legs[::-1][1:]])
+    tangents = ([(0.0, 0.0, -1.0)] * len(legs) +
+                [(-math.sin(p), 0.0, math.cos(p)) for p in arc] +
+                [(0.0, 0.0, 1.0)] * (len(legs) - 1))
+    out["pipe_u"] = (sweep_annulus(centers, tangents, 10.0, 6.0), 1,
+                     "U-bend OD20 ID12 R30 standing on its bend, both ends up at z=80")
+
+    # 120 deg bend lying flat on the bed: the arc's middle is the root, not either end.
+    arc = np.linspace(-math.pi / 3.0, math.pi / 3.0, 49)
+    out["pipe_bend_flat"] = (sweep_annulus([(40.0 * math.cos(t), 40.0 * math.sin(t), 10.0) for t in arc],
+                                           [(-math.sin(t), math.cos(t), 0.0) for t in arc], 10.0, 6.0), 1,
+                             "120deg bend OD20 ID12 R40 lying flat, axis at z=10, middle at (40,0)")
+
     # blind bore (a cup): genus 0, so genus alone cannot be the trigger
     out["pipe_flange_blind"] = (revolve([(0, 0), (20, 0), (20, 8), (10, 8), (10, 60), (6, 60), (6, 8), (0, 8)]), 0,
                                 "pipe on a solid D40 flange, bore blind above z=8")

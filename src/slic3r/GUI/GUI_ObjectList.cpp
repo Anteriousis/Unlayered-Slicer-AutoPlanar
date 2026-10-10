@@ -257,7 +257,8 @@ ObjectList::ObjectList(wxWindow* parent) :
         entries[index++].Set(wxACCEL_CTRL, (int)'C', wxID_COPY);
         entries[index++].Set(wxACCEL_CTRL, (int)'X', wxID_CUT);
         entries[index++].Set(wxACCEL_CTRL, (int)'V', wxID_PASTE);
-        entries[index++].Set(wxACCEL_CTRL, (int)'M', wxID_DUPLICATE);
+        // Ctrl+K, as in the 3D scene; Ctrl+M is the 3Dconnexion dialog everywhere else.
+        entries[index++].Set(wxACCEL_CTRL, (int)'K', wxID_DUPLICATE);
         entries[index++].Set(wxACCEL_CTRL, (int)'A', wxID_SELECTALL);
         entries[index++].Set(wxACCEL_CTRL, (int)'Z', wxID_UNDO);
         entries[index++].Set(wxACCEL_CTRL, (int)'Y', wxID_REDO);
@@ -442,7 +443,7 @@ void ObjectList::create_objects_ctrl()
     m_columns_width[colSinking] = 3;
     m_columns_width[colColorPaint] = 3;
     m_columns_width[colEditing] = 3;
-    m_columns_width[colDragHandle] = 2;
+    m_columns_width[colDragHandle] = 4; // grip centred in 4 em, so it sits clear of the overlay scrollbar at the right edge
 
     // column ItemName(Icon+Text) of the view control:
     // And Icon can be consisting of several bitmaps
@@ -4042,7 +4043,8 @@ wxDataViewItem ObjectList::add_settings_item(wxDataViewItem parent_item, const D
     const bool is_layer_settings = m_objects_model->GetItemType(parent_item) == itLayer;
     if (!is_object_settings) {
         ModelVolumeType volume_type = m_objects_model->GetVolumeType(parent_item);
-        if (volume_type == ModelVolumeType::NEGATIVE_VOLUME || volume_type == ModelVolumeType::SUPPORT_BLOCKER || volume_type == ModelVolumeType::SUPPORT_ENFORCER)
+        if (volume_type == ModelVolumeType::NEGATIVE_VOLUME || volume_type == ModelVolumeType::SUPPORT_BLOCKER || volume_type == ModelVolumeType::SUPPORT_ENFORCER ||
+            volume_type == ModelVolumeType::INFILL_MESH)
             return ret;
     }
 
@@ -6017,7 +6019,7 @@ void ObjectList::set_volume_type(ModelVolumeType new_type)
     // in MenuFactory::append_menu_item_change_type, see #13120).
     // This block must never be reachable under a healthy UI; if it ever logs, the UI guard has
     // been bypassed (new entry point, refactor, plugin, etc.) and should be investigated.
-    if (new_type == ModelVolumeType::SUPPORT_BLOCKER || new_type == ModelVolumeType::SUPPORT_ENFORCER) {
+    if (new_type == ModelVolumeType::SUPPORT_BLOCKER || new_type == ModelVolumeType::SUPPORT_ENFORCER || new_type == ModelVolumeType::INFILL_MESH) {
         const bool has_text_or_svg = std::any_of(volumes.begin(), volumes.end(),
             [](const VolumeSelection& sel) { return sel.volume->is_svg() || sel.volume->is_text(); });
         if (has_text_or_svg) {

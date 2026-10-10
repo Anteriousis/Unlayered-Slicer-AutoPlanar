@@ -351,6 +351,15 @@ void Preview::reload_print(bool only_gcode)
     m_only_gcode = only_gcode;
 }
 
+// BELT_MOD: the mapping is baked into the vertices at load time (GCodeViewer::load_as_gcode), and a
+// belt file is exempt from the same-result-id shortcut, so a reload is exactly a re-conversion.
+// Like reload_print, but the layer range and the only-G-code mode are kept so the view stays put.
+void Preview::refresh_belt_view()
+{
+    m_loaded_print = nullptr;
+    load_print(true /*keep_z_range*/, m_only_gcode);
+}
+
 //BBS: always load shell at preview
 void Preview::load_shells(const Print& print, bool force_previewing)
 {

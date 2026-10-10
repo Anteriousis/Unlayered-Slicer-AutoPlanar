@@ -13,7 +13,6 @@
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/UserNotification.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
-#include "slic3r/Utils/BBLCloudServiceAgent.hpp"
 #include "slic3r/GUI/WebViewDialog.hpp"
 #include "slic3r/GUI/WebUserLoginDialog.hpp"
 #include "slic3r/GUI/BindDialog.hpp"
@@ -21,6 +20,7 @@
 #include "slic3r/GUI/Jobs/UpgradeNetworkJob.hpp"
 #include "slic3r/GUI/HttpServer.hpp"
 #include "../Utils/PrintHost.hpp"
+#include "../Utils/AppUpdater.hpp"
 
 #include <wx/app.h>
 #include <wx/colour.h>
@@ -70,6 +70,7 @@ class TaskManager;
 namespace GUI{
 
 class RemovableDriveManager;
+class AutoUpdater;
 class OtherInstanceMessageHandler;
 class MainFrame;
 class Sidebar;
@@ -178,12 +179,17 @@ public:
     std::string asset_sha256;   // lowercase hex; empty means the manifest declared none
     uint64_t    asset_size{ 0 }; // bytes; 0 means the manifest declared none
 
+    // The installer behind the Unlayered account, from the manifest's `unlayered_downloads`, if one
+    // matches this platform. Handled by AutoUpdater, never by the classic asset path above.
+    std::optional<AccountDownload> account_download;
+
     bool has_asset() const { return !asset_url.empty(); }
     void clear_asset() {
         asset_name.clear();
         asset_url.clear();
         asset_sha256.clear();
         asset_size = 0;
+        account_download.reset();
     }
 
     VersionInfo() {
@@ -260,6 +266,7 @@ private:
     bool            m_initialized { false };
     bool            m_post_initialized { false };
     bool            m_app_conf_exists{ false };
+    bool            m_alt_tap_armed{ false };
     EAppMode        m_app_mode{ EAppMode::Editor };
     bool            m_is_recreating_gui{ false };
 #ifdef __linux__
@@ -310,6 +317,8 @@ private:
 	size_t m_instance_hash_int;
 
     std::unique_ptr<Downloader> m_downloader;
+    // The Unlayered account and the "Restart to update" self-update. See AutoUpdater.hpp.
+    std::unique_ptr<AutoUpdater> m_auto_updater;
 
     //BBS
     std::atomic<bool> m_is_closing {false};
@@ -410,6 +419,9 @@ public:
     bool show_plate_gridlines() const { return app_config->get_bool("show_plate_gridlines"); }
     void toggle_show_plate_gridlines() const { app_config->set_bool("show_plate_gridlines", !show_plate_gridlines()); }
 
+    bool show_bed_mesh() const { return app_config->get_bool("show_bed_mesh"); }
+    void toggle_show_bed_mesh() const { app_config->set_bool("show_bed_mesh", !show_bed_mesh()); }
+
     bool show_cut_chunk_colors() const { return app_config->get_bool("show_cut_chunk_colors"); }
     void toggle_show_cut_chunk_colors() const { app_config->set_bool("show_cut_chunk_colors", !show_cut_chunk_colors()); }
 
@@ -450,6 +462,9 @@ public:
     void            UpdateDarkUI(wxWindow *window, bool highlited = false, bool just_font = false);
     void            UpdateDarkUIWin(wxWindow* win);
     void            Update_dark_mode_flag();
+    // Derives dark_color_mode (what dark_mode() reads) from the "color_scheme" preference:
+    // system | light | dark. Returns the resulting dark flag.
+    bool            resolve_color_scheme();
     // update color mode for whole dialog including all children
     void            UpdateDlgDarkUI(wxDialog* dlg);
     void            UpdateFrameDarkUI(wxFrame* dlg);
@@ -461,6 +476,32 @@ public:
 	void            update_fonts(const MainFrame *main_frame = nullptr);
     void            set_label_clr_modified(const wxColour& clr);
     void            set_label_clr_sys(const wxColour& clr);
+    void            reset_label_clrs(); // back to the theme defaults
+    // Theme colour editor: `light_key` is the light-theme colour code uses (gDarkColors key);
+    // an invalid colour removes the override for the current theme. Persists and re-themes.
+    void            set_theme_color(const std::string& light_key, const wxColour& color);
+    void            reset_theme_colors();
+    // Loads the current theme's overrides from app-config into StateColor and the ImGui mirror.
+    void            apply_theme_overrides();
+    static const std::vector<std::pair<std::string, const char*>>& theme_color_roles();
+    // 3D view colours for the theme in use: `which` is "view_bg" or "plate"; an invalid colour
+    // returns to the built-in one. Persisted per theme and applied live.
+    void            set_view_color(const std::string& which, const wxColour& color);
+    wxColour        get_view_color(const std::string& which);
+    void            apply_view_colors();
+    // Recolour text roles that fall below 4.5:1 on their backgrounds (Preferences option).
+    void            set_auto_contrast_text(bool on);
+    // Live re-theme: the resolved colour of every theme role before a change, and the pass that
+    // repaints windows still carrying an old resolved colour with the new one.
+    std::vector<std::pair<std::string, wxColour>> resolved_theme_colors();
+    void            retheme_live(const std::vector<std::pair<std::string, wxColour>>& before);
+    void            retheme_from_base();
+    std::map<std::string, std::set<unsigned>> m_theme_history; // role -> every colour it has resolved to (retheme_live)
+    std::vector<std::pair<std::string, wxColour>> m_last_theme_colors; // snapshot after the last apply
+    // After ThemeManager changed what is applied: label colours, live re-theme, events.
+    void            on_theme_changed(const std::vector<std::pair<std::string, wxColour>>& before);
+    // Set `color_scheme` (system | light | dark) and switch the running UI to it.
+    void            apply_color_scheme(const std::string& scheme);
     //update side popup status
     bool            get_side_menu_popup_status();
     void            set_side_menu_popup_status(bool status);
@@ -496,7 +537,12 @@ public:
     void            set_auto_toolbar_icon_scale(float scale) const;
     void            check_printer_presets();
 
-    void            recreate_GUI(const wxString& message);
+    // restore_project: queue the backup-restore prompt after the rebuild (the language path);
+    // a theme rebuild carries the open project across itself instead.
+    // before_teardown runs with the progress dialog already up and the old window still on
+    // screen (e.g. saving the project); after_rebuild runs once the new window is shown.
+    void            recreate_GUI(const wxString& message, bool restore_project = true,
+                                 std::function<void()> before_teardown = {}, std::function<void()> after_rebuild = {});
     void            system_info();
     void            keyboard_shortcuts();
     void            troubleshoot();
@@ -508,6 +554,9 @@ public:
     wxString        transition_tridid(int trid_id) const;
     void            ShowUserGuide();
     void            ShowDownNetPluginDlg();
+    // Unlayered: set when the setup wizard's last page already started the Bambu network plug-in
+    // download, so the installer's own opt-in (read in post_init) does not open a second dialog.
+    bool            m_netplugin_download_offered {false};
     void            ShowUserLogin(bool show = true, const std::string& provider = ORCA_CLOUD_PROVIDER);
     void            ShowOnlyFilament();
     // Orca auth
@@ -550,6 +599,7 @@ public:
     void            check_new_version_sf(int by_user = 0);
     // Downloads and runs the installer the last check found, then closes the application.
     void            start_app_update();
+    AutoUpdater*    auto_updater() { return m_auto_updater.get(); }
     bool            process_network_msg(std::string dev_id, std::string msg);
     void            request_new_version(int by_user);
     void            enter_force_upgrade();
@@ -596,10 +646,7 @@ public:
     void            stop_http_server();
     void            switch_staff_pick(bool on);
 
-    void            on_show_check_privacy_dlg(int online_login = 0, const std::string& provider = ORCA_CLOUD_PROVIDER);
-    void            show_check_privacy_dlg(wxCommandEvent& evt);
-    void            on_check_privacy_update(wxCommandEvent &evt);
-    bool            check_privacy_update();
+    // Unlayered: Bambu-cloud privacy-policy dialog removed with the account surface.
     void            check_privacy_version(int online_login = 0, const std::string& provider = ORCA_CLOUD_PROVIDER);
     void            check_track_enable();
 
@@ -663,6 +710,11 @@ public:
     ActionRegistry& action_registry() { return m_action_registry; }
     void            open_exportpresetbundledialog(size_t open_on_tab = 0, const std::string& highlight_option = std::string());
     virtual bool OnExceptionInMainLoop() override;
+    // Sees every event before dispatch; used to detect a bare Alt tap for the topbar menus.
+    int             FilterEvent(wxEvent& event) override;
+    // A dialog that runs modally for wx but not for the window manager (Preferences on GTK):
+    void            set_input_blocking_dialog(wxWindow* dialog) { m_input_blocking_dialog = dialog; }
+    wxWeakRef<wxWindow> m_input_blocking_dialog;
     // Calls wxLaunchDefaultBrowser if user confirms in dialog.
     bool            open_browser_with_warning_dialog(const wxString& url, int flags = 0);
 #ifdef __APPLE__
@@ -689,7 +741,6 @@ public:
     std::string         m_mall_model_download_url;
     std::string         m_mall_model_download_name;
     ModelMallDialog*    m_mall_publish_dialog{ nullptr };
-    PingCodeBindDialog* m_ping_code_binding_dialog{ nullptr };
 
     NetworkErrorDialog* m_server_error_dialog { nullptr };
 
@@ -714,8 +765,6 @@ public:
     std::string     url_encode(std::string value);
     std::string     url_decode(std::string value);
 
-    void            popup_ping_bind_dialog();
-    void            remove_ping_bind_dialog();
 
     // Parameters extracted from the command line to be passed to GUI after initialization.
     GUI_InitParams* init_params { nullptr };
@@ -867,8 +916,15 @@ bool nonplanar_printing_enabled();
 // ask THAT, not the derived virtual_5axis bool, which normalize_fdm_1() only recomputes at slice
 // time and would therefore lag a dropdown change until the next slice.
 bool   virtual_5axis_enabled();
-// The virtual-mode tilt cap in degrees, or 0 when there is none.
-double virtual_max_tilt_deg();
+// UNLAYERED_MOD -- the virtual-mode tilt cap in degrees for a chunk of horizontal extent
+// `reach_mm`, or 0 when there is none. Wraps virtual_tilt_limit_deg() (PrintConfig.hpp) over the
+// EDITED printer preset, so it tracks the settings fields live, and folds in the optional hand-set
+// `nonplanar_virtual_max_angle` ceiling. Pass reach_mm = 0 when the chunk size is not known yet:
+// that yields the part-independent hotend term alone, which is the looser of the two, so a
+// caller that cannot supply a reach never over-restricts the user. `tilt_azimuth_rad` is the way the
+// build normal leans (atan2 of its XY), because the hotend is not round; absent yields the worst
+// direction, the strict answer for a caller that does not know yet.
+double virtual_max_tilt_deg(double reach_mm = 0., std::optional<double> tilt_azimuth_rad = std::nullopt);
 } // namespace GUI
 } // Slic3r
 

@@ -371,17 +371,20 @@ static constexpr const std::initializer_list<SupporLayerType> support_types_inte
     SupporLayerType::RaftInterface, SupporLayerType::BottomContact, SupporLayerType::BottomInterface, SupporLayerType::TopContact, SupporLayerType::TopInterface
 };
 
-// Declarative cut planes: clip assembled support layers to the segment's valid region.
-static void trim_support_layers_by_segment_bounds(const SegmentSupportBounds &bounds, SupportGeneratorLayersPtr &support_layers)
+// Declarative cut planes: clip assembled support layers to the segment's valid region, letting the
+// support-on-support columns reach support_section_overlap past the ceilings.
+static void trim_support_layers_by_segment_bounds(const SegmentSupportBounds &bounds, const PrintObject &object, SupportGeneratorLayersPtr &support_layers)
 {
     if (! bounds.is_active() || support_layers.empty())
         return;
+    const double overlap = object.config().support_section_overlap.value;
     tbb::parallel_for(tbb::blocked_range<size_t>(0, support_layers.size()),
-        [&bounds, &support_layers](const tbb::blocked_range<size_t> &range) {
+        [&bounds, &object, overlap, &support_layers](const tbb::blocked_range<size_t> &range) {
             for (size_t i = range.begin(); i < range.end(); ++ i) {
                 SupportGeneratorLayer *layer = support_layers[i];
                 if (layer != nullptr && ! layer->polygons.empty())
-                    layer->polygons = intersection(layer->polygons, bounds.valid_region_polygon(layer->print_z));
+                    layer->polygons = intersection(layer->polygons,
+                        bounds.valid_region_polygon(layer->print_z, object.segment_support_column_at(layer->print_z), overlap));
             }
         });
 }
@@ -510,19 +513,16 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
         // z=0, keeping the un-rotated G-code clear of the machine's minimum Z.
         const SegmentSupportBounds bounds(object, m_slicing_params.first_print_layer_height);
         if (bounds.is_active()) {
-            trim_support_layers_by_segment_bounds(bounds, raft_layers);
-            trim_support_layers_by_segment_bounds(bounds, bottom_contacts);
-            trim_support_layers_by_segment_bounds(bounds, top_contacts);
-            trim_support_layers_by_segment_bounds(bounds, intermediate_layers);
-            trim_support_layers_by_segment_bounds(bounds, interface_layers);
-            trim_support_layers_by_segment_bounds(bounds, base_interface_layers);
+            trim_support_layers_by_segment_bounds(bounds, object, raft_layers);
+            trim_support_layers_by_segment_bounds(bounds, object, bottom_contacts);
+            trim_support_layers_by_segment_bounds(bounds, object, top_contacts);
+            trim_support_layers_by_segment_bounds(bounds, object, intermediate_layers);
+            trim_support_layers_by_segment_bounds(bounds, object, interface_layers);
+            trim_support_layers_by_segment_bounds(bounds, object, base_interface_layers);
             // Seed with this segment's own first-layer demand as well: a floating segment's
             // suspended first layer has no support layer of its own to project downward, so
             // without it the column would start above the gap it is meant to bridge.
-            Polygons first_layer_demand;
-            if (! object.segment_support_demand().empty())
-                first_layer_demand = object.segment_support_demand().front();
-            extend_support_below_segment_floor(bounds, m_slicing_params, layer_storage, intermediate_layers, first_layer_demand);
+            extend_support_below_segment_floor(bounds, m_slicing_params, layer_storage, intermediate_layers, object.segment_demand_first_layer());
         }
     }
 
@@ -2179,21 +2179,46 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
     // and that load is real regardless of whether layer 0 has natural overhangs. So contacts are
     // generated from layer 0 whenever demand exists there, while natural detection keeps starting
     // at layer_id_start; at layer 0 the only overhangs present are then the injected ones.
-    const bool demand_on_first_layer = ! object.segment_support_demand().empty()
-                                    && ! object.segment_support_demand().front().empty();
+    const bool demand_on_first_layer = ! object.segment_demand_first_layer().empty();
     const size_t contact_id_start = demand_on_first_layer ? 0 : layer_id_start;
+    // BELT_MOD -- the true floor (no clearance) for the overhang diff.
+    const SegmentSupportBounds floor_bounds = object.support_floor_is_tilted() ? SegmentSupportBounds(object, 0.) : SegmentSupportBounds();
      // main part of overhang detection can be parallel
     tbb::parallel_for(tbb::blocked_range<size_t>(layer_id_start, num_layers),
         [&](const tbb::blocked_range<size_t>& range) {
             for (size_t layer_id = range.begin(); layer_id < range.end(); layer_id++) {
                 const Layer& layer = *object.layers()[layer_id];
                 Polygons            lower_layer_polygons = (layer_id == 0) ? Polygons() : to_polygons(object.layers()[layer_id - 1]->lslices);
+                // BELT_MOD -- material resting on a tilted floor is supported by it (see TreeSupport).
+                if (floor_bounds.is_active())
+                    lower_layer_polygons = union_(lower_layer_polygons, floor_bounds.floor_band(layer.print_z - layer.height, layer.print_z));
 
                 overhangs_per_layers[layer_id] = detect_overhangs(layer, layer_id, lower_layer_polygons, *m_print_config, *m_object_config, annotations, m_support_params.gap_xy
 #ifdef SLIC3R_DEBUG
                     , iRun
 #endif // SLIC3R_DEBUG
                 );
+
+                // Orca: if the user enabled "support only remaining areas after wave
+                // overhangs" on any region that uses wave overhangs, subtract the
+                // wave-covered footprint from detected overhangs here. Enforcers are
+                // handled separately later in detect_contacts() and therefore remain
+                // unaffected. Sharp-tail / first-layer logic already folded into
+                // overhangs_per_layers; subtracting covered regions is still safe
+                // since wave paths by construction only fill unsupported areas.
+                if (!overhangs_per_layers[layer_id].empty() && !layer.wave_overhang_covered_polygons.empty()) {
+                    bool wave_support_gate = false;
+                    for (size_t ri = 0; ri < object.num_printing_regions(); ++ri) {
+                        const PrintRegionConfig &rc = object.printing_region(ri).config();
+                        if (rc.wave_overhangs.value && rc.support_remaining_areas_after_wave_overhangs.value) {
+                            wave_support_gate = true;
+                            break;
+                        }
+                    }
+                    if (wave_support_gate) {
+                        overhangs_per_layers[layer_id] = diff_ex(overhangs_per_layers[layer_id], layer.wave_overhang_covered_polygons);
+                    }
+                }
 
                 if (object.print()->canceled())
                     break;
@@ -2377,8 +2402,33 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
     // removal so inherited load can never be pruned as noise. See Print::run_segment_support_cascade.
     if (! object.segment_support_demand().empty()) {
         const std::vector<Polygons> &demand = object.segment_support_demand();
-        for (size_t layer_id = contact_id_start; layer_id < num_layers; layer_id++)
-            if (layer_id < demand.size() && ! demand[layer_id].empty())
+        // Inherited load under the child's SUPPORT is support-on-support: the column must end
+        // flush under the ceiling the child rests on (or support_section_overlap past it), not a
+        // contact gap below it. demand[i] describes the column at layer i, where the ceiling is at
+        // or above print_z(i). new_contact_layer() puts the contact of an overhang found at layer
+        // j at bottom_z(j) minus the support gap, so hand the column of layer i to the HIGHEST
+        // layer j whose contact still lands at or below print_z(i) + overlap: the contact then
+        // sits within a layer of that height, and the segment-bounds trim removes whatever a
+        // tilted ceiling cuts off.
+        const double gap     = m_slicing_params.zero_gap_interface_top ? 0. : m_slicing_params.gap_support_object;
+        const double overlap = m_object_config->support_section_overlap.value;
+        size_t j = contact_id_start;
+        for (size_t layer_id = contact_id_start; layer_id < num_layers; layer_id++) {
+            if (layer_id >= demand.size() || demand[layer_id].empty())
+                continue;
+            const double top = object.layers()[layer_id]->print_z + overlap;
+            j = std::max(j, layer_id);
+            while (j + 1 < num_layers && object.layers()[j + 1]->bottom_z() - gap <= top + EPSILON)
+                ++ j;
+            append(overhangs_per_layers[j], union_ex(demand[layer_id]));
+        }
+    }
+    if (! object.segment_body_demand().empty()) {
+        // The child's BODY over this segment's empty space is an ordinary overhang: it gets the
+        // normal top Z distance, so it can be separated from the support like any other surface.
+        const std::vector<Polygons> &demand = object.segment_body_demand();
+        for (size_t layer_id = contact_id_start; layer_id < num_layers && layer_id < demand.size(); layer_id++)
+            if (! demand[layer_id].empty())
                 append(overhangs_per_layers[layer_id], union_ex(demand[layer_id]));
     }
 

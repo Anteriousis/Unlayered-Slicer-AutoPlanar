@@ -5,6 +5,10 @@
 
 #include <map>
 
+// Orders the std::map<wxColour, wxColour> tables below. Declared here rather than in
+// StateColor.cpp so every translation unit that looks up GetDarkMap() sees the same ordering.
+inline bool operator<(wxColour const &l, wxColour const &r) { return l.GetRGBA() < r.GetRGBA(); }
+
 class StateColor
 {
 public:
@@ -28,11 +32,25 @@ public:
     static wxColour SetLightness(const wxColour& color, double lightness);
     static wxColour LightenDarkenColor(const wxColour& color, int amount);
     static double GetColorDifference(const wxColour& c1, const wxColour& c2);
+    // WCAG contrast ratio (1..21) and a text colour pushed light or dark, hue kept, until it
+    // reads at `min_ratio` on `bg` (black or white as the last resort).
+    static double ContrastRatio(const wxColour& a, const wxColour& b);
+    static wxColour EnsureContrast(const wxColour& text, const wxColour& bg, double min_ratio);
+    // A theme value must not coincide with the colour table's namespace: on the dark base with a
+    // light key (a black window would be sent through the black-text row when a window's colour
+    // is re-resolved), on the light base with a dark value (the reverse map would turn it into a
+    // light key on a theme flip). Nudges such a colour by one unit per channel towards mid-grey.
+    static wxColour AvoidTableCollision(const wxColour& color, bool dark_base);
     static double LAB_Delta_E(const wxColour& c1, const wxColour& c2);
 
     static void SetDarkMode(bool dark);
 
     static std::map<wxColour, wxColour> const & GetDarkMap();
+    // User theme overrides (Preferences > Appearance > Theme colours). Keyed by the light-theme
+    // colour that code passes to darkModeColorFor(), i.e. the same key as gDarkColors; kept per
+    // theme. An invalid `value` removes the override.
+    static void SetThemeOverride(bool dark, wxColour const &light_key, wxColour const &value);
+    static void ClearThemeOverrides();
     static wxColour darkModeColorFor(wxColour const &color);
     static wxColour lightModeColorFor(wxColour const &color);
 

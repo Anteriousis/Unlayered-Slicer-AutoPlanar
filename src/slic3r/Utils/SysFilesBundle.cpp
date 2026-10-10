@@ -1,6 +1,8 @@
 #include "SysFilesBundle.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <ctime>
 #include <sstream>
 
@@ -11,6 +13,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+#include "libslic3r/Semver.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "DuetRrfClient.hpp"
 #include "FirmwareBundle.hpp" // sha256_hex
@@ -181,6 +184,7 @@ bool parse_sys_manifest(const std::string &json, SysFilePackage &pkg_out, std::s
         pkg_out.date    = root.get<std::string>("date", root.get<std::string>("buildDate", ""));
         pkg_out.machine = root.get<std::string>("machine", "");
         pkg_out.notes   = root.get<std::string>("notes", "");
+        pkg_out.min_firmware = boost::algorithm::trim_copy(root.get<std::string>("minFirmware", ""));
 
         if (pkg_out.version.empty()) {
             error_out = "The manifest does not declare a version";
@@ -212,6 +216,101 @@ bool parse_sys_manifest(const std::string &json, SysFilePackage &pkg_out, std::s
         error_out = (boost::format("Could not parse the manifest: %1%") % e.what()).str();
         return false;
     }
+}
+
+int unlayered_fork_number(const std::string &firmware_version)
+{
+    static const std::string tag = "+unlayered.";
+    const size_t at = firmware_version.find(tag);
+    if (at == std::string::npos)
+        return -1;
+    size_t i = at + tag.size();
+    if (i >= firmware_version.size() || !std::isdigit(static_cast<unsigned char>(firmware_version[i])))
+        return -1;
+    long n = 0;
+    for (; i < firmware_version.size() && std::isdigit(static_cast<unsigned char>(firmware_version[i])); ++i)
+        n = std::min<long>(n * 10 + (firmware_version[i] - '0'), 1000000);
+    return int(n);
+}
+
+// True when a G-code line, comment already removed, is an M558 selecting probe type 12. Parameters
+// are whitespace separated in every file we ship; P{expr} is not recognised, and does not occur.
+static bool is_m558_p12(const std::string &code)
+{
+    std::vector<std::string> words;
+    boost::split(words, code, boost::is_any_of(" \t"), boost::token_compress_on);
+    if (words.empty() || !boost::iequals(words.front(), "M558"))
+        return false;
+    for (size_t i = 1; i < words.size(); ++i)
+        if (boost::iequals(words[i], "P12"))
+            return true;
+    return false;
+}
+
+std::string sys_required_firmware(const SysFilePackage &pkg, std::string *reason_out)
+{
+    std::string required = pkg.min_firmware;
+    std::string reason   = required.empty() ? std::string() : "the package declares it";
+
+    // What the files say and use, whatever the manifest says, keeping the highest:
+    //  - sys/config.g's `var fwNeed = N`, the number its own first-boot firmware install tests;
+    //  - M558 P12 anywhere, the differential Z probe, from +unlayered.12.
+    // tools/make_sys_bundle.py applies the same two rules; this is where the next firmware-only
+    // command goes when the configuration starts relying on one.
+    static const int P12_FORK = 12;
+    int              best     = unlayered_fork_number(required);
+    for (const auto &f : pkg.files) {
+        // Every file here is G-code; skip anything binary rather than scan it.
+        if (std::find(f.data.begin(), f.data.end(), uint8_t(0)) != f.data.end())
+            continue;
+        const bool         is_config = boost::iequals(f.path, "sys/config.g");
+        std::istringstream in(std::string(f.data.begin(), f.data.end()));
+        std::string        line;
+        while (std::getline(in, line)) {
+            const size_t semi = line.find(';');
+            if (semi != std::string::npos)
+                line.erase(semi);
+            boost::algorithm::trim(line);
+            if (is_config && boost::istarts_with(line, "var fwNeed")) {
+                const size_t eq = line.find('=');
+                if (eq != std::string::npos) {
+                    const std::string num = boost::algorithm::trim_copy(line.substr(eq + 1));
+                    if (!num.empty() && std::all_of(num.begin(), num.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; })) {
+                        const int n = std::min(std::atoi(num.c_str()), 1000000);
+                        if (n > best) {
+                            best     = n;
+                            required = "+unlayered." + std::to_string(n);
+                            reason   = "sys/config.g declares fwNeed";
+                        }
+                    }
+                }
+            } else if (best < P12_FORK && is_m558_p12(line)) {
+                best     = P12_FORK;
+                required = "+unlayered." + std::to_string(P12_FORK);
+                reason   = f.path + " uses M558 P12, the differential Z probe";
+            }
+        }
+    }
+
+    if (reason_out)
+        *reason_out = reason;
+    return required;
+}
+
+bool sys_firmware_satisfies(const std::string &running, const std::string &required)
+{
+    if (required.empty())
+        return true;
+    const int need = unlayered_fork_number(required);
+    if (need >= 0)
+        // Only an Unlayered build has the fork's commands, so a stock board is always too old.
+        return unlayered_fork_number(running) >= need;
+    // A plain RRF version: semver order, ignoring build metadata, is correct here.
+    const auto r = Semver::parse(running);
+    const auto q = Semver::parse(required);
+    if (!r || !q)
+        return true; // cannot compare; not a reason to refuse
+    return *r >= *q;
 }
 
 bool validate_sys_package(const SysFilePackage &pkg, std::string &error_out)

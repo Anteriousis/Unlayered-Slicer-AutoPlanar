@@ -42,6 +42,9 @@ public:
     void OnFileToolItem(wxAuiToolBarEvent& evt);
     void OnDropdownToolItem(wxAuiToolBarEvent& evt);
     void OnCalibToolItem(wxAuiToolBarEvent &evt);
+    // Keyboard access to the menus (Alt tap or F10): highlights File; Left/Right move between
+    // File, the main dropdown and Calibration; Enter/Down/Space open; Esc hands focus back.
+    void ToggleKeyboardMode();
     void OnMouseLeftDClock(wxMouseEvent& mouse);
     void OnMouseLeftDown(wxMouseEvent& event);
     void OnMouseLeftUp(wxMouseEvent& event);
@@ -105,6 +108,14 @@ private:
 
     wxBitmap maximize_bitmap;
     wxBitmap window_bitmap;
+
+    void PopupToolMenu(int tool_id, wxMenu* menu, bool& skip_popup);
+    void SetKeyboardTool(int tool_id); // -1 leaves keyboard mode
+    void OnKeyDown(wxKeyEvent& event);
+
+    int       m_keyboard_tool{ -1 };
+    wxWindow* m_keyboard_return_focus{ nullptr };
+    bool      m_popup_open{ false };
 
     int m_toolbar_h;
     bool m_skip_popup_file_menu;

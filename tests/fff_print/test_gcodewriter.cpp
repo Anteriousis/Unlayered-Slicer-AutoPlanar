@@ -4,9 +4,12 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "libslic3r/GCodeWriter.hpp"
+#include "libslic3r/GCode/BeltKinematics.hpp"
+#include "libslic3r/Geometry.hpp"
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -78,6 +81,145 @@ SCENARIO("z_hop lifts the nozzle when a lift is requested", "[GCodeWriter]") {
                 REQUIRE(gcode.empty());
             }
         }
+    }
+}
+
+// BELT_MOD -- the MachineKinematics seam. With the default CartesianKinematics at the identity
+// remap every emitter keeps its historical word-omission branch; a non-identity mapping forces
+// full XYZ through to_machine() at every site.
+SCENARIO("Machine kinematics: axis remap decides which axis words are emitted", "[GCodeWriter][kinematics]") {
+    GIVEN("A writer parked at Z = 5 with the default identity kinematics") {
+        GCodeWriter writer;
+        std::vector<unsigned int> extruder_ids { 0 };
+        writer.set_extruders(extruder_ids);
+        writer.set_extruder(0);
+        writer.travel_to_z(5.0);
+        REQUIRE_FALSE(writer.has_axis_remap());
+
+        WHEN("travelling in XY") {
+            const std::string gcode = writer.travel_to_xy(Vec2d(10., 20.));
+            THEN("only X and Y are written") {
+                REQUIRE_THAT(gcode, Catch::Matchers::StartsWith("G1 X10 Y20 F"));
+            }
+        }
+        WHEN("a (x, z, y) permutation is installed") {
+            writer.set_axis_remap(0, 2, 1);
+            REQUIRE(writer.has_axis_remap());
+            THEN("an XY travel carries every axis, with logical Z on machine Y and logical Y on machine Z") {
+                REQUIRE_THAT(writer.travel_to_xy(Vec2d(10., 20.)), Catch::Matchers::StartsWith("G1 X10 Y5 Z20 F"));
+            }
+            THEN("a Z-only travel re-emits the logical XY through the mapping") {
+                writer.set_current_position_clear(true);
+                writer.travel_to_xy(Vec2d(10., 20.));
+                REQUIRE_THAT(writer.travel_to_z(7.0), Catch::Matchers::StartsWith("G1 X10 Y7 Z20 F"));
+            }
+        }
+        WHEN("a reverse mapping on Z is installed with a known build volume") {
+            writer.set_build_volume_max(Vec3d(200., 200., 250.));
+            writer.set_axis_remap(0, 1, 8);
+            writer.set_current_position_clear(true);
+            THEN("machine Z is measured from the top of the build volume") {
+                REQUIRE_THAT(writer.travel_to_xyz(Vec3d(10., 20., 30.)), Catch::Matchers::StartsWith("G1 X10 Y20 Z220 F"));
+            }
+        }
+        WHEN("kinematics are installed before the remap is configured") {
+            writer.set_kinematics(std::make_unique<CartesianKinematics>());
+            writer.set_axis_remap(1, 0, 2);
+            THEN("the setter reaches the installed strategy") {
+                REQUIRE_THAT(writer.travel_to_xy(Vec2d(10., 20.)), Catch::Matchers::StartsWith("G1 X20 Y10 Z5 F"));
+            }
+        }
+        WHEN("the remap is configured before new kinematics are installed") {
+            writer.set_axis_remap(1, 0, 2);
+            writer.set_kinematics(std::make_unique<CartesianKinematics>());
+            THEN("set_kinematics replays the remap onto the new strategy") {
+                REQUIRE_THAT(writer.travel_to_xy(Vec2d(10., 20.)), Catch::Matchers::StartsWith("G1 X20 Y10 Z5 F"));
+            }
+        }
+    }
+}
+
+// BELT_MOD -- ported from OrcaSlicer's belt regression net. There the writer received the
+// slicing-frame point and BeltBackTransform recovered the model point first; here the per-object
+// segment trafo has already done that before the writer maps anything, so the input is the bed
+// point itself and the expected machine coordinates are unchanged. The machine frame follows the
+// printer's physical tilt; the print's slicing angle (a process option) plays no part in it.
+TEST_CASE("Belt machine coordinates retain a non-45-degree tilt", "[GCodeWriter][belt]")
+{
+    PrintConfig config;
+    config.belt_printer.value              = true;
+    config.belt_slice_rotation.value       = BeltRotationAxis::X;
+    config.belt_frame_tilt_angle.value     = 30.;
+    config.belt_slice_rotation_angle.value = 45.;   // irrelevant to the machine frame
+    config.gcode_remap_x.value             = RemapAxis::PosX;
+    config.gcode_remap_y.value             = RemapAxis::PosZ;
+    config.gcode_remap_z.value             = RemapAxis::PosY;
+
+    GCodeWriter writer;
+    install_belt_kinematics(writer, config);
+    writer.set_axis_remap(int(config.gcode_remap_x.value),
+                          int(config.gcode_remap_y.value),
+                          int(config.gcode_remap_z.value));
+
+    // Bed-frame point: X across the belt, Y along it, Z above it.
+    const Vec3d bed(4., 10., 3.);
+    const Vec3d machine = writer.kinematics().to_machine(bed);
+
+    // The conventional X-tilt remap produces (x, z, y). At 30 degrees the gantry coordinate is
+    // z/sin(30) and belt travel is y + z*cot(30). The complementary tan/inv-cos formulas are
+    // indistinguishable at 45 degrees, but fail this case.
+    REQUIRE_THAT(machine.x(), Catch::Matchers::WithinAbs(4., 1e-9));
+    REQUIRE_THAT(machine.y(), Catch::Matchers::WithinAbs(3. / std::sin(Geometry::deg2rad(30.)), 1e-9));
+    REQUIRE_THAT(machine.z(), Catch::Matchers::WithinAbs(10. + 3. / std::tan(Geometry::deg2rad(30.)), 1e-9));
+
+    REQUIRE(writer.kinematics().to_logical(machine).isApprox(bed, 1e-9));
+    REQUIRE(writer.has_axis_remap());
+    REQUIRE_FALSE(writer.kinematics().supports_arc_moves());
+    // to_build_volume undoes only the machine frame: it lands in the remapped (x, z, y) frame.
+    REQUIRE(writer.kinematics().to_build_volume(machine).isApprox(Vec3d(4., 3., 10.), 1e-9));
+}
+
+TEST_CASE("Belt kinematics round-trip and word emission", "[GCodeWriter][belt]")
+{
+    for (const double angle : {-60., -30., 20., 45., 70.}) {
+        for (const BeltRotationAxis axis : {BeltRotationAxis::X, BeltRotationAxis::Y}) {
+            PrintConfig config;
+            config.belt_printer.value              = true;
+            config.belt_slice_rotation.value       = axis;
+            config.belt_frame_tilt_angle.value     = angle;   // the machine frame reads the tilt, not the slicing angle
+            config.belt_slice_rotation_angle.value = angle;
+            BeltKinematics k(config);
+            k.set_axis_remap(0, 2, 1);
+            CAPTURE(angle, int(axis));
+            const Vec3d p(7., -12., 5.);
+            REQUIRE(k.to_logical(k.to_machine(p)).isApprox(p, 1e-9));
+            REQUIRE(k.must_emit_all_axes());
+        }
+    }
+    // An identity-transform belt configuration still emits every axis word.
+    PrintConfig config;
+    config.belt_printer.value        = true;
+    config.belt_slice_rotation.value = BeltRotationAxis::None;
+    GCodeWriter writer;
+    std::vector<unsigned int> extruder_ids { 0 };
+    writer.set_extruders(extruder_ids);
+    writer.set_extruder(0);
+    install_belt_kinematics(writer, config);
+    writer.travel_to_z(5.0);
+    REQUIRE_THAT(writer.travel_to_xy(Vec2d(10., 20.)), Catch::Matchers::StartsWith("G1 X10 Y20 Z5 F"));
+}
+
+TEST_CASE("CartesianKinematics::to_logical inverts to_machine for every remap kind", "[GCodeWriter][kinematics]")
+{
+    CartesianKinematics k;
+    k.set_build_volume_max(Vec3d(200., 180., 250.));
+    const Vec3d p(4., 10., 3.);
+    for (const auto &[rx, ry, rz] : std::vector<std::tuple<int, int, int>>{ {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {3, 4, 5}, {6, 7, 8}, {0, 8, 1} }) {
+        k.set_axis_remap(rx, ry, rz);
+        CAPTURE(rx, ry, rz);
+        REQUIRE(k.to_logical(k.to_machine(p)).isApprox(p, 1e-12));
+        REQUIRE(k.supports_arc_moves() == (rx == 0 && ry == 1));
+        REQUIRE(k.must_emit_all_axes() == !(rx == 0 && ry == 1 && rz == 2));
     }
 }
 
@@ -849,4 +991,38 @@ TEST_CASE("Custom G-code motion limits are restored before generated moves", "[G
     REQUIRE(custom_gcode_pos != std::string::npos);
     REQUIRE(gcode.find("M204 S6000 ; adjust acceleration", custom_gcode_pos) != std::string::npos);
     REQUIRE(gcode.find("M205 X8 Y8 ; adjust jerk", custom_gcode_pos) != std::string::npos);
+}
+
+// BELT_MOD -- with a bed-frame band installed, first-layer travel speed follows the destination's
+// height above the bed instead of the per-layer flag.
+SCENARIO("Writer: first-layer travel speed follows the bed-frame band", "[GCodeWriter][belt]") {
+    GIVEN("A writer with distinct first-layer and normal travel speeds and a 0.3 mm band") {
+        GCodeWriter writer;
+        std::vector<unsigned int> extruder_ids { 0 };
+        writer.set_extruders(extruder_ids);
+        writer.set_extruder(0);
+        writer.config.travel_speed.values = { 100. };
+        writer.config.initial_layer_travel_speed.values = { FloatOrPercent(50., false) };
+        writer.set_is_first_layer(false);
+        writer.set_first_layer_band(0.3);
+        WHEN("the nozzle is inside the band") {
+            writer.travel_to_z(0.2);
+            THEN("an XY travel uses the first-layer travel speed") {
+                REQUIRE_THAT(writer.travel_to_xy(Vec2d(10., 10.)), Catch::Matchers::ContainsSubstring("F3000"));
+            }
+        }
+        WHEN("the nozzle is above the band") {
+            writer.travel_to_z(1.0);
+            THEN("an XY travel uses the normal travel speed") {
+                REQUIRE_THAT(writer.travel_to_xy(Vec2d(10., 10.)), Catch::Matchers::ContainsSubstring("F6000"));
+            }
+        }
+        WHEN("no band is installed") {
+            writer.set_first_layer_band(-1.);
+            writer.travel_to_z(0.2);
+            THEN("the per-layer flag decides") {
+                REQUIRE_THAT(writer.travel_to_xy(Vec2d(10., 10.)), Catch::Matchers::ContainsSubstring("F6000"));
+            }
+        }
+    }
 }

@@ -357,6 +357,17 @@ public:
     void add_file();
     // Returns false when no object was added (e.g. the user cancelled the load dialog).
     bool add_model(bool imperial_units = false, std::string fname = "");
+    // Orca: research/mesh-infill — generate the TPMS infill mesh of the
+    // selected object at the current settings and attach it as a modifier
+    // volume of the object (menu action; re-run to refresh).
+    void preview_mesh_infill();
+    // Unlayered: SVG infill art tiled over the current plate at print scale (3D view overlay);
+    // an empty list clears it. Fed by the Process tab while its SVG settings are on screen.
+    void set_svg_infill_preview(const Polylines &lines);
+    // Regenerate the preview volumes of every object whose mesh-relevant
+    // settings changed since the last generation. Called on entering the
+    // Infill tab; silent for objects with unsupported patterns.
+    void refresh_infill_previews();
     void import_zip_archive();
     void import_sl1_archive();
     void extract_config_from_project();
@@ -364,6 +375,7 @@ public:
     void load_gcode(const wxString& filename);
     void reload_gcode_from_disk();
     void reload_print();
+    void refresh_belt_view();   // BELT_MOD: see Preview::refresh_belt_view
 
     // SoftFever
     void calib_pa(const Calib_Params& params);
@@ -556,6 +568,10 @@ public:
     void replace_with_stl();
     void replace_all_with_stl();
     void reload_all_from_disk();
+    // Read the bed mesh from the current printer's host (off the UI thread) and show it on the plate.
+    void fetch_bed_mesh();
+    // Flip View > Show Bed Mesh; turning it on with nothing loaded yet fetches.
+    void toggle_bed_mesh();
     bool has_toolpaths_to_export() const;
     void export_toolpaths_to_obj() const;
     void reslice();
@@ -1020,6 +1036,13 @@ private:
     struct priv;
     std::unique_ptr<priv> p;
     std::string           m_3mf_path;
+    // Orca: research/mesh-infill — per-object generation key of the last
+    // infill preview, for refresh_infill_previews staleness checks.
+    std::map<size_t, std::string> m_infill_preview_keys;
+    // Shared core of preview_mesh_infill / refresh_infill_previews.
+    // dry_run: stop after the staleness check and report whether generation
+    // would happen, without touching the model.
+    bool generate_infill_preview_for_object(int obj_idx, bool interactive, bool dry_run = false);
     // Set true during PopupMenu() tracking to suppress immediate error message boxes.
     // The error messages are collected to m_tracking_popup_menu_error_message instead and these error messages
     // are shown after the pop-up dialog closes.

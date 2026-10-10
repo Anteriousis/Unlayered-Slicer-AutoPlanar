@@ -28,6 +28,12 @@
 #include <thread>
 
 #include <Eigen/SVD>
+#include <Eigen/Sparse>
+#include <tbb/parallel_for.h>
+#include "AABBTreeIndirect.hpp"
+#include <functional>
+#include <optional>
+#include <sstream>
 
 #include <algorithm>
 #include <cmath>
@@ -775,9 +781,104 @@ void smooth_skeleton_graph(SkeletonGraph& G, int iterations, float alpha, bool f
 
 // ── snap_to_bed ───────────────────────────────────────────────────────────────
 
-int snap_to_bed(SkeletonGraph& G, const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
-                double band_mm, double* out_bed_z)
+// The tip branches of a graph: from each degree-1 node through degree-2 nodes to the first node
+// that is not degree 2 (a junction, or the far tip of a plain chain).
+namespace {
+struct TipBranch
 {
+    int              tip{-1};
+    int              end{-1};
+    double           len{0.0};
+    std::vector<int> path; // tip first, `end` excluded
+};
+}
+
+static std::vector<TipBranch> tip_branches(const SkeletonGraph& G)
+{
+    std::vector<TipBranch> out;
+    const int n = G.num_nodes();
+    for (int i = 0; i < n; ++i) {
+        if (G.degree(i) != 1)
+            continue;
+        TipBranch b;
+        b.tip = i;
+        b.path.push_back(i);
+        int prev = i, cur = G.adj[i][0];
+        for (int guard = 0; guard <= n; ++guard) {
+            b.len += (G.nodes[cur] - G.nodes[prev]).norm();
+            if (G.degree(cur) != 2 || cur == i)
+                break;
+            b.path.push_back(cur);
+            const int next = G.adj[cur][0] == prev ? G.adj[cur][1] : G.adj[cur][0];
+            prev = cur;
+            cur  = next;
+        }
+        b.end = cur;
+        out.push_back(std::move(b));
+    }
+    return out;
+}
+
+// Short tip branches that hang BELOW the junction they leave: MCF stubs where the part sits on
+// the bed. On Intake_manifold stood up as a U they were the root -- a 3.6 mm stub under the
+// plenum junction got extended to the bed and every cut grew diagonally out of it.
+static std::vector<char> hanging_twigs(const SkeletonGraph& G, const std::vector<TipBranch>& branches,
+                                       double twig_len)
+{
+    std::vector<char> hanging(G.num_nodes(), 0);
+    for (const TipBranch& b : branches)
+        if (G.degree(b.end) >= 3 && G.nodes[b.end].z() > G.nodes[b.tip].z() && b.len < twig_len)
+            for (int k : b.path)
+                hanging[k] = 1;
+    return hanging;
+}
+
+static bool point_in_poly2(const std::vector<Eigen::Vector2d>& poly, const Eigen::Vector2d& p)
+{
+    bool inside = false;
+    const int m = (int) poly.size();
+    for (int i = 0, j = m - 1; i < m; j = i++) {
+        const Eigen::Vector2d& a = poly[i];
+        const Eigen::Vector2d& b = poly[j];
+        if (((a.y() > p.y()) != (b.y() > p.y())) &&
+            (p.x() < (b.x() - a.x()) * (p.y() - a.y()) / (b.y() - a.y()) + a.x()))
+            inside = !inside;
+    }
+    return inside;
+}
+
+// Plan-view distance from p to the bed contact, 0 when over it. Not a containment test: a duct
+// lying on the bed, or a U on its bend, touches it along a hairline, and the centreline above that
+// line is "over the contact" for every purpose here.
+static double footprint_gap(const BedRootPlan& plan, const Eigen::Vector3d& p)
+{
+    const Eigen::Vector2d q    = p.head<2>();
+    double                best = std::numeric_limits<double>::max();
+    for (const auto& loop : plan.footprint) {
+        if (point_in_poly2(loop, q))
+            return 0.0;
+        for (size_t i = 0, j = loop.size() - 1; i < loop.size(); j = i++) {
+            const Eigen::Vector2d ab = loop[i] - loop[j];
+            const double          l2 = ab.squaredNorm();
+            const double          t  = l2 > 1e-18 ? std::clamp((q - loop[j]).dot(ab) / l2, 0.0, 1.0) : 0.0;
+            best = std::min(best, (q - (loop[j] + t * ab)).norm());
+        }
+    }
+    return best;
+}
+
+// How far beside the contact a foot may land: a centreline wanders off the exact line of contact
+// by a fraction of the pipe's radius, never by the part's size.
+static double footprint_slack(const BedRootPlan& plan)
+{
+    return std::max(2.0, 0.5 * plan.low_zone);
+}
+
+int snap_to_bed(SkeletonGraph& G, const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
+                double band_mm, double* out_bed_z, BedRootMode mode, BedRootPlan* plan)
+{
+    if (plan)
+        *plan = BedRootPlan{};
     const int n = G.num_nodes();
     const double bed_z = (V.rows() > 0) ? V.col(2).minCoeff() : 0.0;
     if (out_bed_z)
@@ -835,6 +936,89 @@ int snap_to_bed(SkeletonGraph& G, const Eigen::MatrixXd& V, const Eigen::MatrixX
         target.z() = bed_z;
         return true;
     };
+
+    // ── Middle or tips ──
+    // Decided before anything moves. A LEG is a tip whose own branch runs down and drops well
+    // below the junction (or far end) it leaves: a pipe standing up, a trident on its prongs.
+    // Those keep the tip roots below. A part with no leg -- a duct lying across the bed, a U on
+    // its bend, a manifold whose runners all rise from the plenum -- touches the bed somewhere
+    // mid-branch, and that is where its one root belongs.
+    if (plan && mode != BedRootMode::Tips && !bed_sec.empty()) {
+        const std::vector<TipBranch> branches = tip_branches(G);
+        const double leg_drop = std::max(band, 0.25 * z_ext);
+        const double twig_len = 0.25 * mesh_diag;
+        int legs = 0;
+        for (const TipBranch& b : branches) {
+            const Eigen::Vector3d d  = G.nodes[b.tip] - G.nodes[G.adj[b.tip][0]];
+            const double          dn = d.norm();
+            if (dn > 1e-9 && d.z() / dn <= -0.5 && G.nodes[b.end].z() - G.nodes[b.tip].z() >= leg_drop)
+                ++legs;
+        }
+        const std::vector<char> hanging = hanging_twigs(G, branches, twig_len);
+
+        if (legs == 0 || mode == BedRootMode::Middle) {
+            // The middle of what rests on the bed: area centroid of the outer contact loops.
+            Eigen::Vector3d c  = Eigen::Vector3d::Zero();
+            double          ca = 0.0;
+            for (const SecLoop& L : bed_sec.loops)
+                if (L.depth == 0) {
+                    const double a = std::abs(L.area);
+                    c += a * bed_sec.to3d(L.centroid);
+                    ca += a;
+                }
+            if (ca > 0.0)
+                c /= ca;
+
+            bool any_struct = false;
+            for (int i = 0; i < n; ++i)
+                any_struct |= !hanging[i];
+            double z_low = std::numeric_limits<double>::max();
+            for (int i = 0; i < n; ++i)
+                if (!hanging[i] || !any_struct)
+                    z_low = std::min(z_low, G.nodes[i].z());
+            BedRootPlan cand;
+            cand.centre   = Eigen::Vector3d(c.x(), c.y(), bed_z);
+            cand.bed_z    = bed_z;
+            cand.low_zone = std::max(band, 0.15 * z_ext);
+            cand.twig_len = twig_len;
+            for (const SecLoop& L : bed_sec.loops)
+                if (L.depth == 0) {
+                    std::vector<Eigen::Vector2d> loop;
+                    loop.reserve(L.pts.size());
+                    for (const Eigen::Vector2d& q : L.pts)
+                        loop.push_back(bed_sec.to3d(q).head<2>());
+                    cand.footprint.push_back(std::move(loop));
+                }
+
+            // Feasible when some low structural node stands over the contact. The exact point is
+            // chosen by plant_middle_root() on the final graph.
+            int    best = -1;
+            double bd   = std::numeric_limits<double>::max();
+            for (int i = 0; i < n; ++i) {
+                if ((hanging[i] && any_struct) || G.nodes[i].z() > z_low + cand.low_zone ||
+                    footprint_gap(cand, G.nodes[i]) > footprint_slack(cand))
+                    continue;
+                const double d = (G.nodes[i].head<2>() - c.head<2>()).norm();
+                if (d < bd) { bd = d; best = i; }
+            }
+            if (best >= 0) {
+                *plan            = std::move(cand);
+                plan->use_middle = true;
+                std::ostringstream os;
+                os << (mode == BedRootMode::Middle ? "middle (forced)" : "middle: no leg") << ", nearest node "
+                   << bd << " mm from the footprint centre at z=" << G.nodes[best].z();
+                plan->reason = os.str();
+                std::cout << "[snap_to_bed] root goes under the " << plan->reason << "; tips left alone.\n";
+                return 0;
+            }
+            plan->reason = "no low centreline node over the footprint; using tips";
+            std::cout << "[snap_to_bed] " << plan->reason << "\n";
+        } else {
+            std::ostringstream os;
+            os << "tips: " << legs << " leg(s)";
+            plan->reason = os.str();
+        }
+    }
 
     int moved = 0;
     for (int i = 0; i < n; ++i) {
@@ -976,6 +1160,206 @@ int snap_to_bed(SkeletonGraph& G, const Eigen::MatrixXd& V, const Eigen::MatrixX
     std::cout << "[snap_to_bed] bed_z=" << bed_z << " band=" << band
               << "mm — snapped " << moved << " tip(s).\n";
     return moved;
+}
+
+// ── middle root ───────────────────────────────────────────────────────────────
+
+int plant_middle_root(SkeletonGraph& G, const BedRootPlan& plan)
+{
+    if (!plan.use_middle || G.num_nodes() == 0)
+        return -1;
+
+    // Drop the stubs hanging under the structure. They are found again on the final graph rather
+    // than carried over from the plan: resampling renumbered everything since.
+    {
+        const std::vector<char> hanging = hanging_twigs(G, tip_branches(G), plan.twig_len);
+        int n_drop = 0;
+        for (char h : hanging)
+            n_drop += h;
+        if (n_drop > 0 && n_drop < G.num_nodes()) {
+            std::vector<int> remap(G.num_nodes(), -1);
+            SkeletonGraph    kept;
+            for (int i = 0; i < G.num_nodes(); ++i)
+                if (!hanging[i]) {
+                    remap[i] = kept.num_nodes();
+                    kept.add_node(G.nodes[i]);
+                }
+            for (int u = 0; u < G.num_nodes(); ++u)
+                for (int v : G.adj[u])
+                    if (u < v && remap[u] >= 0 && remap[v] >= 0)
+                        kept.add_edge(remap[u], remap[v]);
+            G = std::move(kept);
+            std::cout << "[plant_middle_root] pruned " << n_drop << " node(s) of stubs hanging below the centreline.\n";
+        }
+    }
+
+    // The point to hang the foot from: on the low part of the centreline, over the contact, and
+    // nearest the contact's centre in plan view. Mid-edge points split their edge, unless they sit
+    // within a fifth of it from an end, where the end node serves.
+    const Eigen::Vector2d c2    = plan.centre.head<2>();
+    const double          slack = footprint_slack(plan);
+    double                z_low = std::numeric_limits<double>::max();
+    for (const Eigen::Vector3d& p : G.nodes)
+        z_low = std::min(z_low, p.z());
+    const auto usable = [&](const Eigen::Vector3d& p) {
+        return p.z() - plan.bed_z >= 1e-3 && footprint_gap(plan, p) <= slack;
+    };
+    int    bu = -1, bv = -1;
+    double bt = 0.0, bd = std::numeric_limits<double>::max();
+    for (int u = 0; u < G.num_nodes(); ++u) {
+        if (G.adj[u].empty() && G.nodes[u].z() <= z_low + plan.low_zone && usable(G.nodes[u])) {
+            const double d = (G.nodes[u].head<2>() - c2).norm();
+            if (d < bd) { bd = d; bu = u; bv = -1; bt = 0.0; }
+        }
+        for (int v : G.adj[u]) {
+            if (v < u || std::min(G.nodes[u].z(), G.nodes[v].z()) > z_low + plan.low_zone)
+                continue;
+            const Eigen::Vector3d& a  = G.nodes[u];
+            const Eigen::Vector3d& b  = G.nodes[v];
+            const Eigen::Vector2d  ab = (b - a).head<2>();
+            const double           l2 = ab.squaredNorm();
+            const double           t  = l2 > 1e-12 ? std::clamp((c2 - a.head<2>()).dot(ab) / l2, 0.0, 1.0) : 0.0;
+            const Eigen::Vector3d  p  = a + t * (b - a);
+            if (!usable(p))
+                continue;
+            const double d = (p.head<2>() - c2).norm();
+            if (d < bd - 1e-9) { bd = d; bu = u; bv = v; bt = t; }
+        }
+    }
+    if (bu < 0) {
+        std::cout << "[plant_middle_root] no low centreline point over the bed contact; no foot planted.\n";
+        return -1;
+    }
+    int m = bu;
+    if (bv >= 0) {
+        if (bt >= 0.8)
+            m = bv;
+        else if (bt > 0.2) {
+            m = G.num_nodes();
+            G.add_node(G.nodes[bu] + bt * (G.nodes[bv] - G.nodes[bu]));
+            auto& au = G.adj[bu];
+            auto& av = G.adj[bv];
+            std::replace(au.begin(), au.end(), bv, m);
+            std::replace(av.begin(), av.end(), bu, m);
+            G.adj[m] = {bu, bv};
+        }
+    }
+
+    const int foot = G.num_nodes();
+    G.add_node(Eigen::Vector3d(G.nodes[m].x(), G.nodes[m].y(), plan.bed_z));
+    G.add_edge(m, foot);
+    std::cout << "[plant_middle_root] foot under node " << m << " at (" << G.nodes[m].x() << ", "
+              << G.nodes[m].y() << "), " << (G.nodes[m].z() - plan.bed_z) << " mm above the bed.\n";
+    return foot;
+}
+
+int skeleton_foot_top(const std::vector<Eigen::Vector3d>& nodes, const std::vector<std::vector<int>>& adj,
+                      int root)
+{
+    if (root < 0 || root >= (int) adj.size() || adj[root].size() != 1)
+        return -1;
+    const int             top = adj[root][0];
+    const Eigen::Vector3d d   = nodes[top] - nodes[root];
+    const double          len = d.norm();
+    if (len < 1e-9 || d.z() / len < 0.999 || adj[top].size() < 3)
+        return -1;
+    int level = 0;
+    for (int o : adj[top]) {
+        if (o == root)
+            continue;
+        const Eigen::Vector3d e  = nodes[o] - nodes[top];
+        const double          el = e.norm();
+        if (el > 1e-9 && std::abs(e.z()) / el < 0.8)
+            ++level;
+    }
+    return level >= 2 ? top : -1;
+}
+
+double SkeletonRootRamp::lean_deg(double s_mid, bool from_foot, double seat_r) const
+{
+    const double l0 = from_foot ? lean0_foot_deg : 90.0;
+    if (ramp <= 0.0)
+        return 0.0;
+    const double x = (s_mid - (from_foot ? seat_r : 0.0)) / ramp;
+    if (x <= 0.0)
+        return l0;
+    if (x >= 1.0)
+        return 0.0;
+    return l0 * (1.0 - x * x * (3.0 - 2.0 * x));
+}
+
+SkeletonRootRamp skeleton_root_ramp(const std::vector<Eigen::Vector3d>& nodes,
+                                    const std::vector<std::vector<int>>& adj,
+                                    const std::vector<int>& roots,
+                                    double root_lean_deg, double root_ramp)
+{
+    SkeletonRootRamp R;
+    const int n = (int) nodes.size();
+    R.lean0_foot_deg = std::clamp(root_lean_deg, 0.0, 90.0);
+    R.s.assign(n, std::numeric_limits<double>::infinity());
+    R.foot.assign(n, 0);
+    R.seat.assign(n, 0.0);
+    if (n == 0)
+        return R;
+
+    using QE = std::pair<double, int>;
+    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+    // The flatter the first planes, the lower they meet over the middle: planes tilted 90 - lean from
+    // +Z, `seat` either side, meet seat / tan(lean) above the centreline -- so 1.1 h needs a seat of
+    // 1.1 h tan(lean). (Vertical planes, lean 0, never meet; flat ones, lean 90, need the clamp below.)
+    const double tan_lean = std::tan(std::min(R.lean0_foot_deg, 89.9) * M_PI / 180.0);
+    for (int r : roots) {
+        if (r < 0 || r >= n)
+            continue;
+        const int top = skeleton_foot_top(nodes, adj, r);
+        if (top >= 0) {
+            const double h    = (nodes[top] - nodes[r]).norm();
+            const double seat = 1.1 * h * tan_lean;
+            for (int k : {r, top}) {
+                R.s[k]    = 0.0;
+                R.foot[k] = 1;
+                R.seat[k] = seat;
+                pq.push({0.0, k});
+            }
+        } else {
+            R.s[r] = 0.0;
+            pq.push({0.0, r});
+        }
+    }
+    while (!pq.empty()) {
+        const auto [d, u] = pq.top();
+        pq.pop();
+        if (d > R.s[u])
+            continue;
+        for (int v : adj[u]) {
+            const double nd = d + (nodes[v] - nodes[u]).norm();
+            if (nd < R.s[v]) {
+                R.s[v]    = nd;
+                R.foot[v] = R.foot[u];
+                R.seat[v] = R.seat[u];
+                pq.push({nd, v});
+            }
+        }
+    }
+
+    double max_s = 0.0, edge_sum = 0.0;
+    int    edge_n = 0;
+    for (int u = 0; u < n; ++u) {
+        if (std::isfinite(R.s[u]))
+            max_s = std::max(max_s, R.s[u]);
+        for (int v : adj[u])
+            if (u < v) {
+                edge_sum += (nodes[v] - nodes[u]).norm();
+                ++edge_n;
+            }
+    }
+    const double mean_edge = edge_n > 0 ? edge_sum / edge_n : 0.0;
+    R.ramp = root_ramp > 0.0 ? root_ramp : std::max(3.0 * mean_edge, 0.3 * max_s);
+    // A seat swallowing most of the part would leave nothing to cut: a very shallow lean asks for
+    // that, and is better served by a smaller seat that crosses near the top than by no cuts.
+    for (double& seat : R.seat)
+        seat = std::min(seat, 0.4 * max_s);
+    return R;
 }
 
 SkeletonGraph collapse_skeleton_graph(const SkeletonDAG& dag, float thresh)
@@ -1461,6 +1845,20 @@ std::vector<int> find_skeleton_roots(const SkeletonGraph& G, double bottom_pct)
     double z_thresh = z_min + bottom_pct * (z_max - z_min);
 
     std::vector<int> roots;
+
+    // A planted foot is THE root: only the feet and any tip lying on the bed itself stand on it.
+    for (int i = 0; i < n; ++i)
+        if (skeleton_foot_top(G.nodes, G.adj, i) >= 0)
+            roots.push_back(i);
+    if (!roots.empty()) {
+        const double on_bed = z_min + std::max(0.05, 1e-3 * (z_max - z_min));
+        for (int i = 0; i < n; ++i)
+            if (G.degree(i) == 1 && G.nodes[i].z() <= on_bed &&
+                std::find(roots.begin(), roots.end(), i) == roots.end())
+                roots.push_back(i);
+        std::cout << "[find_skeleton_roots] " << roots.size() << " root(s): planted foot under the middle.\n";
+        return roots;
+    }
     for (int i = 0; i < n; ++i)
         if (G.degree(i) == 1 && G.nodes[i].z() <= z_thresh)
             roots.push_back(i);
@@ -1838,7 +2236,9 @@ SkeletonTangents compute_skeleton_tangents(
     const SkeletonDAG&   dag,
     const std::vector<int>& roots,
     const std::vector<int>& convergence_nodes,
-    double W)
+    double W,
+    double root_lean_deg,
+    double root_ramp)
 {
     int n = G.num_nodes();
     SkeletonTangents result;
@@ -2043,17 +2443,10 @@ SkeletonTangents compute_skeleton_tangents(
         }
     }
 
-    // ── Enforce UnitZ on root-adjacent edges ──────────────────────────────────
-    // Skip edges whose far end is a convergence node — convergence smoothing
-    // already set those to the bisector tangent and must not be clobbered.
-    for (int r : roots) {
-        for (int nb : G.adj[r]) {
-            if (conv_set.count(nb)) continue;
-            int ei = get_edge_index(r, nb);
-            if (ei < 0) continue;
-            result.smoothed[ei] = Eigen::Vector3d::UnitZ();
-        }
-    }
+    // (Root-adjacent edges used to be forced to UnitZ here and every other edge left alone, so the
+    // first plane lay flat and the next snapped straight to the spine: 0 -> 71 -> 39 -> 91 deg of
+    // tilt out of the root of Intake_manifold. The lean toward +Z is now a ramp, applied last,
+    // below.)
 
     // ── Rodrigues rotation helper ─────────────────────────────────────────────
     auto rodrigues = [](const Eigen::Vector3d& v, const Eigen::Vector3d& k, double theta) -> Eigen::Vector3d {
@@ -2180,6 +2573,53 @@ SkeletonTangents compute_skeleton_tangents(
         ++n_resmoothed;
     }
 
+    // ── Lean out of the bed, gradually ────────────────────────────────────────
+    // Near a root a normal may tilt at most 90 deg - lean from +Z, the lean fading over the ramp.
+    // At a leg's root the lean is 90 deg, so the first plane is the bed plane exactly as before;
+    // under a planted foot it is root_lean_deg, held across the seat. A CAP on the tilt, not a
+    // fixed turn toward +Z: on a bend the spine already rises at the seat's edge (68 deg tilt
+    // 11 mm out on a U of radius 30), and turning that a further 45 deg laid the first planes 23
+    // deg off flat -- they met inside the top wall over the middle, which the seat is sized to
+    // prevent for planes at 90 - lean. Last, so the convergence smoothing above cannot undo it --
+    // except that a root edge running INTO a convergence node keeps its bisector, as the old UnitZ
+    // enforcement did.
+    int n_leaned = 0;
+    {
+        const SkeletonRootRamp R = skeleton_root_ramp(G.nodes, G.adj, roots, root_lean_deg, root_ramp);
+        for (int ei = 0; ei < n_edges; ++ei) {
+            const auto [u, v] = result.edges[ei];
+            if (!std::isfinite(R.s[u]) || !std::isfinite(R.s[v]))
+                continue;
+            const int par = R.s[u] <= R.s[v] ? u : v;
+            const int ch  = par == u ? v : u;
+            if (R.s[par] == 0.0 && conv_set.count(ch))
+                continue;
+            // From a leg, measured at the cut's parent node, so the root edge -- parent at distance 0 --
+            // stays exactly the bed plane, as it always was. Under a foot, at the cut's own plane, the
+            // same measure the seat is skipped by.
+            const bool   from_foot = R.foot[par] != 0;
+            const double s_eval    = from_foot ? 0.5 * (R.s[u] + R.s[v]) : R.s[par];
+            const double lean      = R.lean_deg(s_eval, from_foot, R.seat[par]) * M_PI / 180.0;
+            if (lean <= 1e-9)
+                continue;
+            const Eigen::Vector3d t   = result.smoothed[ei];
+            const double          ang = std::acos(std::clamp(t.z(), -1.0, 1.0));
+            const double          cap = 0.5 * M_PI - lean; // largest tilt from +Z allowed here
+            if (ang <= cap + 1e-9)
+                continue;
+            Eigen::Vector3d k  = t.cross(Eigen::Vector3d::UnitZ());
+            const double    kn = k.norm();
+            k = kn > 1e-12 ? Eigen::Vector3d(k / kn) : Eigen::Vector3d::UnitX();
+            Eigen::Vector3d nt = rodrigues(t, k, ang - cap);
+            const double    nl = nt.norm();
+            if (nl > 1e-12) {
+                result.smoothed[ei] = nt / nl;
+                ++n_leaned;
+            }
+        }
+    }
+
+    std::cout << "[compute_skeleton_tangents] " << n_leaned << " normals leaned toward the bed normal near a root.\n";
     std::cout << "[compute_skeleton_tangents] " << n_edges << " edges  "
               << conv_branches.size() << " convergence branches  "
               << n_violations << " clearance violations  "
@@ -3179,6 +3619,412 @@ SkeletonGraph splice_tunnel_spines(const SkeletonGraph& G, const std::vector<Tun
               << " kept: laterally inside a corridor but past its end), reattached " << reattached
               << " branch edge(s), graph now " << R.num_nodes() << " nodes.\n";
     return R;
+}
+
+// ── Bores from the inner wall ─────────────────────────────────────────────────
+//
+// find_tunnel_spines() finds a bore by slicing along a few straight axes and counting the
+// stations that show a hole, so it is blind to a bore that bends: a 90 deg elbow shows a hole
+// along +Z for one leg only and along the PCA axes for neither. Measured on a real intake duct:
+// four candidates, best aspect 1.12 against a gate of 1.2, none accepted, and the part was
+// skeletonised as a loop around its own wall with the root at a random place on it.
+//
+// The inner wall knows where the bore is. A face lining a bore sees material in most of its own
+// hemisphere; a face on the outside sees sky. Classify every face by a few rays, take the
+// connected inner-wall patches, and a patch with two boundary loops IS a through-bore, however
+// it bends. A harmonic function on the patch, 0 on one opening and 1 on the other, has level
+// sets that ring the bore, and the area centroid of each ring is a centreline point. No
+// marching, no step size, nothing to stall. Measured on six real intake parts, 0.4-1.5 s each
+// in the Python prototype: every centreline point sits 0.80-0.97 of the local inradius from the
+// nearest wall, median 0.95-0.98 (1.0 = exactly centred).
+std::vector<TunnelSpine> find_bore_spines_from_walls(const indexed_triangle_set& its,
+                                                     double       spacing,
+                                                     double       min_aspect,
+                                                     int          max_tunnels,
+                                                     std::string* note)
+{
+    std::vector<TunnelSpine> out;
+    std::ostringstream       log;
+    const size_t nf = its.indices.size();
+    const size_t nv = its.vertices.size();
+    if (nf < 4 || nv < 4)
+        return out;
+
+    auto vert = [&its](int i) { return Eigen::Vector3d(its.vertices[i].cast<double>()); };
+
+    std::vector<Eigen::Vector3d> fn(nf), fc(nf);
+    std::vector<double>          fa(nf);
+    double          total_area = 0.0;
+    Eigen::Vector3d bb_min = vert(0), bb_max = vert(0);
+    for (size_t i = 0; i < nv; ++i) {
+        bb_min = bb_min.cwiseMin(vert((int) i));
+        bb_max = bb_max.cwiseMax(vert((int) i));
+    }
+    const double diag = (bb_max - bb_min).norm();
+    for (size_t f = 0; f < nf; ++f) {
+        const Eigen::Vector3d a = vert(its.indices[f][0]), b = vert(its.indices[f][1]), c = vert(its.indices[f][2]);
+        const Eigen::Vector3d n = (b - a).cross(c - a);
+        const double          l = n.norm();
+        fa[f] = 0.5 * l;
+        total_area += fa[f];
+        fn[f] = l > 1e-18 ? Eigen::Vector3d(n / l) : Eigen::Vector3d::UnitZ();
+        fc[f] = (a + b + c) / 3.0;
+    }
+
+    // 1. How much of each face's hemisphere is open. A fixed cosine-weighted pattern (van der
+    //    Corput), so the same mesh always classifies the same way.
+    const auto tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(its.vertices, its.indices);
+    const int  K    = nf > 60000 ? 12 : 24;
+    std::vector<Eigen::Vector3d> pat(K);
+    for (int i = 0; i < K; ++i) {
+        const double u = (i + 0.5) / K;
+        double v = 0.0;
+        for (unsigned bit = (unsigned) i, f = 0; bit; bit >>= 1, ++f)
+            if (bit & 1u)
+                v += std::ldexp(1.0, -(int) f - 1);
+        const double th = 2.0 * M_PI * v, r = std::sqrt(u);
+        pat[i] = Eigen::Vector3d(r * std::cos(th), r * std::sin(th), std::sqrt(std::max(0.0, 1.0 - u)));
+    }
+    std::vector<float> escape(nf, 1.f);
+    const double       push = 1e-4 * diag;
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, nf, 256), [&](const tbb::blocked_range<size_t>& range) {
+        for (size_t f = range.begin(); f < range.end(); ++f) {
+            const Eigen::Vector3d& n = fn[f];
+            const Eigen::Vector3d  a = std::abs(n.x()) < 0.9 ? Eigen::Vector3d::UnitX() : Eigen::Vector3d::UnitY();
+            const Eigen::Vector3d  t = n.cross(a).normalized();
+            const Eigen::Vector3d  b = n.cross(t);
+            const Eigen::Vector3d  o = fc[f] + push * n;
+            int hits = 0;
+            for (int i = 0; i < K; ++i) {
+                const Eigen::Vector3d d = pat[i].x() * t + pat[i].y() * b + pat[i].z() * n;
+                igl::Hit<float>       hit;
+                if (AABBTreeIndirect::intersect_ray_first_hit(its.vertices, its.indices, tree, o, d, hit))
+                    ++hits;
+            }
+            escape[f] = 1.f - float(hits) / float(K);
+        }
+    });
+
+    // 2. Face adjacency across shared edges.
+    struct EdgeRef { uint64_t key; int face; };
+    std::vector<EdgeRef> er;
+    er.reserve(3 * nf);
+    for (size_t f = 0; f < nf; ++f)
+        for (int k = 0; k < 3; ++k) {
+            uint32_t a = (uint32_t) its.indices[f][k], b = (uint32_t) its.indices[f][(k + 1) % 3];
+            if (a > b)
+                std::swap(a, b);
+            er.push_back({(uint64_t(a) << 32) | b, (int) f});
+        }
+    std::sort(er.begin(), er.end(), [](const EdgeRef& x, const EdgeRef& y) { return x.key < y.key; });
+    std::vector<std::vector<int>> fadj(nf);
+    for (size_t i = 0; i < er.size();) {
+        size_t j = i;
+        while (j < er.size() && er[j].key == er[i].key)
+            ++j;
+        for (size_t p = i; p < j; ++p)
+            for (size_t q = i; q < j; ++q)
+                if (p != q)
+                    fadj[er[p].face].push_back(er[q].face);
+        i = j;
+    }
+
+    // 3. Inner = mostly enclosed. Two majority passes clear the speckle at fillets and openings.
+    std::vector<char> inner(nf);
+    for (size_t f = 0; f < nf; ++f)
+        inner[f] = escape[f] < 0.5f;
+    for (int pass = 0; pass < 2; ++pass) {
+        std::vector<char> next(nf);
+        for (size_t f = 0; f < nf; ++f) {
+            int yes = inner[f], tot = 1;
+            for (int g : fadj[f]) { yes += inner[g]; ++tot; }
+            next[f] = (2 * yes > tot);
+        }
+        inner.swap(next);
+    }
+
+    // 4. Connected inner-wall patches, largest area first.
+    std::vector<int> comp(nf, -1);
+    int ncomp = 0;
+    for (size_t f = 0; f < nf; ++f) {
+        if (!inner[f] || comp[f] >= 0)
+            continue;
+        std::vector<int> stack{(int) f};
+        comp[f] = ncomp;
+        while (!stack.empty()) {
+            const int u = stack.back();
+            stack.pop_back();
+            for (int g : fadj[u])
+                if (inner[g] && comp[g] < 0) { comp[g] = ncomp; stack.push_back(g); }
+        }
+        ++ncomp;
+    }
+    std::vector<double> carea(ncomp, 0.0);
+    for (size_t f = 0; f < nf; ++f)
+        if (comp[f] >= 0)
+            carea[comp[f]] += fa[f];
+    std::vector<int> order(ncomp);
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&carea](int a, int b) { return carea[a] > carea[b]; });
+    size_t n_inner = 0;
+    for (size_t f = 0; f < nf; ++f) n_inner += inner[f] ? 1 : 0;
+    log << "[bore] " << n_inner << " / " << nf << " faces line an enclosed space, in " << ncomp << " patch(es)\n";
+
+    // The full mesh's cross section at each ring gives the corridor radius the splice needs.
+    std::optional<Slicer> slicer;
+    Mesh                  pmesh;
+    {
+        Eigen::MatrixXd V(nv, 3);
+        Eigen::MatrixXi F(nf, 3);
+        for (size_t i = 0; i < nv; ++i) V.row(i) = vert((int) i).transpose();
+        for (size_t f = 0; f < nf; ++f) F.row(f) = Eigen::RowVector3i(its.indices[f][0], its.indices[f][1], its.indices[f][2]);
+        pmesh = build_prepared_mesh(V, F);
+        if (CGAL::is_closed(pmesh))
+            slicer.emplace(pmesh);
+    }
+
+    struct Ring { Eigen::Vector3d c, n; double inr{0.0}, maxr{0.0}; };
+    // Plane by PCA, points ordered by angle in it, shoelace area centroid. The mean of the ring
+    // points would do for a circle but is pulled toward wherever the mesh is dense (fillets).
+    auto fit_ring = [](const std::vector<Eigen::Vector3d>& P, Ring& R) -> bool {
+        if (P.size() < 3)
+            return false;
+        Eigen::Vector3d mu = Eigen::Vector3d::Zero();
+        for (const auto& p : P) mu += p;
+        mu /= (double) P.size();
+        Eigen::Matrix3d C = Eigen::Matrix3d::Zero();
+        for (const auto& p : P) { const Eigen::Vector3d d = p - mu; C += d * d.transpose(); }
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(C);
+        if (es.info() != Eigen::Success)
+            return false;
+        const Eigen::Vector3d n = es.eigenvectors().col(0), u = es.eigenvectors().col(2);
+        const Eigen::Vector3d v = n.cross(u);
+        std::vector<std::pair<double, int>> ang;
+        ang.reserve(P.size());
+        for (size_t i = 0; i < P.size(); ++i) {
+            const Eigen::Vector3d d = P[i] - mu;
+            ang.emplace_back(std::atan2(d.dot(v), d.dot(u)), (int) i);
+        }
+        std::sort(ang.begin(), ang.end());
+        double a2 = 0.0, cx = 0.0, cy = 0.0;
+        for (size_t i = 0; i < ang.size(); ++i) {
+            const Eigen::Vector3d d0 = P[ang[i].second] - mu, d1 = P[ang[(i + 1) % ang.size()].second] - mu;
+            const double x0 = d0.dot(u), y0 = d0.dot(v), x1 = d1.dot(u), y1 = d1.dot(v);
+            const double cr = x0 * y1 - x1 * y0;
+            a2 += cr;
+            cx += cr * (x0 + x1);
+            cy += cr * (y0 + y1);
+        }
+        if (std::abs(a2) < 1e-9)
+            return false;
+        R.c    = mu + (cx / (3.0 * a2)) * u + (cy / (3.0 * a2)) * v;
+        R.n    = n;
+        R.inr  = std::numeric_limits<double>::max();
+        R.maxr = 0.0;
+        for (const auto& p : P) {
+            const double d = (p - R.c).norm();
+            R.inr  = std::min(R.inr, d);
+            R.maxr = std::max(R.maxr, d);
+        }
+        return true;
+    };
+    auto chain_length = [](const std::vector<Eigen::Vector3d>& pts) {
+        double l = 0.0;
+        for (size_t i = 0; i + 1 < pts.size(); ++i) l += (pts[i + 1] - pts[i]).norm();
+        return l;
+    };
+
+    for (int ci : order) {
+        if ((int) out.size() >= max_tunnels)
+            break;
+        if (carea[ci] < 0.05 * total_area)
+            break;
+
+        std::vector<int> faces;
+        for (size_t f = 0; f < nf; ++f)
+            if (comp[f] == ci)
+                faces.push_back((int) f);
+        std::vector<int> gl(nv, -1), lv;
+        for (int f : faces)
+            for (int k = 0; k < 3; ++k) {
+                const int g = its.indices[f][k];
+                if (gl[g] < 0) { gl[g] = (int) lv.size(); lv.push_back(g); }
+            }
+        const int m = (int) lv.size();
+
+        // Patch edges; those with one incident patch face are the boundary.
+        std::vector<uint64_t> ek;
+        ek.reserve(3 * faces.size());
+        for (int f : faces)
+            for (int k = 0; k < 3; ++k) {
+                uint32_t a = (uint32_t) gl[its.indices[f][k]], b = (uint32_t) gl[its.indices[f][(k + 1) % 3]];
+                if (a > b) std::swap(a, b);
+                ek.push_back((uint64_t(a) << 32) | b);
+            }
+        std::sort(ek.begin(), ek.end());
+        std::vector<std::pair<int, int>> edges, bedges;
+        for (size_t i = 0; i < ek.size();) {
+            size_t j = i;
+            while (j < ek.size() && ek[j] == ek[i]) ++j;
+            const std::pair<int, int> e((int) (ek[i] >> 32), (int) (ek[i] & 0xffffffffu));
+            edges.push_back(e);
+            if (j - i == 1) bedges.push_back(e);
+            i = j;
+        }
+        std::vector<int> uf(m);
+        std::iota(uf.begin(), uf.end(), 0);
+        std::function<int(int)> find = [&](int x) { return uf[x] == x ? x : uf[x] = find(uf[x]); };
+        for (const auto& e : bedges) uf[find(e.first)] = find(e.second);
+        std::vector<int> loop_of(m, -1);
+        std::map<int, int> loop_id;
+        for (const auto& e : bedges)
+            for (int x : {e.first, e.second}) {
+                const int r = find(x);
+                auto it = loop_id.find(r);
+                if (it == loop_id.end()) it = loop_id.emplace(r, (int) loop_id.size()).first;
+                loop_of[x] = it->second;
+            }
+        const int nloops = (int) loop_id.size();
+        std::vector<int> loop_size(nloops, 0);
+        for (int x = 0; x < m; ++x) if (loop_of[x] >= 0) ++loop_size[loop_of[x]];
+        log << "[bore] patch: " << faces.size() << " faces, " << (int) (100.0 * carea[ci] / total_area)
+            << "% of the surface, " << nloops << " opening(s)";
+        for (int s : loop_size) log << " " << s;
+        log << "\n";
+        if (nloops != 2 || loop_size[0] < 6 || loop_size[1] < 6) {
+            log << "[bore]   " << (nloops < 2 ? "a blind pocket" : "a branched space") << " -- not traced here\n";
+            continue;
+        }
+
+        // Harmonic field, 0 on one opening and 1 on the other. Cotangent weights, clamped at zero
+        // and with a floor so an all-obtuse vertex cannot make the system singular.
+        std::vector<Eigen::Triplet<double>> trip;
+        trip.reserve(12 * faces.size());
+        std::vector<double> dw(m, 0.0);
+        for (int f : faces) {
+            int             li[3];
+            Eigen::Vector3d P[3];
+            for (int k = 0; k < 3; ++k) { li[k] = gl[its.indices[f][k]]; P[k] = vert(its.indices[f][k]); }
+            for (int k = 0; k < 3; ++k) {
+                const int i = li[k], j = li[(k + 1) % 3], o = (k + 2) % 3;
+                const Eigen::Vector3d e1 = P[k] - P[o], e2 = P[(k + 1) % 3] - P[o];
+                double w = e1.dot(e2) / std::max(e1.cross(e2).norm(), 1e-12);
+                w = 0.5 * std::max(0.0, w) + 1e-6;
+                trip.emplace_back(i, j, -w);
+                trip.emplace_back(j, i, -w);
+                dw[i] += w;
+                dw[j] += w;
+            }
+        }
+        for (int i = 0; i < m; ++i) trip.emplace_back(i, i, dw[i]);
+        Eigen::SparseMatrix<double> L(m, m);
+        L.setFromTriplets(trip.begin(), trip.end());
+        Eigen::VectorXd  phi = Eigen::VectorXd::Zero(m);
+        std::vector<int> fidx(m, -1), flist;
+        for (int x = 0; x < m; ++x) {
+            if (loop_of[x] == 1) phi[x] = 1.0;
+            if (loop_of[x] < 0) { fidx[x] = (int) flist.size(); flist.push_back(x); }
+        }
+        if (!flist.empty()) {
+            const int nfree = (int) flist.size();
+            std::vector<Eigen::Triplet<double>> tff;
+            Eigen::VectorXd rhs = Eigen::VectorXd::Zero(nfree);
+            for (int k = 0; k < L.outerSize(); ++k)
+                for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
+                    const int r = (int) it.row(), c = (int) it.col();
+                    if (fidx[r] < 0) continue;
+                    if (fidx[c] >= 0) tff.emplace_back(fidx[r], fidx[c], it.value());
+                    else rhs[fidx[r]] -= it.value() * phi[c];
+                }
+            Eigen::SparseMatrix<double> Lff(nfree, nfree);
+            Lff.setFromTriplets(tff.begin(), tff.end());
+            Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver(Lff);
+            if (solver.info() != Eigen::Success) { log << "[bore]   harmonic factorisation failed -- skipped\n"; continue; }
+            const Eigen::VectorXd x = solver.solve(rhs);
+            if (solver.info() != Eigen::Success) { log << "[bore]   harmonic solve failed -- skipped\n"; continue; }
+            for (int i = 0; i < nfree; ++i) phi[flist[i]] = x[i];
+        }
+
+        // Level-set rings at t_k = (k + 0.5) / nl: every patch edge contributes one point per
+        // level it crosses.
+        auto ring_points = [&](int nl, std::vector<std::vector<Eigen::Vector3d>>& rings) {
+            rings.assign(nl, {});
+            for (auto e : edges) {
+                int a = e.first, b = e.second;
+                double pa = phi[a], pb = phi[b];
+                if (pa > pb) { std::swap(pa, pb); std::swap(a, b); }
+                if (pb - pa < 1e-15) continue;
+                const int k0 = std::max(0, (int) std::ceil(pa * nl - 0.5)), k1 = std::min(nl - 1, (int) std::floor(pb * nl - 0.5));
+                const Eigen::Vector3d A = vert(lv[a]), B = vert(lv[b]);
+                for (int k = k0; k <= k1; ++k) {
+                    const double t = (k + 0.5) / nl;
+                    if (t <= pa || t > pb) continue;
+                    rings[k].push_back(A + ((t - pa) / (pb - pa)) * (B - A));
+                }
+            }
+        };
+        std::vector<Eigen::Vector3d> loopA, loopB;
+        for (int x = 0; x < m; ++x) {
+            if (loop_of[x] == 0) loopA.push_back(vert(lv[x]));
+            else if (loop_of[x] == 1) loopB.push_back(vert(lv[x]));
+        }
+        Ring rA, rB;
+        if (!fit_ring(loopA, rA) || !fit_ring(loopB, rB)) { log << "[bore]   degenerate opening -- skipped\n"; continue; }
+
+        std::vector<std::vector<Eigen::Vector3d>> rings;
+        std::vector<Eigen::Vector3d>              centres;
+        auto build_chain = [&](int nl, std::vector<Ring>& chain) {
+            ring_points(nl, rings);
+            chain.clear();
+            chain.push_back(rA);
+            for (const auto& rp : rings) { Ring R; if (fit_ring(rp, R)) chain.push_back(R); }
+            chain.push_back(rB);
+            centres.clear();
+            for (const auto& R : chain) centres.push_back(R.c);
+        };
+        std::vector<Ring> chain;
+        build_chain(40, chain);
+        double len = chain_length(centres);
+        const double sp = spacing > 0.0 ? spacing : std::max(0.5, len / 60.0);
+        build_chain(std::max(8, std::min(400, (int) std::lround(len / sp))), chain);
+        len = chain_length(centres);
+        double mean_d = 0.0;
+        for (const auto& R : chain) mean_d += 2.0 * R.inr;
+        mean_d /= (double) chain.size();
+        const double aspect = mean_d > 1e-9 ? len / mean_d : 0.0;
+        log << "[bore]   through-bore: centreline " << len << " mm over " << chain.size() << " rings, mean bore "
+            << mean_d << " mm, aspect " << aspect << "\n";
+        if (min_aspect > 0.0 && aspect < min_aspect) {
+            log << "[bore]   rejected: aspect " << aspect << " < " << min_aspect << " -- a ring, not a pipe; following the material instead\n";
+            continue;
+        }
+
+        TunnelSpine spn;
+        spn.axis  = (rB.c - rA.c).norm() > 1e-9 ? Eigen::Vector3d((rB.c - rA.c).normalized()) : Eigen::Vector3d::UnitZ();
+        spn.depth = len;
+        spn.width = mean_d;
+        for (size_t i = 0; i < chain.size(); ++i) {
+            const Ring& R = chain[i];
+            // Corridor radius from the OUTER contour here, not the inner ring: the wall skeleton the
+            // splice has to swallow sits mid-wall, outside the ring.
+            double rr = 1.5 * R.maxr;
+            if (slicer) {
+                const Section s = slice_section(*slicer, R.c, R.n);
+                bool      contained = false;
+                const int li        = s.empty() ? -1 : outer_loop_at(s, Eigen::Vector2d::Zero(), &contained);
+                if (li >= 0 && contained)
+                    rr = s.loops[li].max_r;
+            }
+            spn.points.push_back(R.c);
+            spn.radius.push_back(rr);
+        }
+        out.push_back(std::move(spn));
+    }
+
+    std::cout << log.str();
+    if (note)
+        *note = log.str();
+    return out;
 }
 
 } // namespace Slic3r

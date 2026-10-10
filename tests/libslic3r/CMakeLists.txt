@@ -3,6 +3,7 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests.cpp
     test_3mf.cpp
+    test_bed_mesh.cpp
     test_aabbindirect.cpp
     test_appconfig.cpp
     test_arachne_walls.cpp
@@ -26,6 +27,8 @@ add_executable(${_TEST_NAME}_tests
     test_fill_corner_smoothing.cpp
     test_filament_mixer.cpp
     test_fill_plane_path.cpp
+    test_fill_svg.cpp
+    test_infill_mesh_tiling.cpp
     test_geometry.cpp
     test_multimaterial_segmentation.cpp
     test_placeholder_parser.cpp
@@ -54,7 +57,7 @@ add_executable(${_TEST_NAME}_tests
     )
 
 if (TARGET OpenVDB::openvdb)
-    target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp)
+    target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp test_mesh_infill_generator.cpp)
 endif()
 
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r Catch2::Catch2WithMain)

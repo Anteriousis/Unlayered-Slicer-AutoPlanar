@@ -8,6 +8,7 @@
 
 #include <boost/algorithm/string.hpp>
 
+#include <algorithm>
 #include <cmath>
 
 #include "test_helpers.hpp" // get access to init_print, etc
@@ -590,4 +591,224 @@ SCENARIO("Skirt and brim generation", "[SkirtBrim]") {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Declarative cut planes: a segment that does not rest on the build plate must neither receive a
+// brim nor disturb anyone else's.
+// ---------------------------------------------------------------------------------------------
+
+// A post carrying a wide cap, as one mesh. Object-local: the post fills [0,10] x [0,10] x [0,15],
+// the cap [-15,25] x [2,8] x [15,20]. Cutting at z = 15 makes the cap a NON-ROOT segment that still
+// builds along +Z, so its slice frame is exactly the identity and the tilted-frame test cannot see
+// it. The cap's X overhang is the whole point: it reaches far enough past the post to cover the
+// post's entire brim collar on the -X and +X sides. With a plain cube (the fixture in
+// test_cut_plane_apply.cpp) the upper segment's cross-section matches the root's footprint exactly,
+// so subtracting it removes only what the root's own island already removed -- net effect zero,
+// which is why that fixture never caught this.
+static TriangleMesh post_and_cap_mesh()
+{
+    TriangleMesh mesh = make_cube(10., 10., 15.);
+    TriangleMesh cap  = make_cube(40., 6., 5.);
+    cap.translate(-15.f, 2.f, 15.f);
+    mesh.merge(cap);
+    return mesh;
+}
+
+static void make_post_and_cap_model(Model &model, double cut_z)
+{
+    ModelObject *object = model.add_object();
+    object->name = "post_and_cap";
+    object->add_volume(post_and_cap_mesh());
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+
+    CutPlaneStack stack;
+    stack.enabled = true;
+    CutPlane plane;
+    plane.point  = Vec3d(5., 5., cut_z); // on the post's axis, at the joint
+    plane.normal = Vec3d::UnitZ();
+    stack.planes.push_back(plane);
+    object->cut_planes = stack;
+    object->ensure_on_bed();
+}
+
+static DynamicPrintConfig cutplane_brim_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_nonplanar",   "1" },
+        // Print::validate() refuses cut-plane segments in any other print sequence.
+        { "print_sequence",     "by group" },
+        // Unrelated validate() requirement of the stock test config (relative E addressing).
+        { "layer_change_gcode", "G92 E0" },
+        { "brim_type",          "outer_only" },
+        { "brim_width",         "5" },
+        { "brim_object_gap",    "0.1" },
+        { "skirt_loops",        "0" },
+    });
+    return config;
+}
+
+// Fraction of azimuth bins around `centre` holding brim. Sampled ALONG each segment rather than at
+// its vertices: an offset collar around a rectangular footprint carries only two vertices per
+// straight edge, so a vertex-only metric would report a perfectly closed ring as full of holes.
+// Deliberately not an area or a byte comparison -- brim width is quantised to an even number of
+// flow spacings, so any absolute area is a moving target, while "the collar closes" is the property
+// under test.
+static double brim_azimuth_coverage(Print &print, ObjectID object_id, const Point &centre, int bins = 72)
+{
+    const auto it = print.get_brimMap().find(object_id);
+    if (it == print.get_brimMap().end())
+        return 0.;
+    Polylines paths;
+    it->second.collect_polylines(paths);
+
+    std::vector<bool> hit(size_t(bins), false);
+    auto mark = [&hit, bins, &centre](const Point &p) {
+        const Vec2d d(unscale<double>(p.x() - centre.x()), unscale<double>(p.y() - centre.y()));
+        if (d.norm() < EPSILON)
+            return;
+        const int b = int(std::floor((std::atan2(d.y(), d.x()) + PI) / (2. * PI) * double(bins)));
+        hit[size_t(std::min(std::max(b, 0), bins - 1))] = true;
+    };
+
+    const double step = scaled<double>(0.2);
+    for (const Polyline &path : paths)
+        for (size_t i = 0; i + 1 < path.points.size(); ++ i) {
+            const Vec2d a  = path.points[i].cast<double>();
+            const Vec2d ab = path.points[i + 1].cast<double>() - a;
+            const int   n  = std::max(1, int(std::ceil(ab.norm() / step)));
+            for (int k = 0; k <= n; ++ k) {
+                const Vec2d s = a + ab * (double(k) / double(n));
+                mark(Point(coord_t(s.x()), coord_t(s.y())));
+            }
+        }
+    return double(std::count(hit.begin(), hit.end(), true)) / double(bins);
+}
+
+// The first layer's centre in the frame the brim lives in: slice coordinates plus the instance
+// shift plus the plate origin -- the same mapping brim_enters_first_layer_hole() uses above.
+static Point first_layer_centre_on_plate(const Print &print, const PrintObject &object)
+{
+    BoundingBox bb;
+    for (const ExPolygon &ex : object.layers().front()->lslices)
+        bb.merge(ex.contour.bounding_box());
+    const Vec3d plate_origin = print.get_plate_origin();
+    return bb.center() + object.instances().front().shift_without_plate_offset()
+         + Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+}
+
+SCENARIO("A cut-plane segment off the build plate must not carve the root's brim", "[cutplanes][brim][SkirtBrim]") {
+    GIVEN("a post with a wide cap, split by one horizontal cut plane at the joint") {
+        Print print;
+        Model model;
+        make_post_and_cap_model(model, 15.);
+        print.apply(model, cutplane_brim_config());
+
+        const auto validation = print.validate();
+        INFO("validate: " << validation.string);
+        REQUIRE(validation.string.empty());
+        print.process();
+
+        REQUIRE(print.objects().size() == 2);
+        const PrintObject *root = nullptr, *upper = nullptr;
+        for (const PrintObject *object : print.objects())
+            (object->is_root_segment() ? root : upper) = object;
+        REQUIRE(root  != nullptr);
+        REQUIRE(upper != nullptr);
+        REQUIRE(! root->layers().empty());
+        REQUIRE(! upper->layers().empty());
+
+        THEN("the upper segment builds straight up, so the tilted-frame test cannot exclude it") {
+            // Without this the scenario would silently degrade into a re-test of the tilt guard:
+            // a TILTED upper segment is caught by the older post_trafo_inverse() check and the
+            // brim would come out whole even with the bug present.
+            CHECK(upper->post_trafo_inverse().linear().isApprox(Matrix3d::Identity()));
+        }
+
+        THEN("the upper segment gets no brim of its own") {
+            // It floats 15 mm above the plate. PrintObject::has_brim() has always said so; this
+            // pins that Brim.cpp agrees, instead of computing a brim that only _make_skirt's root
+            // gate happens to stop from ever being emitted.
+            CHECK(! upper->has_brim());
+            CHECK(print.get_brimMap().count(upper->id()) == 0);
+        }
+
+        THEN("the root keeps a complete brim collar") {
+            // The defect: the cap's first-layer cross-section -- physically at z = 15 -- was
+            // inflated by brim_object_gap into the SHARED no_brim_area and then subtracted from
+            // every object's brim, cutting the post's collar into disconnected arcs.
+            REQUIRE(print.get_brimMap().count(root->id()) == 1);
+            const double coverage = brim_azimuth_coverage(print, root->id(),
+                                                          first_layer_centre_on_plate(print, *root));
+            INFO("brim azimuth coverage " << coverage);
+            CHECK(coverage == 1.);
+        }
+    }
+}
+
+// A tilted cut-plane segment that lands on the plate: a 20 mm cube at (120, 120) whose steep plane
+// (70 degrees from vertical) meets the plate along object-local x = 14. The root keeps the plate
+// strip x < 134; the tilted far piece prints later, after the table swings, and lands on x > 134.
+// The root's brim used to be laid straight across that strip; it must leave it free and wrap it.
+TEST_CASE("The root brim wraps a tilted segment's plate footprint instead of covering it", "[SkirtBrim]")
+{
+    Model model;
+    Print print;
+    ModelObject *object = model.add_object();
+    object->add_volume(Test::cube(20.), ModelVolumeType::MODEL_PART, false);
+    object->add_instance()->set_offset(Vec3d(120., 120., 0.));
+    CutPlaneStack stack;
+    stack.enabled = true;
+    CutPlane cp;
+    cp.point  = Vec3d(14., 10., 0.);
+    cp.normal = Vec3d(std::cos(Geometry::deg2rad(20.)), 0., std::sin(Geometry::deg2rad(20.)));
+    stack.planes.push_back(cp);
+    object->cut_planes = stack;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_nonplanar",           "1" },
+        { "print_sequence",             "by group" },
+        { "layer_change_gcode",         "G92 E0" },
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "skirt_loops",                0 },
+        { "brim_type",                  "outer_only" },
+        { "brim_width",                 3 },
+        { "brim_object_gap",            0 },
+    });
+    print.apply(model, config);
+    REQUIRE(print.objects().size() == 2);
+    print.process();
+
+    // Brim centrelines back in bed coordinates (the brim map carries the plate origin), sampled
+    // every 0.25 mm: a brim loop round a box is four long segments, so its vertices alone would
+    // miss almost every window below.
+    const Vec3d plate_origin = print.get_plate_origin();
+    const Point plate_shift(scaled(plate_origin.x()), scaled(plate_origin.y()));
+    Points brim;
+    for (const auto &kv : print.get_brimMap()) {
+        Polylines paths;
+        kv.second.collect_polylines(paths);
+        for (const Polyline &path : paths)
+            for (const Line &line : path.lines()) {
+                const int steps = std::max(1, int(unscale<double>(line.length()) / 0.25));
+                for (int i = 0; i <= steps; ++ i)
+                    brim.push_back(line.a + ((line.b - line.a).cast<double>() * (double(i) / steps)).cast<coord_t>() - plate_shift);
+            }
+    }
+    REQUIRE(! brim.empty());
+    const auto count_in = [&brim](double x0, double x1, double y0, double y1) {
+        return std::count_if(brim.begin(), brim.end(), [=](const Point &pt) {
+            const double x = unscale<double>(pt.x()), y = unscale<double>(pt.y());
+            return x > x0 && x < x1 && y > y0 && y < y1;
+        });
+    };
+    // Nothing on the strip the tilted segment lands on...
+    CHECK(count_in(134.5, 139.5, 120.5, 139.5) == 0);
+    // ...the collar goes round its far side instead...
+    CHECK(count_in(140.1, 143.5, 121., 139.) > 0);
+    // ...and still round the root itself.
+    CHECK(count_in(116.5, 119.9, 121., 139.) > 0);
 }

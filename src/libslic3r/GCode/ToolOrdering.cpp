@@ -490,6 +490,10 @@ ToolOrdering::ToolOrdering(const std::vector<const PrintObject*>& objects, unsig
                 zs.emplace_back(layer->print_z);
             for (auto layer : object->support_layers())
                 zs.emplace_back(layer->print_z);
+            // BELT_MOD -- belt brim apron bands sit below the object's first layer and have no
+            // layer of their own, but tools_for_layer() asserts an exact Z match.
+            for (const BeltBrimBand &band : object->belt_brim_prologue())
+                zs.emplace_back(band.print_z);
             max_layer_height = std::max(max_layer_height, object->config().layer_height.value);
         }
         this->initialize_layers(zs);
@@ -560,6 +564,8 @@ ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extrude
             zs.emplace_back(layer->print_z);
         for (auto layer : object.support_layers())
             zs.emplace_back(layer->print_z);
+        for (const BeltBrimBand &band : object.belt_brim_prologue())   // BELT_MOD, see the print ctor
+            zs.emplace_back(band.print_z);
         this->initialize_layers(zs);
     }
 
@@ -604,6 +610,10 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
                 zs.emplace_back(layer->print_z);
             for (auto layer : object->support_layers())
                 zs.emplace_back(layer->print_z);
+            // BELT_MOD -- belt brim apron bands sit below the object's first layer and have no
+            // layer of their own, but tools_for_layer() asserts an exact Z match.
+            for (const BeltBrimBand &band : object->belt_brim_prologue())
+                zs.emplace_back(band.print_z);
 
             max_layer_height = std::max(max_layer_height, object->config().layer_height.value);
         }
@@ -1038,6 +1048,31 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         }
     }
 
+    // BELT_MOD -- belt brim. Apron bands own their layers outright (below the object's first
+    // layer nothing else claims an extruder there, and process_layer() would bail out at "Nothing
+    // to extrude"); coincident bands print ON an object layer that may yield no instance visit (a
+    // zero-extrusion lead-in slice). Claim the brim filament on both, in the same raw 1-based
+    // domain the loops above push. Deliberately not has_object.
+    if (object.has_belt_brim()) {
+        const unsigned int brim_filament = object.belt_brim_filament();
+        for (const BeltBrimBand &band : object.belt_brim_prologue()) {
+            if (band.fills.empty())
+                continue;
+            LayerTools &layer_tools = this->tools_for_layer(band.print_z);
+            layer_tools.extruders.push_back(brim_filament);
+            layer_tools.has_belt_brim = true;
+        }
+        const auto  &by_layer = object.belt_brim_by_layer();
+        const size_t n        = std::min(by_layer.size(), object.layers().size());
+        for (size_t i = 0; i < n; ++ i) {
+            if (by_layer[i].empty())
+                continue;
+            LayerTools &layer_tools = this->tools_for_layer(object.layers()[i]->print_z);
+            layer_tools.extruders.push_back(brim_filament);
+            layer_tools.has_belt_brim = true;
+        }
+    }
+
     for (auto& layer : m_layer_tools) {
         // Sort and remove duplicates
         sort_remove_duplicates(layer.extruders);
@@ -1080,12 +1115,15 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     }
 
     //FIXME this is a hack to get the ball rolling.
+    // BELT_MOD -- "below the object" is not a raft gap on a belt: the brim apron, belt support
+    // and the object's own lead-in legitimately print there, and there is no raft on a belt.
+    const bool belt_no_raft_gap = config.belt_printer.value;
     for (LayerTools &lt : m_layer_tools)
         lt.has_wipe_tower |= ((lt.has_object || lt.has_support) && (config.timelapse_type == TimelapseType::tlSmooth || lt.wipe_tower_partitions > 0))
-            || lt.print_z < object_bottom_z + EPSILON;
+            || (! belt_no_raft_gap && lt.print_z < object_bottom_z + EPSILON);
 
     // Test for a raft, insert additional wipe tower layer to fill in the raft separation gap.
-    for (size_t i = 0; i + 1 < m_layer_tools.size(); ++ i) {
+    for (size_t i = 0; ! belt_no_raft_gap && i + 1 < m_layer_tools.size(); ++ i) {
         const LayerTools &lt      = m_layer_tools[i];
         const LayerTools &lt_next = m_layer_tools[i + 1];
         if (lt.print_z < object_bottom_z + EPSILON && lt_next.print_z >= object_bottom_z + EPSILON) {

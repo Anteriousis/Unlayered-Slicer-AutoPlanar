@@ -1215,7 +1215,10 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
     // project downards pointing painted triangles over bottom surfaces.
     std::vector<std::vector<Polygons>> top_raw(num_facets_states), bottom_raw(num_facets_states);
     std::vector<float> zs = zs_from_layers(layers);
-    Transform3d        object_trafo = print_object.trafo_centered();
+    // UNLAYERED_MOD -- the slice frame, not trafo_centered(): on a belt (and for a multi-planar
+    // object) the layers run along the rotated build direction, and painted facets projected with
+    // the unrotated transform landed on the wrong layers and the wrong side of the part.
+    Transform3d        object_trafo = print_object.object_to_slice();
 
 #ifdef MM_SEGMENTATION_DEBUG_TOP_BOTTOM
     static int iRun = 0;
@@ -1244,10 +1247,16 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                             slicing_params.trafo = volume_trafo;
                             Polygons bottom_slice = slice_mesh(painted, zs[0], slicing_params);
 
-                            top.erase(top.begin());
-                            bottom.erase(bottom.begin());
-
-                            bottom[0] = union_(bottom[0], bottom_slice);
+                            // UNLAYERED_MOD -- only the requested projections exist: with
+                            // top_shell_layers = 0 `top` is empty and erasing its begin() was
+                            // undefined (found by fuzzing: a sunk, painted object crashed here).
+                            if (! top.empty())
+                                top.erase(top.begin());
+                            if (! bottom.empty()) {
+                                bottom.erase(bottom.begin());
+                                if (! bottom.empty())
+                                    bottom[0] = union_(bottom[0], bottom_slice);
+                            }
                         } else
                             slice_mesh_slabs(painted, zs, volume_trafo, max_top_layers > 0 ? &top : nullptr, max_bottom_layers > 0 ? &bottom : nullptr, nullptr, throw_on_cancel_callback);
                         auto merge = [](std::vector<Polygons> &&src, std::vector<Polygons> &dst) {
@@ -2048,7 +2057,10 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                 if (!mv->is_model_part() || custom_facets.indices.empty())
                     continue;
 
-                const Transform3f tr = print_object.trafo().cast<float>() * mv->get_matrix().cast<float>();
+                // UNLAYERED_MOD -- see above: the painted facets must be projected in the very frame
+                // the layers were sliced in (object_to_slice() carries the belt / multi-planar rotation
+                // and the XY centering), or the paint ends up on the wrong layers.
+                const Transform3f tr = print_object.object_to_slice().cast<float>() * mv->get_matrix().cast<float>();
                 tbb::parallel_for(tbb::blocked_range<size_t>(0, custom_facets.indices.size()), [&tr, &custom_facets, &print_object, &layers, &edge_grids, &input_expolygons, &painted_lines, &painted_lines_mutex, &extruder_idx](const tbb::blocked_range<size_t> &range) {
                     for (size_t facet_idx = range.begin(); facet_idx < range.end(); ++facet_idx) {
                         float min_z = std::numeric_limits<float>::max();
@@ -2100,9 +2112,11 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                                 line_end_f = facet[1] + t2 * (facet[2] - facet[1]);
                             }
 
+                            // UNLAYERED_MOD -- no `translate(-center_offset)` here any more: object_to_slice()
+                            // already centres the object, exactly like the layer slices (subtracting it again
+                            // moved every painted line by the centre offset and off the contour).
                             Line line_to_test(Point(scale_(line_start_f.x()), scale_(line_start_f.y())),
                                               Point(scale_(line_end_f.x()), scale_(line_end_f.y())));
-                            line_to_test.translate(-print_object.center_offset());
 
                             // BoundingBoxes for EdgeGrids are computed from printable regions. It is possible that the painted line (line_to_test) could
                             // be outside EdgeGrid's BoundingBox, for example, when the negative volume is used on the painted area (GH #7618).

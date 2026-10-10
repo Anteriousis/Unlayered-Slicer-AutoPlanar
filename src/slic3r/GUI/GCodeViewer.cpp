@@ -1,5 +1,6 @@
 #include "libslic3r/libslic3r.h"
 #include "GCodeViewer.hpp"
+#include "libvgcode/include/ColorRange.hpp"
 
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -245,18 +246,17 @@ void GCodeViewer::SequentialView::Marker::init(std::string filename)
 }
 
 // UNLAYERED_MOD
-void GCodeViewer::SequentialView::Marker::set_envelope(bool enabled, float cone_height, float cone_angle_deg)
+void GCodeViewer::SequentialView::Marker::set_envelope(bool enabled, const HotendEnvelope& envelope)
 {
-    // A zero height or angle is how the config disables the collision check, so it disables the
-    // drawing too -- an envelope nothing is tested against would be a lie.
-    enabled = enabled && cone_height > 0.0f && cone_angle_deg > 0.0f && cone_angle_deg < 180.0f;
+    // A zero height is how the config disables the collision check, so it disables the drawing
+    // too -- an envelope nothing is tested against would be a lie.
+    enabled = enabled && envelope.enabled();
 
-    if (enabled == m_envelope_enabled && cone_height == m_envelope_height && cone_angle_deg == m_envelope_angle)
+    if (enabled == m_envelope_enabled && envelope.height == m_envelope_shape.height && envelope.angle == m_envelope_shape.angle)
         return;
 
     m_envelope_enabled = enabled;
-    m_envelope_height  = cone_height;
-    m_envelope_angle   = cone_angle_deg;
+    m_envelope_shape   = envelope;
     // Drop the mesh; render() rebuilds it from the new dimensions when a GL context is current.
     m_envelope.reset();
 }
@@ -284,9 +284,12 @@ void GCodeViewer::SequentialView::Marker::render(int canvas_width, int canvas_he
     // to point down and the translation by the model height then lands the tip on the origin.
     // UNLAYERED_MOD: swing that whole assembly so the nozzle points back along the tool axis. The
     // rotation is applied about the tip, which is the point that has to stay on the toolpath, and it
-    // is the minimal rotation from +Z (the hotend has no meaningful spin about its own axis).
+    // is the head's real orientation on the machine (tool_head_frame(), whose rows are the head axes
+    // in the bed frame, hence the transpose), not merely the minimal rotation from +Z: the hotend
+    // envelope has four different sides, so the head's spin about its own axis now shows.
     const Vec3d tip = (m_world_position + m_model_z_offset * Vec3f::UnitZ()).cast<double>();
-    const Transform3d tool_rotation(Eigen::Quaterniond::FromTwoVectors(Vec3d::UnitZ(), m_tool_axis.cast<double>()));
+    Transform3d tool_rotation = Transform3d::Identity();
+    tool_rotation.linear()    = tool_head_frame(m_tool_axis.cast<double>()).transpose();
     const Transform3d model_matrix = Geometry::translation_transform(tip) * tool_rotation *
         (Geometry::translation_transform(scale_factor * m_model.get_bounding_box().size().z() * Vec3d::UnitZ()) *
          Geometry::rotation_transform({ M_PI, 0.0, 0.0 })) *
@@ -299,20 +302,52 @@ void GCodeViewer::SequentialView::Marker::render(int canvas_width, int canvas_he
     m_model.render();
 
     // UNLAYERED_MOD: the collision envelope -- apex on the nozzle tip, opening along the tool
-    // axis. its_make_cone() puts its base at z=0 and its apex at z=h, so the flip-and-raise here
-    // is the same one the hotend mesh above uses to land its tip on the origin.
+    // axis, built in the head frame so it needs only the head's rotation about the tip. The four
+    // faces are clipped by a SPHERE about the tip, radius = the envelope setting, so the far end is
+    // a spherical cap rather than a flat square: on a low-clearance head (shallow faces) a flat top
+    // at that height would stand many times wider than the head; the sphere keeps every point of
+    // the envelope within that distance of the tip. Same shape as check_hotend_collisions() tests.
     if (m_envelope_enabled) {
         if (!m_envelope.is_initialized()) {
-            const double radius = double(m_envelope_height) * std::tan(0.5 * Geometry::deg2rad(double(m_envelope_angle)));
-            m_envelope.init_from(its_make_cone(radius, double(m_envelope_height)));
+            const HotendEnvelope& e = m_envelope_shape;
+            const double R  = e.height;
+            // The pyramid's cross-section one unit up the axis; a face near flat would spread
+            // without bound, which the sphere clips anyway, so cap it for the projection.
+            const double cap_s = 50.;
+            const double xp = std::min(e.spread(HotendEnvelope::XPos), cap_s), xn = std::min(e.spread(HotendEnvelope::XNeg), cap_s);
+            const double yp = std::min(e.spread(HotendEnvelope::YPos), cap_s), yn = std::min(e.spread(HotendEnvelope::YNeg), cap_s);
+            // The cap: that cross-section projected from the tip onto the sphere, as an N x N grid
+            // (i along +X, j along +Y), so its rim is exactly where the faces meet the sphere.
+            const int N = 24;
+            indexed_triangle_set env;
+            env.vertices.reserve(size_t(N) * N + 1);
+            env.vertices.emplace_back(Vec3f::Zero()); // the apex, on the nozzle tip
+            auto grid = [N](int i, int j) { return 1 + i * N + j; };
+            for (int i = 0; i < N; ++i)
+                for (int j = 0; j < N; ++j) {
+                    const double x = -xn + (xp + xn) * i / (N - 1), y = -yn + (yp + yn) * j / (N - 1);
+                    env.vertices.emplace_back((R * Vec3d(x, y, 1.).normalized()).cast<float>());
+                }
+            for (int i = 0; i + 1 < N; ++i)                    // cap, facing away from the tip
+                for (int j = 0; j + 1 < N; ++j) {
+                    env.indices.emplace_back(grid(i, j), grid(i + 1, j), grid(i + 1, j + 1));
+                    env.indices.emplace_back(grid(i, j), grid(i + 1, j + 1), grid(i, j + 1));
+                }
+            // The rim counter-clockwise seen from above (+Z), each step fanned to the apex: the faces.
+            std::vector<int> rim;
+            for (int i = 0; i < N; ++i)      rim.push_back(grid(i, 0));
+            for (int j = 1; j < N; ++j)      rim.push_back(grid(N - 1, j));
+            for (int i = N - 2; i >= 0; --i) rim.push_back(grid(i, N - 1));
+            for (int j = N - 2; j > 0; --j)  rim.push_back(grid(0, j));
+            for (size_t k = 0; k < rim.size(); ++k)
+                env.indices.emplace_back(0, rim[(k + 1) % rim.size()], rim[k]);
+            m_envelope.init_from(env);
             m_envelope.set_color(m_is_dark ? ColorRGBA{ 0.85f, 0.85f, 0.85f, 0.16f }
                                            : ColorRGBA{ 0.25f, 0.25f, 0.25f, 0.16f });
         }
-        // No scale_factor: the cone is a true millimetre dimension taken from the config, unlike
+        // No scale_factor: the envelope is a true millimetre dimension taken from the config, unlike
         // the hotend mesh, which scale_factor exists to hold at a fixed size on screen.
-        const Transform3d envelope_matrix = Geometry::translation_transform(tip) * tool_rotation *
-            Geometry::translation_transform(double(m_envelope_height) * Vec3d::UnitZ()) *
-            Geometry::rotation_transform({ M_PI, 0.0, 0.0 });
+        const Transform3d envelope_matrix = Geometry::translation_transform(tip) * tool_rotation;
         shader->set_uniform("view_model_matrix", view_matrix * envelope_matrix);
         const Matrix3d envelope_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) *
             envelope_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
@@ -394,7 +429,7 @@ void GCodeViewer::SequentialView::Marker::render_position_window(const libvgcode
         ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(1.f,1.f,1.f,.6f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f * m_scale);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding , ImVec2(10.f, 10.f) * m_scale);
-        ImGui::SetNextWindowBgAlpha(0.8f);
+        ImGui::SetNextWindowBgAlpha(ImGuiWrapper::overlay_alpha(0.8f));
 
         libvgcode::PathVertex vertex = viewer->get_current_vertex();
         size_t vertex_id = viewer->get_current_vertex_id();
@@ -777,7 +812,7 @@ void GCodeViewer::SequentialView::Marker::render_position_window(const libvgcode
         ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(1.f,1.f,1.f,.6f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f * m_scale);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding , ImVec2(10.f, 10.f) * m_scale);
-        ImGui::SetNextWindowBgAlpha(0.8f);
+        ImGui::SetNextWindowBgAlpha(ImGuiWrapper::overlay_alpha(0.8f));
         imgui.begin(std::string("ToolPosition"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove);
 
         const Vec3f pos = m_world_position + m_world_offset + m_z_offset * Vec3f::UnitZ();
@@ -975,7 +1010,7 @@ void GCodeViewer::SequentialView::GCodeWindow::render(float top, float bottom, f
     imgui.set_next_window_pos(right, top + 6 * m_scale, ImGuiCond_Always, 1.0f, 0.0f); // ORCA add a small gap between legend and code viewer
     ImGui::SetNextWindowSize(ImVec2(required_width, wnd_height), ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f * m_scale); // ORCA add window rounding to modernize / match style
-    ImGui::SetNextWindowBgAlpha(0.8f);
+    ImGui::SetNextWindowBgAlpha(ImGuiWrapper::overlay_alpha(0.8f));
     imgui.begin(std::string("G-code"), ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove);
 
     // center the text in the window by pushing down the first line
@@ -1235,7 +1270,9 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     m_viewer.set_dim_previous_layers_brightness(0.01f * std::stoi(get_app_config()->get("preview_dim_previous_layers_brightness")));
 
     // avoid processing if called with the same gcode_result
-    if (m_last_result_id == gcode_result.id && wxGetApp().is_editor()) {
+    // BELT_MOD: the belt view toggle re-runs the conversion on the same result (the mapping is baked
+    // into the vertices), so a belt file never takes this shortcut.
+    if (m_last_result_id == gcode_result.id && wxGetApp().is_editor() && ! gcode_result.belt_printer) {
         //BBS: add logs
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": the same id %1%, return directly, result %2% ") % m_last_result_id % (&gcode_result);
 
@@ -1277,7 +1314,12 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     }
 
     // convert data from PrusaSlicer format to libvgcode format
-    libvgcode::GCodeInputData data = libvgcode::convert(gcode_result, str_tool_colors, str_color_print_colors, m_viewer);
+    // BELT_MOD: upright view -- every machine-frame position goes back through the exact inverse of
+    // the writer's kinematics, so the toolpaths land on the model shells with no anchoring.
+    // (Set after reset(), which clears it.)
+    m_belt_view_enabled = gcode_result.belt_printer;
+    const Transform3d *display_transform = (m_belt_view_enabled && m_belt_show_designed) ? &gcode_result.belt_to_bed : nullptr;
+    libvgcode::GCodeInputData data = libvgcode::convert(gcode_result, str_tool_colors, str_color_print_colors, m_viewer, display_transform);
 
 //#define ENABLE_DATA_EXPORT 1
 //#if ENABLE_DATA_EXPORT
@@ -1372,7 +1414,7 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
 //#endif // ENABLE_DATA_EXPORT
 
     // send data to the viewer
-    m_viewer.reset_default_extrusion_roles_colors();
+    apply_color_vision_palette();
     m_viewer.load(std::move(data));
 
     // Declarative cut planes: the view-type list is otherwise built once at GL init and on a mode
@@ -1430,7 +1472,7 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     m_paths_bounding_box = BoundingBoxf3(libvgcode::convert(bbox[0]).cast<double>(), libvgcode::convert(bbox[1]).cast<double>());
 
     if (wxGetApp().is_editor())
-        m_contained_in_bed = wxGetApp().plater()->build_volume().all_paths_inside(gcode_result, m_paths_bounding_box);
+        m_contained_in_bed = wxGetApp().plater()->build_volume().all_paths_inside(gcode_result, m_paths_bounding_box, true, display_transform);
 
     m_extruders_count = gcode_result.filaments_count;
 
@@ -1605,17 +1647,17 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     // UNLAYERED_MOD: under virtual-5-axis output the machine has no rotary axes -- the layers
     // tilt but the physical nozzle stays vertical, and so must the hotend marker.
     m_virtual_5axis = gcode_result.virtual_5axis;
+    m_tool_axis_fixed = gcode_result.tool_axis_fixed;
+    m_fixed_tool_axis = gcode_result.fixed_tool_axis;
 
-    // UNLAYERED_MOD: size the hotend collision envelope from the same two options
+    // UNLAYERED_MOD: size the hotend collision envelope from the same options
     // HotendCollisionCheck uses, and only offer it when the print actually tilts -- tool_axes
     // always holds +Z at entry 0, so a planar print has exactly one entry and keeps a clean
     // preview. Under virtual 5-axis the marker's axis is pinned to +Z, which is right: there the
     // envelope stands vertical because the physical nozzle does.
     {
         const PrintConfig& print_config = wxGetApp().plater()->get_partplate_list().get_current_fff_print().config();
-        m_sequential_view.marker.set_envelope(gcode_result.tool_axes.size() > 1,
-                                              float(print_config.nonplanar_hotend_cone_height.value),
-                                              float(print_config.nonplanar_hotend_cone_angle.value));
+        m_sequential_view.marker.set_envelope(gcode_result.tool_axes.size() > 1, HotendEnvelope::from_config(print_config));
     }
 
     m_gcode_check_result = gcode_result.gcode_check_result;
@@ -1653,18 +1695,104 @@ void GCodeViewer::load_as_preview(libvgcode::GCodeInputData&& data)
         }
     }
 
-    m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::Skirt,                    { 127, 255, 127 });
-    m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::ExternalPerimeter,        { 255, 255, 0 });
-    m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::SupportMaterial,          { 127, 255, 127 });
-    m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::SupportMaterialInterface, { 127, 255, 127 });
-    m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::InternalInfill,           { 255, 127, 127 });
-    m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::SolidInfill,              { 255, 127, 127 });
-    m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::WipeTower,                { 127, 255, 127 });
+    apply_color_vision_palette();
     m_viewer.load(std::move(data));
 
     const libvgcode::AABox bbox = m_viewer.get_extrusion_bounding_box();
     const BoundingBoxf3 paths_bounding_box(libvgcode::convert(bbox[0]).cast<double>(), libvgcode::convert(bbox[1]).cast<double>());
     m_contained_in_bed = wxGetApp().plater()->build_volume().all_paths_inside(GCodeProcessorResult(), paths_bounding_box);
+}
+
+namespace {
+using Role = libvgcode::EGCodeExtrusionRole;
+using RoleColor = std::pair<Role, libvgcode::Color>;
+
+// Red-green deficiencies (protanopia, deuteranopia): hues along the blue-yellow axis, told apart
+// further by lightness. Okabe-Ito base colours plus light/dark variants.
+const std::vector<RoleColor> RED_GREEN_SAFE_ROLES = {
+    { Role::Perimeter,                { 240, 228,  66 } },   // yellow
+    { Role::ExternalPerimeter,        { 230, 159,   0 } },   // orange
+    { Role::OverhangPerimeter,        {   0, 114, 178 } },   // blue
+    { Role::InternalInfill,           { 204, 121, 167 } },   // reddish purple
+    { Role::SolidInfill,              {  86, 180, 233 } },   // sky blue
+    { Role::TopSolidInfill,           { 213,  94,   0 } },   // vermilion
+    { Role::BottomSurface,            {   0, 158, 115 } },   // bluish green
+    { Role::Ironing,                  { 150, 150, 150 } },
+    { Role::BridgeInfill,             {   0,  75, 120 } },   // dark blue
+    { Role::InternalBridgeInfill,     {   0,  75, 120 } },
+    { Role::GapFill,                  { 255, 255, 255 } },
+    { Role::Skirt,                    {  90,  90,  90 } },
+    { Role::Brim,                     {  60,  60,  60 } },
+    { Role::SupportMaterial,          { 170, 210, 240 } },   // light blue
+    { Role::SupportMaterialInterface, {  40,  40, 110 } },   // navy
+    { Role::SupportTransition,        { 110, 150, 200 } },
+    { Role::WipeTower,                { 200, 200, 200 } },
+    { Role::Custom,                   { 140, 140, 140 } },
+    { Role::Mixed,                    { 128, 128, 128 } },
+};
+
+// Tritanopia (blue-yellow deficiency): reds, greens and greys, told apart further by lightness.
+const std::vector<RoleColor> BLUE_YELLOW_SAFE_ROLES = {
+    { Role::Perimeter,                { 255, 160,  60 } },   // light orange
+    { Role::ExternalPerimeter,        { 213,  94,   0 } },   // vermilion
+    { Role::OverhangPerimeter,        {   0, 158, 115 } },   // green
+    { Role::InternalInfill,           { 180,  40,  40 } },   // dark red
+    { Role::SolidInfill,              { 120, 200, 120 } },   // light green
+    { Role::TopSolidInfill,           { 255,  80,  80 } },   // light red
+    { Role::BottomSurface,            {  90,  40,  40 } },   // brown
+    { Role::Ironing,                  { 200, 200, 200 } },
+    { Role::BridgeInfill,             {  40, 110,  60 } },   // dark green
+    { Role::InternalBridgeInfill,     {  40, 110,  60 } },
+    { Role::GapFill,                  { 255, 255, 255 } },
+    { Role::Skirt,                    {  90,  90,  90 } },
+    { Role::Brim,                     {  60,  60,  60 } },
+    { Role::SupportMaterial,          { 160, 230, 160 } },   // pale green
+    { Role::SupportMaterialInterface, {   0,  90,  40 } },   // deep green
+    { Role::SupportTransition,        { 100, 170, 100 } },
+    { Role::WipeTower,                { 200, 200, 200 } },
+    { Role::Custom,                   { 140, 140, 140 } },
+    { Role::Mixed,                    { 128, 128, 128 } },
+};
+
+// Range ramps that are monotonic in lightness, so the ordering survives any deficiency.
+const libvgcode::Palette VIRIDIS_RANGE = { { 68, 1, 84 }, { 72, 40, 120 }, { 62, 74, 137 }, { 49, 104, 142 }, { 38, 130, 142 },
+                                           { 31, 158, 137 }, { 53, 183, 121 }, { 109, 205, 89 }, { 180, 222, 44 }, { 253, 231, 37 } };
+const libvgcode::Palette INFERNO_RANGE = { { 0, 0, 4 }, { 27, 12, 65 }, { 74, 12, 107 }, { 120, 28, 109 }, { 165, 44, 96 },
+                                           { 207, 68, 70 }, { 237, 105, 37 }, { 251, 155, 6 }, { 247, 209, 61 }, { 252, 255, 164 } };
+
+const std::array<libvgcode::EViewType, 13> RANGE_VIEW_TYPES = {
+    libvgcode::EViewType::Height, libvgcode::EViewType::Width, libvgcode::EViewType::Speed, libvgcode::EViewType::ActualSpeed,
+    libvgcode::EViewType::VolumetricFlowRate, libvgcode::EViewType::ActualVolumetricFlowRate, libvgcode::EViewType::LayerTimeLinear,
+    libvgcode::EViewType::LayerTimeLogarithmic, libvgcode::EViewType::FanSpeed, libvgcode::EViewType::Temperature,
+    libvgcode::EViewType::PressureAdvance, libvgcode::EViewType::Acceleration, libvgcode::EViewType::Jerk
+};
+} // namespace
+
+void GCodeViewer::apply_color_vision_palette()
+{
+    const std::string mode = wxGetApp().app_config->get("preview_color_vision");
+    const bool red_green   = mode == "protanopia" || mode == "deuteranopia";
+    const bool blue_yellow = mode == "tritanopia";
+
+    m_viewer.reset_default_extrusion_roles_colors();
+    if (red_green || blue_yellow) {
+        for (const auto& [role, color] : red_green ? RED_GREEN_SAFE_ROLES : BLUE_YELLOW_SAFE_ROLES)
+            m_viewer.set_extrusion_role_color(role, color);
+    }
+    else if (m_loaded_as_preview) {
+        // Lighter tints for the pre-slice preview, as before.
+        m_viewer.set_extrusion_role_color(Role::Skirt,                    { 127, 255, 127 });
+        m_viewer.set_extrusion_role_color(Role::ExternalPerimeter,        { 255, 255, 0 });
+        m_viewer.set_extrusion_role_color(Role::SupportMaterial,          { 127, 255, 127 });
+        m_viewer.set_extrusion_role_color(Role::SupportMaterialInterface, { 127, 255, 127 });
+        m_viewer.set_extrusion_role_color(Role::InternalInfill,           { 255, 127, 127 });
+        m_viewer.set_extrusion_role_color(Role::SolidInfill,              { 255, 127, 127 });
+        m_viewer.set_extrusion_role_color(Role::WipeTower,                { 127, 255, 127 });
+    }
+
+    const libvgcode::Palette& ranges = red_green ? VIRIDIS_RANGE : blue_yellow ? INFERNO_RANGE : libvgcode::DEFAULT_RANGES_COLORS;
+    for (libvgcode::EViewType type : RANGE_VIEW_TYPES)
+        m_viewer.set_color_range_palette(type, ranges);
 }
 
 void GCodeViewer::update_shells_color_by_extruder(const DynamicPrintConfig *config)
@@ -1710,6 +1838,9 @@ void GCodeViewer::reset()
     m_right_extruder_filament.clear();
     m_sequential_view.gcode_window.reset();
     m_contained_in_bed = true;
+    m_belt_view_enabled = false;   // BELT_MOD: m_belt_show_designed is a user choice and survives
+    m_tool_axis_fixed = false;
+    m_fixed_tool_axis = Vec3f::UnitZ();
 }
 
 //BBS: GUI refactor: add canvas width and height
@@ -1740,10 +1871,11 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
     m_sequential_view.marker.set_world_position(libvgcode::convert(curr_vertex.position));
     m_sequential_view.marker.set_z_offset(m_z_offset + 0.5f);
     // UNLAYERED_MOD: tilt the hotend to the orientation this move was actually printed at --
-    // except under virtual 5-axis output, where the tool axis is only the layer's build
-    // direction and the physical nozzle stays vertical.
-    m_sequential_view.marker.set_tool_axis(m_virtual_5axis ? Vec3f::UnitZ()
-                                                           : libvgcode::convert(m_viewer.get_tool_axis(curr_vertex.tool_axis_id)));
+    // unless the machine cannot follow the tool axis (virtual 5-axis output: nozzle vertical; a
+    // belt printer without rotary axes: nozzle along the tilted gantry), see
+    // GCodeProcessorResult::tool_axis_fixed.
+    m_sequential_view.marker.set_tool_axis(m_tool_axis_fixed ? m_fixed_tool_axis
+                                                             : libvgcode::convert(m_viewer.get_tool_axis(curr_vertex.tool_axis_id)));
     // BBS fixed buttom margin. m_moves_slider.pos_y
     m_sequential_view.render(!m_no_render_path, legend_height, &m_viewer, m_viewer.get_current_vertex().gcode_id, canvas_width, canvas_height - bottom_margin * m_scale, right_margin * m_scale, m_viewer.get_view_type());
 
@@ -3280,11 +3412,13 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
     ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
     //ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(1.f, 1.f, 1.f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_Border, {1, 0, 0, 0});
-    ImGui::SetNextWindowBgAlpha(0.8f);
+    ImGui::SetNextWindowBgAlpha(ImGuiWrapper::overlay_alpha(0.8f));
     const float max_height = 0.75f * static_cast<float>(cnv_size.get_height());
     const float child_height = 0.3333f * max_height;
     ImGui::SetNextWindowSizeConstraints({ 0.0f, 0.0f }, { -1.0f, max_height });
     imgui.begin(std::string("Legend"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove);
+    // The summary sits over the model at 80% background; a drop shadow keeps its text legible.
+    ImGuiWrapper::ScopedTextShadow legend_text_shadow;
 
     enum class EItemType : unsigned char
     {
@@ -3423,8 +3557,11 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
 
         // BBS render column item
         {
-            if(callback && !checkbox && !visible)
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(172 / 255.0f, 172 / 255.0f, 172 / 255.0f, 1.00f));
+            if(callback && !checkbox && !visible) {
+                // Subdued text: the dark-theme grey sat at 2.3:1 on the light window.
+                const float subdued = wxGetApp().dark_mode() ? 172 / 255.0f : 110 / 255.0f;
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(subdued, subdued, subdued, 1.00f));
+            }
             float dummy_size = type == EItemType::None ? window_padding * 3 : ImGui::GetStyle().ItemSpacing.x + icon_size;
             ImGui::SameLine(dummy_size);
             imgui.text(columns_offsets[0].first);
@@ -4855,6 +4992,25 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
     ImGui::Dummy({ window_padding, window_padding });
     if (m_nozzle_nums > 1 && (m_viewer.get_view_type() == libvgcode::EViewType::Summary || m_viewer.get_view_type() == libvgcode::EViewType::ColorPrint)) // ORCA show only on summary and filament tab
         render_legend_color_arr_recommen(window_padding);
+
+    // BELT_MOD: upright vs raw machine-frame view. Same state as hotkey B and the canvas toolbar
+    // menu item; the reload is deferred so the preview is not rebuilt from inside legend rendering.
+    if (m_belt_view_enabled) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::Dummy({ window_padding, 0 });
+        ImGui::SameLine();
+        ImGui::TextColored(ImGuiWrapper::COL_ORCA, "%s", _u8L("Belt printer").c_str());
+        ImGui::Dummy({ window_padding, 0 });
+        ImGui::SameLine();
+        bool show_raw = ! m_belt_show_designed;
+        if (ImGui::Checkbox(_u8L("Show raw machine G-code [B]").c_str(), &show_raw)) {
+            m_belt_show_designed = ! show_raw;
+            if (Plater *plater = wxGetApp().plater())
+                plater->CallAfter([plater]() { plater->refresh_belt_view(); });
+        }
+    }
 
     legend_height = ImGui::GetCurrentWindow()->Size.y;
     imgui.end();

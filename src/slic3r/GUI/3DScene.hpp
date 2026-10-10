@@ -36,10 +36,11 @@
 extern float                          FullyTransparentMaterialThreshold;
 extern float                          FullTransparentModdifiedToFixAlpha;
 extern Slic3r::ColorRGBA              adjust_color_for_rendering(const Slic3r::ColorRGBA &colors);
-// Deterministic distinct color for cut-plane segment previews (idx % 16 into the ORCA filament
-// palette). Unlike Plater::get_next_color_for_filament() this is stateless, so segment N keeps
-// its color across rebuilds.
-extern Slic3r::ColorRGBA              cut_segment_color(size_t idx);
+// UNLAYERED_MOD -- colour of cut-plane segment `idx` of `count` (print order, root = 0): a fade
+// from `filament` at the root to the same hue at 25% saturation at the last segment. Stateless,
+// so segment N keeps its colour across rebuilds, and shared by the Prepare chunks, the Cut Planes
+// preview and the G-code preview so the three always agree.
+extern Slic3r::ColorRGBA              cut_segment_color(size_t idx, size_t count, const Slic3r::ColorRGBA &filament);
 
 
 namespace Slic3r {
@@ -96,6 +97,7 @@ public:
     static ColorRGBA MODEL_NEGTIVE_COL;
     static ColorRGBA SUPPORT_ENFORCER_COL;
     static ColorRGBA SUPPORT_BLOCKER_COL;
+    static ColorRGBA INFILL_MESH_COL;
     static ColorRGBA MODEL_HIDDEN_COL;
 
     static void update_render_colors();

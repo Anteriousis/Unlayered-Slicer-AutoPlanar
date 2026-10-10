@@ -24,6 +24,11 @@ local-lib
 /.vscode
 build-linux/*
 deps/build*/*
+# In-source CMake artifacts: a committed CMakeCache.txt pins the source tree to
+# whatever absolute path it was configured on and makes CMake refuse to
+# configure anywhere else, which breaks every CI runner.
+/CMakeCache.txt
+/CMakeFiles/
 **/.DS_Store
 install_*
 build_*/

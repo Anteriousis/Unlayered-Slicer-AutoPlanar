@@ -9,6 +9,7 @@
 #include "BoundingBox.hpp"
 #include "SVG.hpp"
 #include "Algorithm/RegionExpansion.hpp"
+#include "Support/SegmentSupportBounds.hpp"   // BELT_MOD
 
 #include <string>
 #include <map>
@@ -120,9 +121,25 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         fill_no_overlap
     );
     
-    if (this->layer()->lower_layer != nullptr)
+    if (this->layer()->lower_layer != nullptr) {
         // Cummulative sum of polygons over all the regions.
         g.lower_slices = &this->layer()->lower_layer->lslices;
+        // BELT_MOD -- on a tilted floor the strip resting on the belt (or the cut face) has nothing
+        // below it in the layer stack, yet it is supported: add the floor's band through this slab
+        // so it is neither slowed as an overhang nor lifted as a bridge. Each layer writes only its
+        // own member, so the per-layer parallel loop stays safe.
+        if (const PrintObject *object = this->layer()->object(); object != nullptr && object->support_floor_is_tilted()) {
+            Layer *layer = const_cast<Layer*>(this->layer());
+            const SegmentSupportBounds floor_bounds(*object, 0.);
+            if (floor_bounds.is_active()) {
+                layer->lslices_with_floor = union_ex(layer->lower_layer->lslices,
+                                                     floor_bounds.floor_band(layer->print_z - layer->height, layer->print_z));
+                g.lower_slices = &layer->lslices_with_floor;
+            }
+        }
+        if (! this->layer()->lower_layer->segment_floor_support.empty())
+            g.lower_floor_support = &this->layer()->lower_layer->segment_floor_support;
+    }
     if (this->layer()->upper_layer != NULL)
         g.upper_slices = &this->layer()->upper_layer->lslices;
 
@@ -139,6 +156,17 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         g.process_arachne();
     else
         g.process_classic();
+
+    // Orca: forward wave-overhang footprint to the layer so detect_surfaces_type()
+    // can later upgrade stInternal -> stBottomBridge on the configured number of
+    // floor layers above. Layer::make_perimeters() processes regions sequentially
+    // within a layer, so this append is safe under the parallel layer loop.
+    if (! g.out_wave_overhang_floor_polygons.empty())
+        append(this->layer()->wave_overhang_floor_polygons, std::move(g.out_wave_overhang_floor_polygons));
+    // Orca: forward wave-overhang coverage footprint (for support suppression)
+    // to the layer. Populated unconditionally when wave paths exist.
+    if (! g.out_wave_overhang_covered_polygons.empty())
+        append(this->layer()->wave_overhang_covered_polygons, std::move(g.out_wave_overhang_covered_polygons));
 }
 
 #if 1

@@ -131,6 +131,7 @@ class Tab: public wxPanel
 {
 	//BBS: GUI refactor
 protected:
+
 	ParamsPanel*		m_parent;
 /*#ifdef __WXOSX__
 	wxPanel*			m_tmp_panel;
@@ -486,6 +487,10 @@ public:
 	void		update_description_lines() override;
 	void		toggle_options() override;
 	void		update() override;
+	// Unlayered: the SVG infill art tiled over the plate in the 3D view while the Strength
+	// page's SVG settings are on screen; rebuilt from the current settings by toggle_options().
+	void		update_svg_infill_preview();
+	std::string m_svg_infill_preview_key;
 	void		clear_pages() override;
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptFFF; }
 
@@ -647,12 +652,17 @@ public:
         Tab(parent, _L("Machine"), Slic3r::Preset::TYPE_PRINTER) {}
 	~TabPrinter() {}
 
+	// UNLAYERED_MOD -- the derived virtual-5-axis tilt limit, shown read-only under the non-planar
+	// group so the angle that stops a cut-plane drag is visible where its inputs are edited.
+	ogStaticText*	m_virtual_tilt_limit_description_line = nullptr;
+
 	void		build() override;
     void		build_fff();
     void		build_sla();
 	void		reload_config() override;
 	void		activate_selected_page(std::function<void()> throw_if_canceled) override;
 	void		clear_pages() override;
+	void		update_description_lines() override;
 	void		toggle_options() override;
     void		update() override;
     void		update_fff();

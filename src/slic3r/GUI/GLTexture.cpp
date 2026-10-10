@@ -15,6 +15,7 @@
 
 #include <wx/image.h>
 #include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 
 #include <vector>
@@ -170,6 +171,16 @@ bool GLTexture::load_from_svg_file(const std::string& filename, bool use_mipmaps
         return load_from_svg(svg_file, use_mipmaps, compress, apply_anisotropy, max_size_px);
     else
         return false;
+}
+
+bool GLTexture::load_from_svg_file(const std::string& filename, bool use_mipmaps, bool compress, bool apply_anisotropy, unsigned int max_size_px, const ColorSubstitutions& substitutions)
+{
+    reset();
+    auto svg_file = filename;
+    Utils::slash_to_back_slash(svg_file);
+    if (!boost::filesystem::exists(svg_file) || !boost::algorithm::iends_with(svg_file, ".svg"))
+        return false;
+    return load_from_svg(svg_file, use_mipmaps, compress, apply_anisotropy, max_size_px, substitutions.empty() ? nullptr : &substitutions);
 }
 
 bool GLTexture::load_from_raw_data(std::vector<unsigned char> data, unsigned int w, unsigned int h, bool apply_anisotropy)
@@ -701,12 +712,15 @@ void GLTexture::render_texture(unsigned int tex_id, float left, float right, flo
     render_sub_texture(tex_id, left, right, bottom, top, FullTextureUVs);
 }
 
-void GLTexture::render_sub_texture(unsigned int tex_id, float left, float right, float bottom, float top, const GLTexture::Quad_UVs& uvs)
+void GLTexture::render_sub_texture(unsigned int tex_id, float left, float right, float bottom, float top, const GLTexture::Quad_UVs& uvs, bool opaque)
 {
     glsafe(::glEnable(GL_BLEND));
     // Orca: fix washed-out toolbar icons on Wayland: keep destination alpha at 1.0 so the compositor
     // does not treat anti-aliased icon edges as window transparency.
-    glsafe(::glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
+    if (opaque)
+        glsafe(::glBlendFunc(GL_ONE, GL_ZERO));
+    else
+        glsafe(::glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
 
     glsafe(::glEnable(GL_TEXTURE_2D));
     glsafe(::glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE));
@@ -920,11 +934,22 @@ bool GLTexture::load_from_png(const std::string& filename, bool use_mipmaps, ECo
     return true;
 }
 
-bool GLTexture::load_from_svg(const std::string& filename, bool use_mipmaps, bool compress, bool apply_anisotropy, unsigned int max_size_px)
+bool GLTexture::load_from_svg(const std::string& filename, bool use_mipmaps, bool compress, bool apply_anisotropy, unsigned int max_size_px, const ColorSubstitutions* substitutions)
 {
     const bool compression_enabled = compress && OpenGLManager::are_compressed_textures_supported();
 
-    NSVGimage* image = nsvgParseFromFile(filename.c_str(), "px", 96.0f);
+    NSVGimage* image = nullptr;
+    if (substitutions != nullptr) {
+        boost::nowide::ifstream in(filename, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        for (const auto& [from, to] : *substitutions)
+            for (size_t pos = 0; (pos = text.find(from, pos)) != std::string::npos; pos += to.size())
+                text.replace(pos, from.size(), to);
+        std::vector<char> buffer(text.begin(), text.end());
+        buffer.push_back('\0');
+        image = nsvgParse(buffer.data(), "px", 96.0f); // parses in place
+    } else
+        image = nsvgParseFromFile(filename.c_str(), "px", 96.0f);
     if (image == nullptr) {
         reset();
         return false;

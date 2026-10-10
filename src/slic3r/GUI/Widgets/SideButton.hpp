@@ -85,6 +85,7 @@ private:
 
     void mouseDown(wxMouseEvent& event);
     void mouseReleased(wxMouseEvent& event);
+    void keyDown(wxKeyEvent& event);
 
     void sendButtonEvent();
 

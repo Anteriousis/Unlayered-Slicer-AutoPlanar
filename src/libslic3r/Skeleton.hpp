@@ -4,6 +4,7 @@
 #include <vector>
 #include <admesh/stl.h>
 #include <map>
+#include <string>
 
 namespace Slic3r {
 
@@ -84,8 +85,71 @@ SkeletonDAG orient_skeleton_as_dag(const SkeletonGraph& G, int root = -1);
 //
 // band_mm <= 0 selects an automatic band. Returns the number of nodes moved or inserted;
 // *out_bed_z, if given, receives the bed plane used.
+//
+// What stands on the bed. Tips grounds downward-running branch tips (the behaviour above).
+// Middle plants ONE root under the middle of the part instead: a duct lying across the bed, or
+// a U standing on its bend, has no leg — its lowest point is mid-branch — and rooting it at an
+// end tip grows every cut from one side. Auto picks Middle exactly when the part has no leg.
+enum class BedRootMode : int { Auto = 0, Middle = 1, Tips = 2 };
+
+// What snap_to_bed() decided, for plant_middle_root() to act on once the graph is final. The
+// foot is planted AFTER resampling, or resampling would subdivide it into a column of
+// horizontal cuts through the bottom of the part.
+struct BedRootPlan
+{
+    bool            use_middle{false};
+    Eigen::Vector3d centre{Eigen::Vector3d::Zero()}; // area centroid of the bed contact, on the bed
+    double          bed_z{0.0};
+    double          low_zone{0.0};  // a middle node may sit up to this far above the lowest one
+    double          twig_len{0.0};  // a hanging tip branch shorter than this is MCF noise
+    std::vector<std::vector<Eigen::Vector2d>> footprint; // outer bed-contact loops, world XY
+    std::string     reason;
+};
+
 int snap_to_bed(SkeletonGraph& G, const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
-                double band_mm = 0.0, double* out_bed_z = nullptr);
+                double band_mm = 0.0, double* out_bed_z = nullptr,
+                BedRootMode mode = BedRootMode::Tips, BedRootPlan* plan = nullptr);
+
+// Hangs a vertical foot edge down to the bed from the point of the low centreline that lies
+// nearest, in plan view, to the centre of the bed contact -- splitting an edge there when that
+// point is mid-edge, so a symmetric part gets a symmetric fan. Short tip branches hanging below the
+// structure (MCF stubs, which would otherwise become competing roots and cuts) are pruned first.
+// Returns the foot's node index, or -1 when nothing was planted.
+// The foot is recognised again from geometry alone by skeleton_foot_top(), so a graph edited in
+// the gizmo keeps its root without any side state.
+int plant_middle_root(SkeletonGraph& G, const BedRootPlan& plan);
+
+// If `root` is a planted foot, the centreline node it hangs from; else -1. A foot is a degree-1
+// node whose single edge rises vertically into a node that carries at least two near-horizontal
+// edges besides it -- a centreline running along the bed, not a leg standing on it. World frame.
+int skeleton_foot_top(const std::vector<Eigen::Vector3d>& nodes, const std::vector<std::vector<int>>& adj,
+                      int root);
+
+// How far along the skeleton each node is from its root, and how far toward lying flat the cut
+// there is still held: a cut's normal may tilt at most 90 deg - lean from +Z. Shared by the tangent
+// ramp and the cut list so the planes that are skipped as the seat and the planes that are held agree.
+//
+// A tip root (a leg) starts at a lean of 90 -- its first plane is the bed plane -- and a foot root
+// at `root_lean_deg`. Under a foot, every edge inside the SEAT is not cut at all: the middle chunk is
+// whatever rests on the bed there. The seat reaches 1.1 x foot height x tan(lean) from the foot,
+// which keeps the first plane on either side from meeting the other inside the part: planes tilted
+// 90 - lean from +Z, `seat` either side of a centreline `h` above the bed, meet seat / tan(lean) =
+// 1.1 h above it, i.e. clear of a pipe of radius h (steeper planes meet higher still).
+struct SkeletonRootRamp
+{
+    std::vector<double> s;     // distance from the nearest root along the graph; for a foot, from its top
+    std::vector<char>   foot;  // 1 when that nearest root is a foot
+    std::vector<double> seat;  // that foot's seat radius (0 for a tip root)
+    double              ramp{0.0};
+    double              lean0_foot_deg{45.0};
+
+    // Lean allowed for a cut whose plane sits at path distance s_mid, from a root of this kind.
+    double lean_deg(double s_mid, bool from_foot, double seat_r) const;
+};
+SkeletonRootRamp skeleton_root_ramp(const std::vector<Eigen::Vector3d>& nodes,
+                                    const std::vector<std::vector<int>>& adj,
+                                    const std::vector<int>& roots,
+                                    double root_lean_deg = 45.0, double root_ramp = 0.0);
 
 // Genus of the largest surface component from the Euler characteristic, or -1 when the
 // mesh is not a valid closed surface and the formula would be meaningless.
@@ -124,6 +188,27 @@ std::vector<TunnelSpine> find_tunnel_spines(const Eigen::MatrixXd& V,
 // mid-wall MCF loop), the spine is inserted as a node chain, and any branch left dangling
 // is reconnected to its nearest spine node so side branches survive.
 SkeletonGraph splice_tunnel_spines(const SkeletonGraph& G, const std::vector<TunnelSpine>& spines);
+
+// Finds through-bores from the inner wall itself, so a bore that BENDS is followed.
+//
+// find_tunnel_spines() only sees a hole along a straight axis; a 90 deg elbow fails its gate
+// in every direction and is skeletonised as a loop around its own wall. Here every face is
+// classified by how much of its own hemisphere is open sky: a face lining a bore sees material
+// almost everywhere. The connected inner-wall patches are taken, and a patch with exactly two
+// boundary loops is a through-bore whatever its path or cross-section. A harmonic function on
+// that patch (0 on one opening, 1 on the other) has level sets that ring the bore; the area
+// centroid of each ring is a centreline point, spaced about `spacing` mm apart (<= 0 = auto).
+//
+// `min_aspect` gates on centreline length / mean bore diameter, so a washer or a windowed
+// plate -- also a two-opening inner wall -- is left to the material-loop path; pass <= 0 to
+// accept every bore. Each point's radius is the OUTER contour's reach at that ring, which is
+// what splice_tunnel_spines() needs to swallow the mid-wall skeleton. Blind pockets (one
+// loop) and branched manifolds (three or more) are reported in `note` and not traced.
+std::vector<TunnelSpine> find_bore_spines_from_walls(const indexed_triangle_set& its,
+                                                     double       spacing,
+                                                     double       min_aspect  = 1.2,
+                                                     int          max_tunnels = 4,
+                                                     std::string* note        = nullptr);
 
 // Extends every branch tip along its own direction until the material runs out.
 //
@@ -182,6 +267,8 @@ Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, 3, Eigen::RowMajor>> trian
 Eigen::Map<const Eigen::Matrix<int, Eigen::Dynamic, 3, Eigen::RowMajor>> trianglemesh_to_eigen_faces(const indexed_triangle_set& its);
 
 // Multi-root root finding: all degree-1 nodes in the bottom `bottom_pct` fraction of Z.
+// When the graph carries a planted foot (skeleton_foot_top), only the feet and other tips
+// lying ON the bed are roots: a stub merely near the bottom must not compete with the middle.
 std::vector<int> find_skeleton_roots(const SkeletonGraph& G, double bottom_pct = 0.1);
 
 // Multi-root DAG: overload taking a vector of roots (multi-source Dijkstra).
@@ -222,11 +309,16 @@ struct SkeletonTangents {
 
 // Compute per-edge tangents with branch smoothing and clearance checking.
 // W=0: keep raw tangents. W=1: fully interpolate between branch endpoint tangents.
+// Near a root each normal's tilt from +Z is capped as skeleton_root_ramp() allows, the cap opening
+// over `root_ramp` mm (0 = auto), so the planes fan out of the bed gradually instead of the first
+// plane lying flat and the next one snapping straight to the spine.
 SkeletonTangents compute_skeleton_tangents(
     const SkeletonGraph& G,
     const SkeletonDAG& dag,
     const std::vector<int>& roots,
     const std::vector<int>& convergence_nodes,
-    double W = 0.5);
+    double W = 0.5,
+    double root_lean_deg = 45.0,
+    double root_ramp = 0.0);
 
 } // namespace Slic3r

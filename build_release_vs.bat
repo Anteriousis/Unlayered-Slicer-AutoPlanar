@@ -93,6 +93,14 @@ if "%VS_MAJOR%"=="16" (
 echo Detected Visual Studio %VS_VERSION% (version %VS_MAJOR%)
 echo Using CMake generator: %CMAKE_GENERATOR%
 
+@REM msbuild -m only parallelises across projects; the dependency projects carry no /MP,
+@REM so each compiled its sources one file at a time. MultiToolTask schedules cl per source
+@REM file, and EnforceProcessCountAcrossBuilds caps the total at the core count machine-wide,
+@REM so the concurrent dependency sub-builds don't oversubscribe. MSBuild reads environment
+@REM variables as properties, which reaches every nested msbuild the deps build spawns.
+set UseMultiToolTask=true
+set EnforceProcessCountAcrossBuilds=true
+
 :generator_ready
 
 @REM Pack deps

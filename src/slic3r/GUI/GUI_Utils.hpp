@@ -1,6 +1,7 @@
 #ifndef slic3r_GUI_Utils_hpp_
 #define slic3r_GUI_Utils_hpp_
 
+#include "Widgets/Label.hpp"
 #include <memory>
 #include <string>
 #include <ostream>
@@ -83,6 +84,22 @@ inline wxFont get_default_font(const wxWindow* window) { return get_default_font
 
 bool check_dark_mode();
 void update_dark_config();
+
+// Keyboard traversal. By wx's rules a container with no focusable descendants keeps keyboard
+// focus for itself (so an empty panel can receive keys); in this UI that is every decorative
+// panel and custom-painted wrapper, so Tab hops between invisible windows and never reaches
+// the fields. Drops keyboard focus from those containers below `root`, leaving leaf controls,
+// windows that asked for chars (wxWANTS_CHARS) and containers with focusable children as they
+// are. Cheap enough to run on every Tab press, which also covers pages built later.
+// Returns true if `root` or a descendant can take keyboard focus.
+bool drop_focus_from_decorative_containers(wxWindow* root);
+
+// Tab order follows the on-screen layout. wx traverses a container's children in creation
+// order, which for sizer-built rows is often not left-to-right (a colour chip created after
+// its combo is visited after it). Reorders every container's shown children below `root`
+// by row (top to bottom), then x, and rebuilds the traversal order where it changed.
+// Runs on every Tab press together with drop_focus_from_decorative_containers.
+void order_tab_stops_by_position(wxWindow* root);
 #ifdef _WIN32
 void update_dark_ui(wxWindow* window);
 #endif
@@ -236,11 +253,13 @@ private:
     {
         // Linux specific issue : get_dpi_for_window(this) still doesn't responce to the Display's scale in new wxWidgets(3.1.3).
         // So, calculate the m_em_unit value from the font size, as before
+        // The em unit sizes fields, gaps and panels; it follows the user's font scale so the
+        // layout grows with the text instead of clipping it.
 #if !defined(__WXGTK__)
-        m_em_unit = std::max<size_t>(10, 10.0f * m_scale_factor);
+        m_em_unit = std::max<size_t>(10, 10.0f * m_scale_factor * Label::getFontScale());
 #else
         // initialize default width_unit according to the width of the one symbol ("m") of the currently active font of this window.
-        m_em_unit = std::max<size_t>(10, this->GetTextExtent("m").x - 1);
+        m_em_unit = std::max<size_t>(10, (this->GetTextExtent("m").x - 1) * Label::getFontScale());
 #endif // __WXGTK__
     }
 

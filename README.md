@@ -41,9 +41,9 @@ These features are switched on per printer: **Printer settings ▸ Motion abilit
 
   Both work over the network or USB. They target the Duet 3 Mini 5+ in an Unlayered printer. See [USB_UPDATES.md](USB_UPDATES.md).
 
-## Web application tabs
+## Web application tab
 
-Two tabs, **Unlayered Agent** and **Unlayered Universe**, embed pages from unlayered3d.com. They are on by default and fetch nothing until you open them. To remove one, set `agent_app_enabled` or `universe_app_enabled` to `false` in `Unlayered Slicer.conf` while the app is closed.
+One tab, **Unlayered Universe**, embeds a page from unlayered3d.com. It is on by default and fetches nothing until you open it. To remove it, set `universe_app_enabled` to `false` in `Unlayered Slicer.conf` while the app is closed.
 
 A page talks to the slicer only through a documented bridge with per-tab permissions. The bridge is specified in [WEB_APP_BRIDGE.md](WEB_APP_BRIDGE.md), and there is an example page in [resources/web/webapp-example](resources/web/webapp-example).
 
@@ -51,17 +51,20 @@ A page talks to the slicer only through a documented bridge with per-tab permiss
 
 - **Orca Cloud** sign-in and preset sync.
 - **Online vendor profile updates.** Profiles come with the app.
-- **The Bambu network plugin.** Bambu Lab cloud and LAN printing do not work in this fork.
+- **Bambu Lab cloud features:** cloud sign-in, cloud printing and account binding. Bambu Lab printers are used over the local network (LAN mode, with an access code), which needs the Bambu Lab network plug-in. The plug-in is optional: the first-run setup offers it, and it can be installed later from **Preferences ▸ Online**.
 
-**Stealth mode** is on by default, and it hides the remaining cloud account settings.
+**Stealth mode** is offered on the first-run setup page, off by default. It hides the remaining cloud account settings.
 
 ## Network access
 
 These connections are not affected by stealth mode:
 
 - **At launch:** the app checks for a new version at `https://unlayered3d.com/slicer/latest.json`. You can also check manually with **Help ▸ Check for Updates**. Builds whose version ends in `-dev` skip the automatic check.
-- **Agent and Universe tabs:** load their pages from unlayered3d.com when opened.
+- **Updates:** downloading an update needs an Unlayered account. **Help ▸ Sign in to Unlayered** opens unlayered3d.com in your browser; the slicer keeps the resulting sign-in token in the system credential store and sends it only to unlayered3d.com. Signed in, a new version downloads in the background and installs on **Help ▸ Restart to Update** or the next time the app closes.
+- **Universe tab:** loads its page from unlayered3d.com when opened.
 - **Firmware button:** reads release information from the GitHub API.
+
+If you install the Bambu Lab network plug-in, it is downloaded from Bambu Lab's servers.
 
 # Getting it
 

@@ -1053,9 +1053,14 @@ void ViewerImpl::load(GCodeInputData&& gcode_data)
     m_settings.spiral_vase_mode = gcode_data.spiral_vase_mode;
 
     for (size_t i = 0; i < m_vertices.size(); ++i) {
-        const PathVertex& v = m_vertices[i];
+        PathVertex& v = m_vertices[i];
 
         m_layers.update(v, static_cast<uint32_t>(i));
+        // UNLAYERED_MOD: every later range test compares a vertex's layer_id with layer ITEM
+        // indices, so re-key the vertex to the item it just landed in. Equal to the source id
+        // unless the file skipped ids (a layer change with no move); then the source ids run
+        // ahead of the items and the top of the print fell outside every range.
+        v.layer_id = static_cast<uint32_t>(m_layers.count() - 1);
 
         for (size_t j = 0; j < TIME_MODES_COUNT; ++j) {
             m_total_time[j] += v.times[j];

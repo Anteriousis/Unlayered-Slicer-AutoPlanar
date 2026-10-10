@@ -49,6 +49,11 @@ struct SysFilePackage
     std::string machine;
     std::string notes;
     std::string origin;   // human readable source description
+    // Oldest board firmware these files work on, e.g. "3.7.0-beta.1+unlayered.15". Unlike
+    // "machine" this one IS enforced: a config.g that uses a command the running firmware does
+    // not know stops at that line and skips everything after it, heaters and tools included.
+    // Empty when the manifest does not say; sys_required_firmware() also reads it off the files.
+    std::string min_firmware;
 
     std::vector<SysFile> files;
 
@@ -88,10 +93,27 @@ bool sys_is_ignored_file(const std::string &relative_path);
 
 // Parses the manifest.json carried by a package:
 //   { "version": "...", "date": "...", "machine": "...", "notes": "...",
+//     "minFirmware": "3.7.0-beta.1+unlayered.15",
 //     "files": [ { "path": "sys/config.g", "sha256": "..." }, ... ] }
 // Everything except "version" is optional. "files" is optional too; when it is present it is
 // authoritative and anything else in the package is left alone.
 bool parse_sys_manifest(const std::string &json, SysFilePackage &pkg_out, std::string &error_out);
+
+// The N of an Unlayered firmware version "...+unlayered.N", or -1 when there is none (stock RRF).
+// The fork number is the fork's one monotonic counter, so it is what versions are ordered by -
+// semver ignores build metadata and would call every +unlayered.N equal.
+int unlayered_fork_number(const std::string &firmware_version);
+
+// The firmware a set of files needs: the manifest's min_firmware, raised by anything the files
+// themselves use that only a later release understands (today: M558 P12, the differential Z
+// probe, from +unlayered.12). Reading the files as well is what covers a folder, or a zip built
+// before manifests carried the field. Empty when nothing is known. reason_out, when given, says
+// where the requirement came from.
+std::string sys_required_firmware(const SysFilePackage &pkg, std::string *reason_out = nullptr);
+
+// False only when `running` is known to be older than `required`. An empty requirement, or a
+// pair that cannot be compared, is not a reason to refuse.
+bool sys_firmware_satisfies(const std::string &running, const std::string &required);
 
 // Verifies declared checksums and that every target path is inside an allowed root.
 bool validate_sys_package(const SysFilePackage &pkg, std::string &error_out);

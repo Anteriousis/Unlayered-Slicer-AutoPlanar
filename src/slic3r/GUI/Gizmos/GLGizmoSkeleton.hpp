@@ -40,7 +40,7 @@ protected:
         return r;
     }
 
-    std::string on_get_name() const override { return _u8L("Skeleton Cut"); }
+    std::string on_get_name() const override { return _u8L("Pipe Cut"); }
 
     // UNLAYERED_MOD — the cut tags each arm with layer_rotation_b/c, which slicing only honours
     // when the printer has enable_nonplanar set. Don't offer a cut that would do nothing.
@@ -63,7 +63,10 @@ protected:
     void render_skeleton_cut_planes();
     void render_node_axis_gizmo(const Vec3d& node_world, float arrow_len, const Camera& camera);
     void delete_skeleton_node(int idx);
+    // Roots, DAG, tangents and cut list from m_skeleton, in WORLD space (rebuild_skeleton_topology),
+    // then the green root markers. Every recompute in this gizmo goes through here.
     void rebuild_skeleton_dag();
+    void set_root_markers(const std::vector<int>& roots);
     void render_cut_plane_input_window(CutConnectors& connectors, float x, float y, float bottom_limit) override;
 
     std::vector<std::pair<int,int>> build_cut_edges(const Transform3d& world) const;
@@ -91,6 +94,10 @@ protected:
 
     // Generator settings panel toggle
     bool  m_skel_show_generator{false};
+
+    // The cut list, derived with the DAG in world space: the seat under a planted foot is only
+    // recognisable there, so it cannot be re-derived from the object-local m_skeleton_dag.
+    std::vector<std::pair<int,int>> m_skel_cut_edges;
 
     // Step-through preview state
     std::vector<std::pair<int,int>> m_preview_edges;

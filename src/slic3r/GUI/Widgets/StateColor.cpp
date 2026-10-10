@@ -3,8 +3,6 @@
 
 static bool gDarkMode = false;
 
-static bool operator<(wxColour const &l, wxColour const &r) { return l.GetRGBA() < r.GetRGBA(); }
-
 // Light -> dark colour pairs. Inverted at runtime by revert() for lightModeColorFor().
 //
 // NOTE: Accent::Base and Accent::Pressed (GUI/AccentColor.hpp) are deliberately ABSENT
@@ -23,28 +21,33 @@ static std::map<wxColour, wxColour> gDarkColors{
     {"#262E30", "#EFEFF0"}, // rgb(38, 46, 48)     Button text color | Input Text Color
     {"#DFDFDF", "#3E3E45"}, // rgb(223, 223, 223)  Button Background color
     {"#D4D4D4", "#4D4D54"}, // rgb(212, 212, 212)  Button Background color on Hover
-    {"#6B6A6A", "#909090"}, // rgb(107, 107, 106)  Button Dimmed text
+    {"#6B6A6A", "#ACACB0"}, // rgb(107, 107, 106)  Button Dimmed text (was #909090, 3.3:1 on #3E3E45; now 4.7:1)
     {"#6B6B6A", "#B3B3B5"}, // rgb(107, 107, 106)  Input box side text
     {"#2C2C2E", "#B3B3B4"}, // rgb(44, 44, 46)     ???
-    {"#6B6B6B", "#818183"}, // rgb(107, 107, 107)  Disabled Text
+    {"#6B6B6B", "#A4A4A8"}, // rgb(107, 107, 107)  Disabled Text (was #818183, 3.5:1 on the window)
     {"#ACACAC", "#65656A"}, // rgb(172, 172, 172)  Disabled Text on boxes | Dimmed Elements
     {"#EEEEEE", "#4C4C55"}, // rgb(238, 238, 238)  Separator Line | Title Line Color
     {"#E8E8E8", "#3E3E45"}, // rgb(232, 232, 232)  ???
     {"#323A3D", "#E5E5E4"}, // rgb(50, 58, 61)     Softer text color
-    {"#FFFFFF", "#2D2D31"}, // rgb(255, 255, 255)  Window background
-    {"#F8F8F8", "#36363C"}, // rgb(248, 248, 248)  Sidebar > Titlebar > Gradient Top | BBL monitor page titlebar bg
-    {"#F1F1F1", "#36363B"}, // rgb(241, 241, 241)  Sidebar > Titlebar > Gradient Bottom
-    {"#3B4446", "#2D2D30"}, // rgb(59, 68, 78)     Top Bar / Main tab bar bg color
-    {"#CECECE", "#54545B"}, // rgb(206, 206, 206)  Sidebar wxPanel bg | 
+    {"#262E31", "#272F31"}, // rgb(38, 46, 49)     Top bar (BBLTopbar): slate in both themes, a key of its own so it can be themed ("Top bar" role).
+                            //                     Its dark value must not be another row's light key (#262E30 is the button/input text key):
+                            //                     the live preview matches windows by every colour a role has had, so a shared colour lets a
+                            //                     top-bar edit recolour the headings after a base flip.
+    {"#FFFEFF", "#232328"}, // rgb(255, 254, 255)  Input background (TextInput, ComboBox, SpinInput): a key of its own so it can be themed apart from the window; its dark value differs from the window's by one unit so no two roles ever share a colour (the reverse map and the live re-theme both key on it)
+    {"#FFFFFF", "#232327"}, // rgb(255, 255, 255)  Window background (was #2D2D31; ImGuiWrapper::COL_WINDOW_BG_DARK, IMSlider, 2DBed, BitmapCache and GUI_App::init_label_colours mirror this)
+    {"#F8F8F8", "#2B2B30"}, // rgb(248, 248, 248)  Sidebar > Titlebar > Gradient Top | BBL monitor page titlebar bg (one step above the window)
+    {"#F1F1F1", "#2B2B2F"}, // rgb(241, 241, 241)  Sidebar > Titlebar > Gradient Bottom
+    {"#3B4446", "#1E1E21"}, // rgb(59, 68, 78)     Top Bar / Main tab bar bg color (Notebook::default_btn_bg mirrors this)
+    {"#CECECE", "#54545B"}, // rgb(206, 206, 206)  Selected button / tab background (GUI_App::m_color_selected_btn_bg); NOT a panel: darkening it hides the selected tab
     {"#000000", "#FFFFFE"}, // rgb(0, 0, 0)        Mostly Text color wxBlack
-    {"#F4F4F4", "#36363D"}, // rgb(244, 244, 244)  ???
-    {"#DBDBDB", "#4A4A51"}, // rgb(219, 219, 219)  Input/Combo Box Border Color
+    {"#F4F4F4", "#2E2E34"}, // rgb(244, 244, 244)  ??? (one step above the window)
+    {"#DBDBDB", "#78787F"}, // rgb(219, 219, 219)  Input/Combo Box Border Color (was #4A4A51, 1.6:1 against the window; now 3.1:1; BitmapCache mirrors this)
     {"#323A3C", "#E5E5E6"}, // rgb(50, 58, 60)     Text color used on search list |
     {"#303A3C", "#E5E5E5"}, // rgb(48, 58, 60)     Object Table > Column header text color | StaticBox Border Color
-    {"#FEFFFF", "#242428"}, // rgb(254, 255, 255)  Side Tabbar bg | 
+    {"#FEFFFF", "#1B1B1E"}, // rgb(254, 255, 255)  Side Tabbar bg
     {"#A6A9AA", "#2D2D29"}, // rgb(166, 169, 170)  Seperator color
-    {"#363636", "#B2B3B5"}, // rgb(54, 54, 54)     Sidebar > Parameter Label/Title color | Sidebar tab text | Create Filament window text
-    {"#F0F0F1", "#333337"}, // rgb(240, 240, 241)  Disabled element background // ORCA Used better background color for dark mode
+    {"#363636", "#E2E2E5"}, // rgb(54, 54, 54)     Sidebar > Parameter Label/Title color | Sidebar tab text | Create Filament window text (GUI_App::init_label_colours mirrors this)
+    {"#F0F0F1", "#2B2B2F"}, // rgb(240, 240, 241)  Disabled element background
     {"#9E9E9E", "#53545A"}, // rgb(158, 158, 158)  ???
     {"#2B3436", "#808080"}, // rgb(43, 52, 54)     Also spelled wxColour(43, 52, 54) in CameraPopup/Search/Tab
     {"#D9D9D9", "#27272A"}, // rgb(217, 217, 217)  Sidebar > Toggle button track color
@@ -64,6 +67,7 @@ static std::map<wxColour, wxColour> gDarkColors{
     // in the dark one, so no single literal sits one step above both. Derived from those two,
     // and must stay in step with SideButton's bottom_color if that ever changes.
     {"#4F585A", "#414144"}, // rgb(79, 88, 90)     Disabled Slice / Print pill
+    {"#D0D0D1", "#C0C0C4"}, // rgb(208, 208, 209)  Disabled Slice / Print text (4.7:1 / 5.6:1 on the pill)
 };
 
 std::tuple<double, double, double> StateColor::GetLAB(const wxColour& color) {
@@ -104,6 +108,39 @@ double StateColor::LAB_Delta_E(const wxColour& color1, const wxColour& color2) {
 
 double StateColor::GetColorDifference(const wxColour& color1, const wxColour& color2) {
     return LAB_Delta_E(color1, color2);
+}
+
+double StateColor::ContrastRatio(const wxColour& a, const wxColour& b)
+{
+    auto lum = [](const wxColour& c) {
+        auto f = [](double v) { v /= 255.0; return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * f(c.Red()) + 0.7152 * f(c.Green()) + 0.0722 * f(c.Blue());
+    };
+    const double la = lum(a), lb = lum(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+wxColour StateColor::EnsureContrast(const wxColour& text, const wxColour& bg, double min_ratio)
+{
+    if (ContrastRatio(text, bg) >= min_ratio)
+        return text;
+    // Lightness (HSL) is not luminance: a mid grey can read better against white than black.
+    // Try the likely direction first, then the other, and fall back to whichever of black and
+    // white reads best.
+    const bool dark_first = GetLightness(bg) > 50.0;
+    for (const bool go_dark : { dark_first, !dark_first }) {
+        double l = GetLightness(text);
+        for (int i = 0; i < 20; ++i) {
+            l += go_dark ? -5.0 : 5.0;
+            if (l < 0.0 || l > 100.0)
+                break;
+            const wxColour c = SetLightness(text, l);
+            if (ContrastRatio(c, bg) >= min_ratio)
+                return c;
+        }
+    }
+    const wxColour black(0, 0, 0), white(255, 255, 255);
+    return ContrastRatio(black, bg) >= ContrastRatio(white, bg) ? black : white;
 }
 
 double StateColor::GetLightness(const wxColour& color) {
@@ -200,12 +237,56 @@ std::map<wxColour, wxColour> const & StateColor::GetDarkMap()
     return gDarkColors;
 }
 
+wxColour StateColor::AvoidTableCollision(const wxColour& color, bool dark_base)
+{
+    auto collides = [&](const wxColour& c) {
+        for (const auto& [key, value] : gDarkColors)
+            if (dark_base ? key == c : value == c)
+                return true;
+        return false;
+    };
+    wxColour c = color;
+    for (int i = 0; i < 8 && collides(c); ++i) {
+        auto step = [](unsigned char v) { return (unsigned char) (v < 128 ? v + 1 : v - 1); };
+        c = wxColour(step(c.Red()), step(c.Green()), step(c.Blue()));
+    }
+    return c;
+}
+
 void StateColor::SetDarkMode(bool dark) { gDarkMode = dark; }
+
+static std::map<wxColour, wxColour> gDarkOverrides;
+static std::map<wxColour, wxColour> gLightOverrides;
+
+void StateColor::SetThemeOverride(bool dark, wxColour const &light_key, wxColour const &value)
+{
+    auto &map = dark ? gDarkOverrides : gLightOverrides;
+    if (value.IsOk())
+        map[light_key] = value;
+    else
+        map.erase(light_key);
+}
+
+void StateColor::ClearThemeOverrides()
+{
+    gDarkOverrides.clear();
+    gLightOverrides.clear();
+}
 
 inline wxColour darkModeColorFor2(wxColour const &color)
 {
-    if (!gDarkMode)
-        return color;
+    if (!gDarkMode) {
+        auto over = gLightOverrides.find(color);
+        return over != gLightOverrides.end() ? over->second : color;
+    }
+    auto over = gDarkOverrides.find(color);
+    if (over != gDarkOverrides.end()) return over->second;
+    // A colour that is itself the value of an override is already resolved: a user's black
+    // window background must not go through the #000000 (text) row and come out white when a
+    // window's current colour is re-resolved.
+    for (const auto& [key, value] : gDarkOverrides)
+        if (value == color)
+            return color;
     auto iter = gDarkColors.find(color);
     if (iter != gDarkColors.end()) return iter->second;
     return color;

@@ -4,6 +4,7 @@
 #include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <map>
 #include <sstream>
@@ -109,6 +110,50 @@ double percentile(std::vector<double> v, double q)
 }
 
 std::string f3(double v) { return (boost::format("%.3f") % v).str(); }
+
+bool has_rotary_motion_word(const std::string &line)
+{
+    // Firmware accepts compact words, zero-padded commands and optional line numbers. Comments and
+    // checksums are not commands: remove them before examining G0/G1/G2/G3 and their axis words.
+    std::string code;
+    int comment_depth = 0;
+    for (char c : line) {
+        if (c == '(') { ++ comment_depth; code += ' '; continue; }
+        if (c == ')' && comment_depth > 0) { -- comment_depth; continue; }
+        if (comment_depth > 0) continue;
+        if (c == ';' || c == '*') break;
+        code += char(std::toupper(static_cast<unsigned char>(c)));
+    }
+    auto digit = [](char c) { return c >= '0' && c <= '9'; };
+    size_t pos = 0;
+    auto skip_space = [&]() {
+        while (pos < code.size() && std::isspace(static_cast<unsigned char>(code[pos]))) ++ pos;
+    };
+    skip_space();
+    if (pos < code.size() && code[pos] == 'N') {
+        ++ pos;
+        const size_t start = pos;
+        while (pos < code.size() && digit(code[pos])) ++ pos;
+        if (pos == start) return false;
+        skip_space();
+    }
+    if (pos == code.size() || code[pos++] != 'G') return false;
+    const size_t start = pos;
+    int command = 0;
+    while (pos < code.size() && digit(code[pos])) {
+        command = std::min(10, command * 10 + code[pos] - '0');
+        ++ pos;
+    }
+    if (pos == start || command > 3 || (pos < code.size() && code[pos] == '.')) return false;
+    for (; pos < code.size(); ++ pos) {
+        if (code[pos] != 'A' && code[pos] != 'B' && code[pos] != 'C') continue;
+        size_t number = pos + 1;
+        if (number < code.size() && (code[number] == '+' || code[number] == '-')) ++ number;
+        if (number < code.size() && code[number] == '.') ++ number;
+        if (number < code.size() && digit(code[number])) return true;
+    }
+    return false;
+}
 
 } // namespace
 
@@ -326,22 +371,7 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
         boost::nowide::ifstream in(gcode_path);
         std::string line;
         while (std::getline(in, line)) {
-            if (line.size() < 2 || (line[0] != 'G' && line[0] != 'g'))
-                continue;
-            const char g = line[1];
-            if (g < '0' || g > '3' || (line.size() > 2 && line[2] != ' ' && line[2] != '\t'))
-                continue;
-            const size_t end = line.find(';');
-            const std::string code = line.substr(0, end);
-            bool hit = false;
-            for (size_t i = 2; i + 1 < code.size(); ++ i) {
-                const char c = code[i];
-                if ((c == 'A' || c == 'B' || c == 'C' || c == 'a' || c == 'b' || c == 'c') &&
-                    (code[i - 1] == ' ' || code[i - 1] == '\t') &&
-                    (std::isdigit((unsigned char)code[i + 1]) || code[i + 1] == '-' || code[i + 1] == '.' || code[i + 1] == '+'))
-                    hit = true;
-            }
-            if (hit) {
+            if (has_rotary_motion_word(line)) {
                 if (out.rotary_words == 0) out.first_rotary_line = line;
                 ++ out.rotary_words;
             }

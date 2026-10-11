@@ -866,6 +866,14 @@ void GLGizmoCutPlanes::on_set_state()
 void GLGizmoCutPlanes::data_changed(bool is_serializing)
 {
     GLGizmoCut3D::data_changed(is_serializing);
+    // Mesh edits, process/printer changes and undo/redo invalidate the private planning snapshot.
+    // A finished suggestion is subject to the same rule as a job still running.
+    if (m_auto_job) {
+        wxGetApp().plater()->get_ui_job_worker().cancel();
+        m_auto_job.reset();
+    }
+    if (m_auto_result)
+        discard_auto_planes();
     // The model may have changed under us (undo/redo, object moved/scaled, plane list edited):
     // re-derive the pose of the bound plane, or drop to free mode if it disappeared.
     sync_gizmo_from_active_plane();
@@ -1782,8 +1790,10 @@ void GLGizmoCutPlanes::rebuild_segment_preview()
             }
         return;
     }
+    const AutoPlanes::Candidate *suggestion = m_auto_result ? m_auto_result->result.chosen_candidate() : nullptr;
+    const bool user_ordered = suggestion != nullptr ? suggestion->user_ordered : mo->cut_planes.user_ordered;
     segs = derive_cut_segments(merged, m_preview_planes, instance_matrix(), preview_min_segment_thickness(),
-                               mo->cut_planes.user_ordered, &m_preview_status, &pieces, mo->name);
+                               user_ordered, &m_preview_status, &pieces, mo->name);
     if (m_merged_scope == nullptr) {
         // Directed parts print as their own segments after the partition (or after a root made
         // of the undirected parts when there is no partition) -- show them the same way.
@@ -1897,16 +1907,18 @@ void GLGizmoCutPlanes::start_auto_planes()
     opt.preference    = m_auto_preference == 1 ? AutoPlanes::Preference::Supports
                       : m_auto_preference == 2 ? AutoPlanes::Preference::Finish
                                                : AutoPlanes::Preference::Balanced;
-    opt.keep_existing = true;   // evaluated together with the user's planes; "Replace" decides at apply time
+    opt.keep_existing = m_auto_keep_existing;
 
     Worker &worker = wxGetApp().plater()->get_ui_job_worker();
     worker.cancel();
-    m_auto_result.reset();
-    m_auto_preview_planes.clear();
+    discard_auto_planes();
     m_auto_job = std::make_shared<AutoPlanesJobState>();
     m_auto_job->source_id    = mo->id();
     m_auto_job->instance_idx = inst;
+    m_auto_job->instance_id  = mo->instances[size_t(inst)]->id();
+    m_auto_job->source_trafo = mo->instances[size_t(inst)]->get_matrix();
     m_auto_job->source_stack = mo->cut_planes;
+    m_auto_job->keep_existing = opt.keep_existing;
     {
         std::lock_guard<std::mutex> lk(m_auto_job->mtx);
         m_auto_job->stage = _u8L("starting");
@@ -1918,8 +1930,20 @@ void GLGizmoCutPlanes::start_auto_planes()
 
 void GLGizmoCutPlanes::poll_auto_planes()
 {
+    if (! m_auto_result && ! m_auto_job)
+        return;
+    const ModelObject *mo = selected_model_object();
+    const auto *selection = m_c->selection_info();
+    const int instance = selection != nullptr ? selection->get_active_instance() : -1;
+    if (m_auto_result && ! m_auto_result->matches(mo, instance))
+        discard_auto_planes();
     if (! m_auto_job)
         return;
+    if (! m_auto_job->matches(mo, instance)) {
+        wxGetApp().plater()->get_ui_job_worker().cancel();
+        m_auto_job.reset();
+        return;
+    }
     if (! m_auto_job->done.load()) {
         m_parent.request_extra_frame();   // keep the progress line moving
         return;
@@ -1934,10 +1958,6 @@ void GLGizmoCutPlanes::poll_auto_planes()
         return;
     }
     // Drop a result that no longer matches what is selected, or an object edited meanwhile.
-    const ModelObject *mo = selected_model_object();
-    if (mo == nullptr || mo->id() != st->source_id || mo->cut_planes != st->source_stack)
-        return;
-
     m_auto_result = st;
     const AutoPlanes::Candidate *c = st->result.chosen_candidate();
     if (c != nullptr) {
@@ -1969,15 +1989,18 @@ void GLGizmoCutPlanes::discard_auto_planes()
     m_parent.request_extra_frame();
 }
 
-void GLGizmoCutPlanes::apply_auto_planes(bool keep_existing)
+void GLGizmoCutPlanes::apply_auto_planes()
 {
     ModelObject *mo = selected_model_object();
-    if (mo == nullptr || ! m_auto_result) {
+    // Keep the state alive through snapshot/model callbacks, which may invalidate the member.
+    const AutoPlanesJobStatePtr state = m_auto_result;
+    const auto *selection = m_c->selection_info();
+    if (! state || ! state->matches(mo, selection != nullptr ? selection->get_active_instance() : -1)) {
         discard_auto_planes();
         return;
     }
-    const AutoPlanes::Candidate *c = m_auto_result->result.chosen_candidate();
-    if (c == nullptr || mo->cut_planes != m_auto_result->source_stack) {
+    const AutoPlanes::Candidate *c = state->result.chosen_candidate();
+    if (c == nullptr) {
         discard_auto_planes();
         return;
     }
@@ -1985,7 +2008,7 @@ void GLGizmoCutPlanes::apply_auto_planes(bool keep_existing)
         // One snapshot: Undo restores exactly the stack the user had.
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Apply suggested cut planes"), UndoRedo::SnapshotType::GizmoAction);
         const bool first = ! mo->cut_planes.active();
-        mo->cut_planes   = AutoPlanes::stack_for(mo->cut_planes, *c, keep_existing);
+        mo->cut_planes   = AutoPlanes::stack_for(mo->cut_planes, *c, state->keep_existing);
         m_active_plane   = -1;
         m_contours_dirty = true;
         if (first)
@@ -2036,14 +2059,11 @@ void GLGizmoCutPlanes::render_auto_planes_panel()
             m_imgui->text_colored(ImGuiWrapper::COL_GREY_DARK,
                 _L("Estimates come from the mesh, not from slicing. Slice and check the preview before printing."));
 
-            const bool has_existing = m_auto_result->source_stack.active();
-            if (m_imgui->button(has_existing ? _L("Add to my planes") : _L("Apply")))
-                apply_auto_planes(true);
-            if (has_existing) {
-                ImGui::SameLine();
-                if (m_imgui->button(_L("Replace my planes")))
-                    apply_auto_planes(false);
-            }
+            const bool has_existing = ! m_auto_result->source_stack.empty();
+            const wxString label = ! has_existing ? _L("Apply") : m_auto_result->keep_existing ?
+                                    _L("Add to my planes") : _L("Replace my planes");
+            if (m_imgui->button(label))
+                apply_auto_planes();
             ImGui::SameLine();
             if (m_imgui->button(_L("Discard")))
                 discard_auto_planes();
@@ -2068,6 +2088,9 @@ void GLGizmoCutPlanes::render_auto_planes_panel()
     if (m_imgui->radio_button(_L("Fewer supports"), m_auto_preference == 1)) m_auto_preference = 1;
     ImGui::SameLine();
     if (m_imgui->radio_button(_L("Surface finish"), m_auto_preference == 2)) m_auto_preference = 2;
+    const ModelObject *mo = selected_model_object();
+    if (mo != nullptr && ! mo->cut_planes.empty())
+        m_imgui->checkbox(_L("Keep my existing planes"), m_auto_keep_existing);
     if (m_imgui->button(_L("Suggest planes")))
         start_auto_planes();
     if (ImGui::IsItemHovered())

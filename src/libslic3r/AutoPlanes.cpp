@@ -276,10 +276,11 @@ Vec3d normal_to_local(const Transform3d &t, const Vec3d &n)
 
 Candidate evaluate(const ModelObject &object, const Transform3d &T, const MachineCapability &machine,
                    const ProcessParams &process, const std::vector<CutPlane> &planes, const std::string &name,
-                   const std::vector<bool> &from_existing)
+                   const std::vector<bool> &from_existing, bool user_ordered)
 {
     Candidate cand;
     cand.name = name;
+    cand.user_ordered = user_ordered;
 
     const indexed_triangle_set merged_local = merged_model_part_mesh(object, true);
     const indexed_triangle_set merged_world = transformed(merged_local, T);
@@ -290,7 +291,7 @@ Candidate evaluate(const ModelObject &object, const Transform3d &T, const Machin
     std::vector<indexed_triangle_set> seg_meshes;
     if (! planes.empty()) {
         CutSegmentationStatus status = CutSegmentationStatus::Ok;
-        segs = derive_cut_segments(merged_local, planes, T, 2. * h, false, &status, &seg_meshes, object.name);
+        segs = derive_cut_segments(merged_local, planes, T, 2. * h, user_ordered, &status, &seg_meshes, object.name);
         if (segs.empty() || status != CutSegmentationStatus::Ok) {
             cand.feasible = false;
             switch (status) {
@@ -577,11 +578,18 @@ bool looks_branched(const indexed_triangle_set &world)
 
 CutPlaneStack stack_for(const CutPlaneStack &existing, const Candidate &candidate, bool keep_existing)
 {
+    if (keep_existing && candidate.planes.empty())
+        return existing;
     CutPlaneStack out;
     out.enabled      = ! candidate.planes.empty() || (keep_existing && existing.enabled);
-    out.user_ordered = keep_existing ? existing.user_ordered : false;
+    out.user_ordered = candidate.user_ordered;
     if (keep_existing) {
         out.planes = existing.planes;
+        // Enabling the new plan must not activate old planes that were excluded from its evaluation
+        // because the entire stored stack was switched off. Keep them available, but individually off.
+        if (! existing.enabled)
+            for (CutPlane &p : out.planes)
+                p.enabled = false;
         for (const PlannedPlane &pp : candidate.planes)
             if (! pp.from_existing)
                 out.planes.push_back(pp.plane);
@@ -602,6 +610,15 @@ PlanResult plan(const ModelObject &object, const Transform3d &T, const DynamicPr
     res.process = ProcessParams::from_config(config, &object);
     auto canceled = [progress]() { return progress && progress->canceled && progress->canceled(); };
     auto report   = [progress](int pct, const std::string &s) { if (progress && progress->report) progress->report(pct, s); };
+    auto stop_if_canceled = [&]() {
+        if (! canceled()) return false;
+        res.canceled = true;
+        res.chosen = -1;
+        res.decision = "Canceled.";
+        return true;
+    };
+
+    if (stop_if_canceled()) return res;
 
     report(2, "Evaluating planar baseline");
     res.planar = evaluate(object, T, res.machine, res.process, {}, "Planar (no cut planes)");
@@ -613,11 +630,18 @@ PlanResult plan(const ModelObject &object, const Transform3d &T, const DynamicPr
         for (const CutPlane &p : object.cut_planes.planes)
             if (p.enabled) { fixed.push_back(p); fixed_flags.push_back(true); }
         if (! fixed.empty()) {
-            res.existing = evaluate(object, T, res.machine, res.process, fixed, "Current planes", fixed_flags);
+            res.existing = evaluate(object, T, res.machine, res.process, fixed, "Current planes", fixed_flags,
+                                    object.cut_planes.user_ordered);
             res.existing->net_benefit = net_benefit(*res.existing, res.planar, options.preference, &res.existing->benefits);
         }
     }
     if (! options.keep_existing) { fixed.clear(); fixed_flags.clear(); }
+    const bool user_ordered = options.keep_existing && object.cut_planes.user_ordered;
+    if (stop_if_canceled()) return res;
+    if (options.max_planes <= 0) {
+        res.decision = "No new planes requested. Keep the current setup.";
+        return res;
+    }
 
     if (object_has_directed_parts(object)) {
         res.decision = "This object has parts with their own build direction; automatic planes are not combined with them. Keep the current setup.";
@@ -760,7 +784,7 @@ PlanResult plan(const ModelObject &object, const Transform3d &T, const DynamicPr
     auto make = [&](const Proposal &pr) {
         std::vector<bool> flags(pr.planes.size(), false);
         for (size_t i = 0; i < fixed.size() && i < flags.size(); ++ i) flags[i] = true;
-        Candidate c = evaluate(object, T, res.machine, res.process, pr.planes, pr.name, flags);
+        Candidate c = evaluate(object, T, res.machine, res.process, pr.planes, pr.name, flags, user_ordered);
         for (size_t i = fixed.size(); i < c.planes.size(); ++ i) c.planes[i].origin = pr.origin;
         for (size_t i = 0; i < fixed.size() && i < c.planes.size(); ++ i) c.planes[i].origin = "existing";
         c.net_benefit = net_benefit(c, res.planar, options.preference, &c.benefits);
@@ -807,13 +831,15 @@ PlanResult plan(const ModelObject &object, const Transform3d &T, const DynamicPr
             }
     }
 
+    if (stop_if_canceled()) return res;
     std::stable_sort(res.candidates.begin(), res.candidates.end(), [](const Candidate &l, const Candidate &r) {
         if (l.feasible != r.feasible) return l.feasible;
         return l.net_benefit > r.net_benefit;
     });
 
     report(95, "Choosing");
-    const double reference = res.existing ? std::max(0., res.existing->net_benefit) : 0.;
+    if (stop_if_canceled()) return res;
+    const double reference = res.existing && res.existing->feasible ? std::max(0., res.existing->net_benefit) : 0.;
     if (! res.candidates.empty() && res.candidates.front().feasible &&
         res.candidates.front().net_benefit >= options.min_net_benefit + reference) {
         res.chosen = 0;
@@ -835,6 +861,7 @@ PlanResult plan(const ModelObject &object, const Transform3d &T, const DynamicPr
         res.decision = (res.existing ? "Keep the current planes. " : "Keep planar printing. ") + why;
     }
     report(100, "Done");
+    stop_if_canceled();
     return res;
 }
 

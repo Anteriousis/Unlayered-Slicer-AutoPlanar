@@ -51,8 +51,9 @@ with a 5° configured limit, steeper rungs may still be printed with ordinary pl
 raise the machine's tilt limit to match the model. The default planner proposes at most two new
 global cut planes, so it cannot independently align every rung of this combined model.
 
-`--scale` scales the whole part, `--only tilt_ladders,shelves` keeps a subset (the base is always kept),
-and `--overhangs` changes the shelf angles.
+`--scale` scales the whole part, `--only tilt_ladders` keeps the low ramps and base for an initial surface
+test, and `--overhangs` changes the shelf angles. The base is always kept; selecting `shelves` also keeps
+the tower they attach to. The manifest reports only the features included in the exported subset.
 
 ## Recording results
 

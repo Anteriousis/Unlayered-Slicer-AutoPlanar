@@ -29,8 +29,8 @@ using Catch::Matchers::WithinAbs;
 
 namespace {
 
-// A fixed-nozzle printer characterised like the Centauri trial profile: four measured hotend faces, a
-// gantry height and a 5 degree manual ceiling. Values come from the profile under test, not from code.
+// A synthetic fixed-nozzle profile with asymmetric clearance limits and a 5 degree manual ceiling.
+// These fixture values exercise the planner; they are not measurements or a Centauri printer preset.
 DynamicPrintConfig virtual_printer_config(double max_angle = 5.)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();

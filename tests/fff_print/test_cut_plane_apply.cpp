@@ -409,7 +409,13 @@ SCENARIO("Cut-plane segments slice as complementary geometry", "[cutplanes][slic
             Slic3r::Print print;
             Model model;
             make_cube_plus_sphere(model, /*planes_enabled*/ false);
-            print.apply(model, config);
+            // Non-planar mode deliberately disables arc fitting during config normalization,
+            // even when this particular object has no planes. The positive control must use
+            // ordinary planar mode, otherwise it cannot exercise the arc-producing fixture.
+            DynamicPrintConfig planar_config = config;
+            planar_config.set_deserialize_strict({ { "enable_nonplanar", "0" } });
+            print.apply(model, planar_config);
+            REQUIRE(print.config().enable_arc_fitting.value);
             REQUIRE(print.objects().size() == 1);
             REQUIRE(! print.objects().front()->is_segment());
             const std::string gcode = export_gcode_string(print, "arc-control");
@@ -423,6 +429,7 @@ SCENARIO("Cut-plane segments slice as complementary geometry", "[cutplanes][slic
             Model model;
             make_cube_plus_sphere(model, /*planes_enabled*/ true);
             print.apply(model, config);
+            CHECK_FALSE(print.config().enable_arc_fitting.value);
             REQUIRE(print.objects().size() == 2);
             // The curved volume must really be in the non-root segment for this to mean anything.
             REQUIRE(print.objects()[1]->is_segment());

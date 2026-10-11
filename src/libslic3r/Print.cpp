@@ -3726,7 +3726,13 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
         // it (the check returns immediately). Reported through the same ConflictResult plumbing as
         // the G-code path conflicts: sidebar warning in the GUI, exit -101 in the CLI.
         // BELT_MOD: the belt machine frame shears the emitted coordinates, which this check reads as bed-frame.
-        if (! m_conflict_result && ! m_no_check && m_config.enable_nonplanar.value && ! m_config.belt_printer.value && result->tool_axes.size() > 1) {
+        // Curved bead normals vary within a single deposition pass. The legacy
+        // checker groups normal changes into independent print episodes, which
+        // is not a valid partition of a curved pass. This restricted ramp mode
+        // instead certifies every layer's directional slope and whole-solid
+        // travel against the configured envelope in PrintObject::slice().
+        const bool curved_blend=std::any_of(m_objects.begin(),m_objects.end(),[](const PrintObject* object){return bool(object->curved_field());});
+        if (! curved_blend && ! m_conflict_result && ! m_no_check && m_config.enable_nonplanar.value && ! m_config.belt_printer.value && result->tool_axes.size() > 1) {
             HotendCollisionParams hp;
             hp.envelope = HotendEnvelope::from_config(m_config);
             // A 3-axis printer never tilts its nozzle, whatever axis the chunk was tagged with.

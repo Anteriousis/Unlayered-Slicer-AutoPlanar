@@ -1111,10 +1111,11 @@ std::string PrintObject::curved_blend_error() const
         std::abs(m_config.layer_rotation_b.value)>EPSILON || std::abs(m_config.layer_rotation_c.value)>EPSILON ||
         m_config.slicing_mode.value!=SlicingMode::Regular)
         return "Curved blend requires supports and raft off, normal slicing, no make-overhang-printable and layer rotations B/C at zero.";
-    if (std::abs(m_config.xy_contour_compensation.value)>EPSILON || std::abs(m_config.xy_hole_compensation.value)>EPSILON)
-        return "Curved blend currently requires zero XY contour/hole compensation.";
-    if (pc.skirt_height.value>1 || pc.machine_max_speed_z.get_at(0)<=0.)
-        return "Curved blend requires skirt height at most one layer and a positive configured machine Z speed.";
+    if (std::abs(m_config.xy_contour_compensation.value)>EPSILON || std::abs(m_config.xy_hole_compensation.value)>EPSILON ||
+        std::abs(m_config.elefant_foot_compensation.value)>EPSILON)
+        return "Curved blend currently requires zero XY contour/hole and elephant-foot compensation.";
+    if (pc.skirt_height.value>1 || pc.draft_shield.value!=dsDisabled || pc.machine_max_speed_z.get_at(0)<=0.)
+        return "Curved blend requires skirt height at most one layer, no draft shield and a positive configured machine Z speed.";
     if (std::abs(pc.z_offset.value)>EPSILON || !m_print->shrinkage_compensation().isApprox(Vec3d::Ones(),1e-8))
         return "Curved blend currently requires zero Z offset and 100% XYZ shrinkage compensation.";
     if (pc.spiral_mode.value || pc.enable_arc_fitting.value || pc.enable_prime_tower.value ||
@@ -1122,6 +1123,8 @@ std::string PrintObject::curved_blend_error() const
         return "Curved blend requires vase, arc fitting, prime tower, mixed sublayers and timelapse motion off.";
     if (std::any_of(pc.wipe.values.begin(),pc.wipe.values.end(),[](bool v){return v;}))
         return "Curved blend currently requires Wipe while retracting off; ordinary retraction remains available.";
+    if (std::any_of(pc.adaptive_pressure_advance.values.begin(),pc.adaptive_pressure_advance.values.end(),[](bool v){return v;}))
+        return "Curved blend currently requires adaptive pressure advance off; its model does not account for varying physical bead area.";
     if (pc.gcode_remap_x.value!=RemapAxis::PosX || pc.gcode_remap_y.value!=RemapAxis::PosY || pc.gcode_remap_z.value!=RemapAxis::PosZ)
         return "Curved blend currently requires ordinary XYZ axis mapping.";
     if (!m_post_trafo_inv.linear().isApprox(Matrix3d::Identity(),1e-8) || std::abs(m_post_trafo_inv.translation().z())>1e-4)
@@ -1225,8 +1228,8 @@ void PrintObject::slice()
             // independently certified; success is never inferred from sampling.
             for (int trial=0;trial<=32;++trial) {
                 const double reference=(r.top_min+r.top_max)*.5+(r.top_max-r.top_min)*.5*trial/32.;
-                const auto field=r.field(first,reference);
                 try {
+                    const auto field=r.field(first,reference);
                     object_layers=r.schedule(*field,first,m_config.layer_height.value,
                         pc.min_layer_height.get_at(0),pc.max_layer_height.get_at(0));
                     m_curved_field=field; break;

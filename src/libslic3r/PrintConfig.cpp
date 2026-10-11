@@ -7756,6 +7756,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<SkirtType>(stCombined));
 
+    def = this->add("curved_layer_blend", coBool);
+    def->label = L("Curved layer blend (experimental)");
+    def->category = L("Others");
+    def->mode = comAdvanced;
+    def->tooltip = L("Blend a flat first layer continuously into the roof of one shallow rectangular ramp. "
+                     "Experimental: Virtual printer only, one object and copy, no cut planes, supports, modifiers or variable layer heights. "
+                     "Requires 100% infill, classic walls, no scarf seam, ironing, wipe, arcs or custom layer motion. "
+                     "The engine checks the printer layer-height and clearance limits and may reduce the layer step. "
+                     "Review the physical paths in Preview before printing.");
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("layer_rotation_b", coFloat);
     // def->gui_type = ConfigOptionDef::GUIType::f_enum_open;
     def->label    = L("Layer Rotation B");

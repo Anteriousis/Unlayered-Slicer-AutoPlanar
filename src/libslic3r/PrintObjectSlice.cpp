@@ -1,4 +1,5 @@
 #include <limits>
+#include <cctype>
 #include <boost/log/trivial.hpp>
 #include <Eigen/Dense>
 
@@ -82,7 +83,8 @@ static std::vector<ExPolygons> slice_volume(
     const ModelVolume             &volume,
     const std::vector<float>      &zs,
     const MeshSlicingParamsEx     &params,
-    const std::function<void()>   &throw_on_cancel_callback)
+    const std::function<void()>   &throw_on_cancel_callback,
+    const CurvedTransition::Field *curved_field = nullptr)
 {
     std::vector<ExPolygons> layers;
     if (! zs.empty()) {
@@ -92,6 +94,16 @@ static std::vector<ExPolygons> slice_volume(
             params2.trafo = params2.trafo * volume.get_matrix();
             if (params2.trafo.rotation().determinant() < 0.)
                 its_flip_triangles(its);
+            if (curved_field != nullptr) {
+                // The certified rectangular ramp flattens EXACTLY to a cuboid.
+                // Transform a private copy; the user's model and Prepare stay intact.
+                for (auto& v : its.vertices) {
+                    Vec3d p = params2.trafo * v.cast<double>();
+                    p.z() = curved_field->slice_z(p.x(), p.y(), p.z());
+                    v = p.cast<float>();
+                }
+                params2.trafo = Transform3d::Identity();
+            }
             layers = slice_mesh_ex(its, zs, params2, throw_on_cancel_callback);
             throw_on_cancel_callback();
         }
@@ -158,7 +170,8 @@ static std::vector<VolumeSlices> slice_volumes_inner(
     ModelVolumePtrs                                           model_volumes,
     const std::vector<PrintObjectRegions::LayerRangeRegions> &layer_ranges,
     const std::vector<float>                                 &zs,
-    const std::function<void()>                              &throw_on_cancel_callback)
+    const std::function<void()>                              &throw_on_cancel_callback,
+    const CurvedTransition::Field                            *curved_field = nullptr)
 {
 
 
@@ -267,7 +280,7 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                     }
                     out.push_back({
                         model_volume->id(),
-                        slice_volume(*model_volume, zs, params, throw_on_cancel_callback)
+                        slice_volume(*model_volume, zs, params, throw_on_cancel_callback, curved_field)
                     });
                 }
             } else {
@@ -1082,6 +1095,63 @@ void PrintObject::update_slice_frame()
     assert((m_object_to_slice * m_slice_to_object).isApprox(Transform3d::Identity(), 1e-9));
 }
 
+std::string PrintObject::curved_blend_error() const
+{
+    if (!m_config.curved_layer_blend.value) return {};
+    const auto& pc = m_print->config();
+    if (!pc.enable_nonplanar.value || !pc.virtual_5axis.value || pc.belt_printer.value)
+        return "Curved blend requires nonplanar printing enabled and a Virtual printer with belt printing off.";
+    if (m_print->objects().size()!=1 || m_instances.size()!=1 || is_segment() ||
+        m_model_object->volumes.size()!=1 || !m_model_object->volumes.front()->is_model_part() ||
+        m_model_object->has_custom_layering() || m_model_object->has_cut_planes() || m_model_object->volumes.front()->is_mm_painted())
+        return "Curved blend currently supports one rectangular ramp and one copy, without cut planes, modifiers, painting or variable layer heights.";
+    if (pc.nozzle_diameter.size()!=1 || m_print->extruders().size()!=1)
+        return "Curved blend currently supports one nozzle and one filament.";
+    if (has_support_material() || m_config.enforce_support_layers.value>0 ||
+        std::abs(m_config.layer_rotation_b.value)>EPSILON || std::abs(m_config.layer_rotation_c.value)>EPSILON ||
+        m_config.slicing_mode.value!=SlicingMode::Regular)
+        return "Curved blend requires supports and raft off, normal slicing, no make-overhang-printable and layer rotations B/C at zero.";
+    if (std::abs(m_config.xy_contour_compensation.value)>EPSILON || std::abs(m_config.xy_hole_compensation.value)>EPSILON)
+        return "Curved blend currently requires zero XY contour/hole compensation.";
+    if (pc.skirt_height.value>1 || pc.machine_max_speed_z.get_at(0)<=0.)
+        return "Curved blend requires skirt height at most one layer and a positive configured machine Z speed.";
+    if (std::abs(pc.z_offset.value)>EPSILON || !m_print->shrinkage_compensation().isApprox(Vec3d::Ones(),1e-8))
+        return "Curved blend currently requires zero Z offset and 100% XYZ shrinkage compensation.";
+    if (pc.spiral_mode.value || pc.enable_arc_fitting.value || pc.enable_prime_tower.value ||
+        pc.enable_mixed_color_sublayer.value || pc.timelapse_type.value!=tlTraditional)
+        return "Curved blend requires vase, arc fitting, prime tower, mixed sublayers and timelapse motion off.";
+    if (std::any_of(pc.wipe.values.begin(),pc.wipe.values.end(),[](bool v){return v;}))
+        return "Curved blend currently requires Wipe while retracting off; ordinary retraction remains available.";
+    if (pc.gcode_remap_x.value!=RemapAxis::PosX || pc.gcode_remap_y.value!=RemapAxis::PosY || pc.gcode_remap_z.value!=RemapAxis::PosZ)
+        return "Curved blend currently requires ordinary XYZ axis mapping.";
+    if (!m_post_trafo_inv.linear().isApprox(Matrix3d::Identity(),1e-8) || std::abs(m_post_trafo_inv.translation().z())>1e-4)
+        return "Curved blend requires the model's flat bottom on the bed, without a tilted build frame.";
+    // Custom layer code is appended as raw text outside the writer. Keep the
+    // existing harmless E reset, but never claim to transform raw XYZ movement.
+    auto harmless = [](std::string s) {
+        s.erase(std::remove_if(s.begin(),s.end(),[](unsigned char c){return std::isspace(c);}),s.end());
+        return s.empty() || s=="G92E0";
+    };
+    if (!harmless(pc.layer_change_gcode.value) || !harmless(pc.before_layer_change_gcode.value))
+        return "Curved blend supports empty layer-change code or G92 E0 only; custom layer motion is not transformed.";
+    if (!pc.time_lapse_gcode.value.empty() || pc.farthest_point_timelapse.value || !m_print->model().get_curr_plate_custom_gcodes().gcodes.empty())
+        return "Curved blend currently requires timelapse and model height-change custom G-code off.";
+    if (std::any_of(pc.extruder_offset.values.begin(),pc.extruder_offset.values.end(),[](const Vec2d& p){return !p.isZero(1e-8);}))
+        return "Curved blend currently requires zero nozzle XY offset.";
+    if (std::any_of(pc.slicing_pipeline_plugin.values.begin(),pc.slicing_pipeline_plugin.values.end(),[](const std::string& s){return !s.empty();}) ||
+        std::any_of(pc.post_process.values.begin(),pc.post_process.values.end(),[](const std::string& s){return !s.empty();}))
+        return "Curved blend currently requires slicing-pipeline and external G-code post-processing scripts off.";
+    for (size_t i=0;i<num_printing_regions();++i) {
+        const auto& rc=printing_region(i).config();
+        if (rc.sparse_infill_density.value<100.-EPSILON || rc.infill_combination.value ||
+            m_config.wall_generator.value!=PerimeterGeneratorType::Classic || rc.seam_slope_type.value!=SeamScarfType::None ||
+            rc.ironing_type.value!=IroningType::NoIroning || rc.fuzzy_skin.value!=FuzzySkinType::None ||
+            rc.zaa_enabled.value || rc.wave_overhangs.value || rc.make_overhang_printable.value)
+            return "Curved blend currently requires 100% infill, classic walls, no combined infill, scarf, ironing, fuzzy skin, Z anti-aliasing or wave overhangs.";
+    }
+    return {};
+}
+
 void PrintObject::slice()
 {
     //update the transformation UNLAYERED_MOD
@@ -1113,7 +1183,60 @@ void PrintObject::slice()
     //if we wanted to do a better approach, we would allow the "layer_height_profile" to embed the angle of the layers.
     //this means angle would be set in the slicing parameters
     std::vector<coordf_t> object_layers;
-    if (this->is_segment()) {
+    m_curved_field.reset();
+    m_curved_ramp.reset();
+    if (m_config.curved_layer_blend.value) {
+        const std::string error = this->curved_blend_error();
+        if (!error.empty()) throw SlicingError(error);
+        const ModelVolume& volume = *m_model_object->volumes.front();
+        if (its_num_open_edges(volume.mesh().its) != 0)
+            throw SlicingError("Curved blend requires a closed ramp mesh; repair the model first.");
+        const Transform3d transform = m_object_to_slice * volume.get_matrix();
+        std::vector<CurvedTransition::Ramp::Triangle> triangles;
+        triangles.reserve(volume.mesh().its.indices.size());
+        for (const auto& face : volume.mesh().its.indices) {
+            CurvedTransition::Ramp::Triangle t;
+            for (int k=0;k<3;++k) {
+                const Vec3d p = transform * volume.mesh().its.vertices[face[k]].cast<double>();
+                t[k] = {{p.x(),p.y(),p.z()}};
+            }
+            if (transform.linear().determinant()<0.) std::swap(t[1],t[2]);
+            triangles.push_back(t);
+        }
+        try {
+            m_curved_ramp = CurvedTransition::Ramp::certify(triangles);
+            const auto& r = *m_curved_ramp;
+            const auto& pc = m_print->config();
+            const double reach = std::hypot(r.xmax-r.xmin,r.ymax-r.ymin);
+            const HotendEnvelope envelope = HotendEnvelope::from_config(pc);
+            // Build-normal azimuth, opposite to the uphill roof gradient.
+            const double limit = virtual_tilt_limit_enforced_deg(envelope, pc.nonplanar_gantry_height.value,
+                pc.nonplanar_virtual_max_angle.value, reach, std::atan2(-r.gy,-r.gx));
+            if (!envelope.enabled() || pc.nonplanar_gantry_height.value<=0. || limit<=0. || r.angle_deg()>limit+1e-5)
+                throw std::invalid_argument("Curved blend roof exceeds the configured hotend/gantry/maximum-angle clearance; a measured envelope is required");
+            // Deliberately bounded first release. 10 mm is a scope restriction,
+            // NOT a measured safe nonplanar printing height.
+            const double approach = std::max(2.,std::max(pc.nonplanar_approach_distance.value,pc.nonplanar_departure_distance.value));
+            if (r.top_max>10. || r.top_max+approach>pc.printable_height.value ||
+                pc.nonplanar_virtual_max_z.value<=0. || r.top_max+approach>pc.nonplanar_virtual_max_z.value)
+                throw std::invalid_argument("Curved blend ramp/travel exceeds the experimental 10 mm part limit or configured machine Z limit");
+            const double first = m_slicing_params.first_object_layer_height;
+            // Search a bounded set of reference heights. Each candidate is
+            // independently certified; success is never inferred from sampling.
+            for (int trial=0;trial<=32;++trial) {
+                const double reference=(r.top_min+r.top_max)*.5+(r.top_max-r.top_min)*.5*trial/32.;
+                const auto field=r.field(first,reference);
+                try {
+                    object_layers=r.schedule(*field,first,m_config.layer_height.value,
+                        pc.min_layer_height.get_at(0),pc.max_layer_height.get_at(0));
+                    m_curved_field=field; break;
+                } catch (const std::invalid_argument&) { }
+            }
+            if (!m_curved_field) throw std::invalid_argument("Curved blend cannot meet the configured minimum/maximum layer heights at the requested layer step");
+            m_slicing_params.object_print_z_max = m_curved_field->reference_top_mm();
+            m_slicing_params.object_print_z_uncompensated_max = m_slicing_params.object_print_z_max;
+        } catch (const std::invalid_argument& e) { throw SlicingError(e.what()); }
+    } else if (this->is_segment()) {
         // A segment's slicing parameters are sized to its own extent (see
         // update_slicing_parameters), so validating the object's layer-height profile against that
         // shortened height would fail and silently DISCARD it -- taking any painted variable-layer
@@ -1570,7 +1693,7 @@ void PrintObject::slice_volumes()
 
         objSliceByVolume = slice_volumes_inner(
             print->config(), this->config(), newTrafo,
-            this->model_object()->volumes, m_shared_regions->layer_ranges, slice_zs, throw_on_cancel_callback);
+            this->model_object()->volumes, m_shared_regions->layer_ranges, slice_zs, throw_on_cancel_callback, m_curved_field.get());
 
         // Declarative cut planes: confine this PrintObject's slices to its segment. Clipping a
         // solid by half-spaces and then slicing at z is identical to slicing the full solid and

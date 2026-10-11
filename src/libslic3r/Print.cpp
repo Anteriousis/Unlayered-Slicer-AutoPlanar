@@ -299,6 +299,12 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
     bool invalidated = false;
 
     for (const t_config_option_key &opt_key : opt_keys) {
+        // Curved geometry/schedule feasibility depends on these printer limits.
+        // Keep ordinary prints on their existing export-only invalidation path.
+        if (std::any_of(m_objects.begin(),m_objects.end(),[](const PrintObject* o){return o->config().curved_layer_blend.value;}) &&
+            (opt_key.rfind("nonplanar_",0)==0 || opt_key=="virtual_5axis" || opt_key=="min_layer_height" ||
+             opt_key=="max_layer_height" || opt_key=="printable_height"))
+            osteps.emplace_back(posSlice);
         if (steps_gcode.find(opt_key) != steps_gcode.end()) {
             // These options only affect G-code export or they are just notes without influence on the generated G-code,
             // so there is nothing to invalidate.
@@ -346,6 +352,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             // to invalidate posSlice: the generic fallback below only calls invalidate_all_steps(),
             // which touches Print-level steps and leaves every PrintObject's slices stale.
             || opt_key == "enable_nonplanar"
+            || opt_key == "min_layer_height"
+            || opt_key == "max_layer_height"
             // BELT_MOD -- the belt tilt is every un-cut object's slicing rotation.
             || opt_key == "belt_printer"
             || opt_key == "belt_slice_rotation"
@@ -1423,6 +1431,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
+
+    for (const PrintObject* object : m_objects) {
+        const std::string error = object->curved_blend_error();
+        if (!error.empty()) return {error,object->model_object(),"curved_layer_blend"};
+        if (object->config().curved_layer_blend.value)
+            warn(L("Curved layer blend is experimental. Its limits use the configured envelope and layer-height range; successful slicing does not establish physical clearance or bonding."),
+                 "curved_layer_blend",object->model_object());
+    }
 
     // Orca: a gradient mixed filament only renders its gradient with "Mixed color sublayer" on;
     // without it ToolOrdering::resolve_mixed_filaments prints one whole component per layer and

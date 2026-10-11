@@ -16,6 +16,7 @@ add_executable(${_TEST_NAME}_tests
     test_config.cpp
     test_cut_plane_segmentation.cpp
     test_curved_transition.cpp
+    test_curved_ramp.cpp
     test_segment_support_bounds.cpp
     test_config_variant_expansion.cpp
     test_toolordering_nozzle_group.cpp

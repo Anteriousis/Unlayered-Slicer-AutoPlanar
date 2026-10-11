@@ -1169,7 +1169,7 @@ static std::vector<std::string> s_Preset_print_options{
     "support_interface_pattern",
     "support_interface_spacing",
     "support_interface_loop_pattern",
-    "test_input", "layer_rotation_b", "layer_rotation_c", "print_group",
+    "test_input", "layer_rotation_b", "layer_rotation_c", "curved_layer_blend", "print_group",
     "support_direction", "support_direction_b", "support_direction_c", "support_direction_max_lean", "support_section_overlap",
     "support_top_z_distance",
     "support_on_build_plate_only",
@@ -1392,7 +1392,7 @@ static std::vector<std::string> s_Preset_print_options{
     "zaa_min_z",
     "ironing_expansion",
     // Multi-Axis
-    "test_input", "layer_rotation_b", "layer_rotation_c", "print_group",
+    "test_input", "layer_rotation_b", "layer_rotation_c", "curved_layer_blend", "print_group",
     "support_direction", "support_direction_b", "support_direction_c", "support_direction_max_lean", "support_section_overlap",
 };
 

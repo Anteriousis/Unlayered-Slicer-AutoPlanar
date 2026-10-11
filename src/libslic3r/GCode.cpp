@@ -7241,6 +7241,14 @@ LayerResult GCode::process_layer(
                 m_config.apply(instance_to_print.print_object.config(), true);
                 m_layer = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
+                if (instance_to_print.print_object.curved_field()) {
+                    const PrintObject& curved_object=instance_to_print.print_object;
+                    const Vec2d curved_origin=unscale(curved_object.instances()[instance_to_print.instance_id].shift) -
+                        Vec2d(m_writer.extruder_offset_xy().x(),m_writer.extruder_offset_xy().y());
+                    m_writer.set_curved_blend(curved_object.curved_field(),*curved_object.curved_ramp(),curved_origin,
+                        std::max(2.,std::max(m_config.nonplanar_approach_distance.value,m_config.nonplanar_departure_distance.value)),
+                        print.config().machine_max_speed_z.get_at(0));
+                }
                 if (m_config.reduce_crossing_wall)
                     m_avoid_crossing_perimeters.init_layer(*m_layer);
 
@@ -9576,6 +9584,12 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
     }
 
     double F = speed * 60;  // convert mm/sec to mm/min
+    if (m_writer.has_curved_blend()) {
+        // The certified prism has no geometric overhangs. Do not route its
+        // physical paths through the ordinary XY-only overhang speed splitter.
+        variable_speed=false;
+        new_points.clear();
+    }
     
     // Orca: Dynamic PA
     // If adaptive PA is enabled, by default evaluate PA on all extrusion moves
@@ -9862,6 +9876,19 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
             // ORCA: End of adaptive PA code segment
         }
         
+        if (m_writer.has_curved_blend()) {
+            if (is_bridge(path.role()) || path.z_contoured || sloped!=nullptr ||
+                std::abs(path.height-m_layer->height)>1e-4)
+                throw RuntimeError("Curved blend encountered an unsupported bridge, scarf or combined-height path");
+            m_writer.set_curved_path(m_nominal_z,path.width,path.height);
+            const double multiplier=m_writer.curved_max_flow_scale();
+            if (filament_max_volumetric_speed>0.)
+                F=std::min(F,60.*filament_max_volumetric_speed/(_mm3_per_mm*multiplier));
+            // Machine Z component is bounded by the certified roof angle.
+            const double slope=m_layer->object()->curved_ramp()->slope();
+            if (slope>EPSILON)
+                F=std::min(F,60.*m_print->config().machine_max_speed_z.get_at(0)*std::sqrt(1.+slope*slope)/slope);
+        }
         gcode += m_writer.set_speed(F, "", comment);
         {
             if (m_enable_cooling_markers) {

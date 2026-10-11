@@ -18,6 +18,7 @@ on:
      - 'scripts/flatpak/**'
      - 'scripts/msix/**'
      - 'tests/**'
+     - 'tools/multiplanar_test_totem/**'
 
   pull_request:
     branches:
@@ -40,6 +41,7 @@ on:
      - 'scripts/flatpak/**'
      - 'scripts/msix/**'
      - 'tests/**'
+     - 'tools/multiplanar_test_totem/**'
 
 
   workflow_dispatch: # allows for manual dispatch
@@ -55,6 +57,18 @@ concurrency:
   
 
 jobs:
+  test_model_generator:
+    name: MCT-1 geometry tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Test generated calibration geometry
+        run: |
+          python3 -m venv .model-test-venv
+          .model-test-venv/bin/python -m pip install -r tools/multiplanar_test_totem/requirements.txt
+          .model-test-venv/bin/python -m unittest discover -s tools/multiplanar_test_totem -p 'test_*.py' -v
+
   # build_win.bat ships a test suite. Run it before the Windows builds.
   check_build_script:
     name: Windows build script tests

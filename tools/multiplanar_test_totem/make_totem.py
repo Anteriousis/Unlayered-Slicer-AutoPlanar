@@ -196,12 +196,15 @@ def build(p):
 
     if p.only:
         keep = {x.strip() for x in p.only.split(",") if x.strip()}
+        # Shelves root into the tower, not the base. Preserve that foundation in a subset.
+        if "shelves" in keep:
+            keep.add("tower_dome")
         modules = {k: v for k, v in modules.items() if k in keep or k == "base"}
     totem = trimesh.boolean.union(list(modules.values()), engine="manifold")
     return totem, modules
 
 
-def manifest(p, totem):
+def manifest(p, totem, modules):
     s = p.scale
     sides = ["+X", "+Y", "-X", "-Y"]
     rungs = []
@@ -212,15 +215,18 @@ def manifest(p, totem):
                           "note": "build normal leans toward the tower; layers climb outward"})
     shelves = [{"face": sides[i // 2], "level": ["low", "high"][i % 2], "underside_deg_from_horizontal": a}
                for i, a in enumerate(p.overhangs[:8])]
+    corners = {"+X+Y": "fork", "-X+Y": "arch", "-X-Y": "seam_witness", "+X-Y": "cube"}
     return {
         "name": "Multiplanar Calibration Totem (MCT-1)",
         "scale": s,
         "bounds_mm": np.round(totem.bounds, 3).tolist(),
         "volume_mm3": round(float(totem.volume), 1),
         "watertight": bool(totem.is_watertight),
-        "tilt_rungs": rungs,
-        "overhang_shelves": shelves,
-        "corners": {"+X+Y": "fork", "-X+Y": "arch", "-X-Y": "seam_witness", "+X-Y": "cube"},
+        "connected_bodies": int(totem.body_count),
+        "modules": list(modules),
+        "tilt_rungs": rungs if "tilt_ladders" in modules else [],
+        "overhang_shelves": shelves if "shelves" in modules else [],
+        "corners": {side: module for side, module in corners.items() if module in modules},
     }
 
 
@@ -276,7 +282,7 @@ def main():
     totem.export(os.path.join(p.out, "MCT-1_totem.stl"))
     for name, m in modules.items():
         m.export(os.path.join(p.out, f"MCT-1_module_{name}.stl"))
-    info = manifest(p, totem)
+    info = manifest(p, totem, modules)
     with open(os.path.join(p.out, "MCT-1_manifest.json"), "w") as f:
         json.dump(info, f, indent=1)
     if p.preview:

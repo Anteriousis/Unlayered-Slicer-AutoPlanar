@@ -115,6 +115,7 @@ struct PredictedMetrics
     double support_volume_mm3  { 0. }; // overhang area x column length to material/bed below (proxy)
     double terrace_length_mm   { 0. }; // total length of layer-step edges on upward surfaces
     double stepped_area_mm2    { 0. }; // upward area that is neither vertical nor flat in its frame
+    double upward_area_mm2     { 0. }; // all upward-facing surface below wall steepness (the finish reference)
     int    layers              { 0 };  // summed over segments
     int    transitions         { 0 };  // non-root segments
     double effort_index_s      { 0. }; // relative effort, NOT a time estimate (see evaluate())

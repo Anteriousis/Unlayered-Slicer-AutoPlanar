@@ -107,7 +107,7 @@ TEST_CASE("AutoPlanes reads the machine capability from the profile", "[autoplan
     }
     SECTION("rotary axes: recognised, not planned for") {
         DynamicPrintConfig c = virtual_printer_config();
-        c.set_deserialize_strict({ { "axis_selection", "BC" } });
+        c.set_deserialize_strict({ { "axis_selection", "bc" } });
         const auto m = AutoPlanes::MachineCapability::from_config(c);
         CHECK(m.kind == AutoPlanes::MachineKind::Rotary5Axis);
         CHECK_FALSE(m.can_tilt);
@@ -207,8 +207,10 @@ TEST_CASE("AutoPlanes on a shallow ramp", "[autoplanes]")
         INFO(AutoPlanes::to_text(r));
         REQUIRE(r.chosen >= 0);
         const auto &p = r.chosen_candidate()->planes.back();
-        // Mirrored in X, the ramp rises toward -X, so the build normal leans toward -X.
-        CHECK(p.world_build_normal.x() < 0.);
+        // Mirrored in X, the ramp rises toward -X. A slope's surface normal leans AWAY from the way it
+        // rises, and the build direction follows the surface normal, so it leans toward +X -- the mirror
+        // image of the unmirrored part, whose build direction leans toward -X.
+        CHECK(p.world_build_normal.x() > 0.);
         check_within_limits(*r.chosen_candidate());
         // The object-local plane maps back to the reported world direction.
         CHECK((AutoPlanes::normal_to_world(mo->instances.front()->get_matrix(), p.plane.effective_build_normal()) - p.world_build_normal).norm() < 1e-9);
@@ -272,12 +274,31 @@ TEST_CASE("AutoPlanes on overhangs, curved tops, arms and a bent rod", "[autopla
     SECTION("an overhang a little flatter than the threshold is tilted past it") {
         Model model;
         ModelObject *mo = add_part(model, overhang_coupon(27.));
-        const auto r = plan_of(*mo, config);
+        AutoPlanes::Options supports;
+        supports.preference = AutoPlanes::Preference::Supports;
+        const auto r = plan_of(*mo, config, supports);
         INFO(AutoPlanes::to_text(r));
         REQUIRE(r.planar.predicted.support_volume_mm3 > 10.);
         REQUIRE(r.chosen >= 0);
         check_within_limits(*r.chosen_candidate());
         CHECK(r.chosen_candidate()->predicted.support_volume_mm3 < 0.5 * r.planar.predicted.support_volume_mm3);
+        // The coupon's flat top turns into a staircase on tilted layers, and the plan says so.
+        CHECK(r.chosen_candidate()->predicted.terrace_length_mm > r.planar.predicted.terrace_length_mm);
+    }
+    SECTION("balanced weighs the support saved against the flat top it steps") {
+        Model model;
+        ModelObject *mo = add_part(model, overhang_coupon(27.));
+        const auto r = plan_of(*mo, config);
+        INFO(AutoPlanes::to_text(r));
+        // Either answer is legitimate; what matters is that the candidate's net score reflects both terms.
+        REQUIRE_FALSE(r.candidates.empty());
+        const auto &best = r.candidates.front();
+        CHECK(best.predicted.support_volume_mm3 < r.planar.predicted.support_volume_mm3);
+        CHECK(best.predicted.terrace_length_mm > r.planar.predicted.terrace_length_mm);
+        // The stepped top is charged: the net score is below what the support saving alone would give.
+        const double support_gain = (r.planar.predicted.support_volume_mm3 - best.predicted.support_volume_mm3) /
+                                    r.planar.predicted.support_volume_mm3;
+        CHECK(best.net_benefit < support_gain - 0.05);
     }
     SECTION("an overhang far flatter than the threshold cannot be cured by 5 degrees") {
         Model model;
@@ -303,7 +324,9 @@ TEST_CASE("AutoPlanes on overhangs, curved tops, arms and a bent rod", "[autopla
     SECTION("bracket arms leaning both ways") {
         Model model;
         ModelObject *mo = add_part(model, arm_bracket(27.));
-        const auto r = plan_of(*mo, config);
+        AutoPlanes::Options supports;
+        supports.preference = AutoPlanes::Preference::Supports;
+        const auto r = plan_of(*mo, config, supports);
         INFO(AutoPlanes::to_text(r));
         REQUIRE(r.chosen >= 0);
         const auto &c = *r.chosen_candidate();
@@ -392,4 +415,48 @@ TEST_CASE("AutoPlanes preserves manual planes and round-trips", "[autoplanes]")
         release_PlateData_list(plates);
         delete plate;
     }
+}
+
+// Regression: support of a section whose floor is TILTED in its own slice frame (a horizontal cut under
+// layers tilted by a build-direction override) must be handed down to the section below everywhere it
+// lands on that floor -- not only in the strip where the floor is lowest. Before the fix the hand-off
+// sampled a fixed two-layer window, the parent printed no column under the rest, and the child's
+// support started in mid-air (reproduced on the saved Centauri project: gaps up to 2.5 mm).
+TEST_CASE("Tilted-floor section support has a foundation", "[autoplanes][cascade]")
+{
+    DynamicPrintConfig config = virtual_printer_config();
+    config.set_deserialize_strict({ { "support_threshold_angle", "30" }, { "support_type", "normal(auto)" },
+                                    { "support_on_build_plate_only", "0" }, { "enable_arc_fitting", "0" } });
+    Model model;
+    // 15 deg overhang: still below the 30 deg threshold after a 5 deg tilt, so the upper section needs
+    // support, and its support has to continue down through the lower section to the bed.
+    ModelObject *mo = add_part(model, overhang_coupon(15., 10.));
+    const Transform3d T = mo->instances.front()->get_matrix();
+    CutPlane cp;
+    cp.point            = T.inverse() * Vec3d(128., 128., 2.);
+    cp.normal           = AutoPlanes::normal_to_local(T, Vec3d::UnitZ());
+    const double a      = 5. * PI / 180.;
+    cp.build_normal     = AutoPlanes::normal_to_local(T, Vec3d(std::sin(a), 0., std::cos(a)));
+    cp.has_build_normal = true;
+    mo->cut_planes.enabled = true;
+    mo->cut_planes.planes  = { cp };
+
+    Print print;
+    print.apply(model, config);
+    REQUIRE(print.objects().size() == 2);
+    INFO("validate: " << print.validate().string);
+    REQUIRE(print.validate().string.empty());
+    print.process();
+    ScopedTemporaryFile tmp(".gcode");
+    GCodeProcessorResult result;
+    print.export_gcode(tmp.string(), &result, nullptr);
+
+    MultiplanarAuditParams ap;
+    const MultiplanarAuditResult audit = audit_multiplanar_toolpaths(result, tmp.string(), ap);
+    INFO(audit.to_text());
+    REQUIRE(audit.support.samples > 100);
+    // A stair step of up to half a layer where tilted support meets flat support is expected; a
+    // column missing underneath shows up as a gap of millimetres.
+    CHECK(audit.support.worst_gap_mm < 0.3);
+    CHECK(audit.rotary_words == 0);   // fixed-nozzle output carries no rotary axis words
 }

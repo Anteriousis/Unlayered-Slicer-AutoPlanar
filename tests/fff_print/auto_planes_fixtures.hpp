@@ -76,10 +76,13 @@ inline indexed_triangle_set curved_top_block()
 
 // Overhang coupon: solid foot for x < 15, then the underside rises at `overhang_deg` from horizontal
 // out to x = 45, under a flat top. The rising underside needs support below the threshold angle.
+// The coupon ends exactly where the underside reaches top - 2, so the whole underside is one inclined
+// face -- no flat ceiling that no tilt could cure.
 inline indexed_triangle_set overhang_coupon(double overhang_deg = 26., double top = 10.)
 {
-    const double t = std::tan(overhang_deg * kPi / 180.);
-    return heightfield_block(45., 20., 45, [top](double) { return top; },
+    const double t   = std::tan(overhang_deg * kPi / 180.);
+    const double len = 15. + (top - 2.) / t;
+    return heightfield_block(len, 20., int(std::ceil(len)), [top](double) { return top; },
                              [t, top](double x) { return x < 15. ? 0. : std::min(top - 2., (x - 15.) * t); });
 }
 

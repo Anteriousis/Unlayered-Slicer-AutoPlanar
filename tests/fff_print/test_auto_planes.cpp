@@ -423,6 +423,83 @@ TEST_CASE("AutoPlanes preserves manual planes and round-trips", "[autoplanes]")
     }
 }
 
+TEST_CASE("AutoPlanes evaluates add and replace with the intended plane order", "[autoplanes]")
+{
+    const DynamicPrintConfig config = virtual_printer_config();
+    Model model;
+    ModelObject *mo = add_part(model, shallow_ramp(4.));
+    const Transform3d T = mo->instances.front()->get_matrix();
+    CutPlane manual;
+    manual.point = T.inverse() * Vec3d(128., 128., 1.5);
+    manual.normal = AutoPlanes::normal_to_local(T, Vec3d::UnitZ());
+    mo->cut_planes.enabled = true;
+    mo->cut_planes.user_ordered = true;
+    mo->cut_planes.planes = { manual };
+
+    AutoPlanes::Options options;
+    options.max_planes = 1;
+    SECTION("adding evaluates the existing manual order") {
+        const auto result = plan_of(*mo, config, options);
+        REQUIRE(result.existing.has_value());
+        CHECK(result.existing->user_ordered);
+        REQUIRE_FALSE(result.candidates.empty());
+        for (const auto &candidate : result.candidates) {
+            CHECK(candidate.user_ordered);
+            if (! candidate.feasible) continue;
+            REQUIRE(candidate.planes.size() == 2);
+            CHECK(candidate.planes.front().from_existing);
+            const auto stack = AutoPlanes::stack_for(mo->cut_planes, candidate, true);
+            CHECK(stack.user_ordered);
+            CHECK(stack.planes.front() == manual);
+        }
+    }
+    SECTION("replacing plans from scratch in automatic order") {
+        options.keep_existing = false;
+        const auto result = plan_of(*mo, config, options);
+        REQUIRE_FALSE(result.candidates.empty());
+        for (const auto &candidate : result.candidates) {
+            CHECK_FALSE(candidate.user_ordered);
+            if (! candidate.feasible) continue;
+            REQUIRE(candidate.planes.size() == 1);
+            CHECK_FALSE(candidate.planes.front().from_existing);
+            const auto stack = AutoPlanes::stack_for(mo->cut_planes, candidate, false);
+            CHECK_FALSE(stack.user_ordered);
+            REQUIRE(stack.planes.size() == 1);
+            CHECK(stack.planes.front() == candidate.planes.front().plane);
+        }
+    }
+    SECTION("a zero new-plane budget keeps the current setup") {
+        options.max_planes = 0;
+        const auto result = plan_of(*mo, config, options);
+        CHECK(result.chosen == -1);
+        CHECK(result.candidates.empty());
+        CHECK(result.existing.has_value());
+    }
+}
+
+TEST_CASE("AutoPlanes honors cancellation before work and during final selection", "[autoplanes]")
+{
+    const DynamicPrintConfig config = virtual_printer_config();
+    Model model;
+    ModelObject *mo = add_part(model, shallow_ramp(4.));
+    AutoPlanes::Options options;
+    options.skeleton = AutoPlanes::Options::Skeleton::Off;
+    AutoPlanes::Progress progress;
+    bool canceled = false;
+    progress.canceled = [&] { return canceled; };
+    SECTION("already canceled") {
+        canceled = true;
+        progress.report = [](int, const std::string &) { FAIL("A canceled request must not start work"); };
+    }
+    SECTION("canceled while choosing") {
+        progress.report = [&](int percent, const std::string &) { if (percent == 95) canceled = true; };
+    }
+    const auto result = AutoPlanes::plan(*mo, mo->instances.front()->get_matrix(), config, options, &progress);
+    CHECK(result.canceled);
+    CHECK(result.chosen == -1);
+    CHECK(result.chosen_candidate() == nullptr);
+}
+
 // Regression: support of a section whose floor is TILTED in its own slice frame (a horizontal cut under
 // layers tilted by a build-direction override) must be handed down to the section below everywhere it
 // lands on that floor -- not only in the strip where the floor is lowest. Before the fix the hand-off

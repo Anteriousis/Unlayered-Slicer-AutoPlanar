@@ -99,7 +99,7 @@ struct Options
     // Net benefit (fraction, see Candidate::net_benefit) a plan must reach before it replaces
     // planar printing. Below it the answer is "keep planar".
     double     min_net_benefit { 0.10 };
-    int        max_planes      { 2 };
+    int        max_planes      { 2 }; // maximum new planes; existing manual planes do not count
     // Branch analysis: Auto runs the skeleton only on parts that look branched and are small enough
     // for mean-curvature flow to finish quickly; On forces it; Off never runs it.
     enum class Skeleton { Off, Auto, On } skeleton { Skeleton::Auto };
@@ -140,6 +140,7 @@ struct Candidate
 {
     std::string               name;
     std::vector<PlannedPlane> planes;   // empty == planar baseline
+    bool                     user_ordered { false }; // the ordering used to evaluate this partition
     PredictedMetrics          predicted;
     bool                      feasible { true };
     std::vector<std::string>  rejections;  // why it cannot be printed on this machine (feasible == false)
@@ -181,7 +182,7 @@ PlanResult plan(const ModelObject &object, const Transform3d &instance_trafo, co
 // for the planar baseline, the user's existing plan, and by tests.
 Candidate evaluate(const ModelObject &object, const Transform3d &instance_trafo, const MachineCapability &machine,
                    const ProcessParams &process, const std::vector<CutPlane> &planes, const std::string &name,
-                   const std::vector<bool> &from_existing = {});
+                   const std::vector<bool> &from_existing = {}, bool user_ordered = false);
 
 // The stack to store when the user accepts `candidate`: its planes, enabled. With keep_existing the
 // object's current planes are kept (candidates are evaluated with them included); otherwise they

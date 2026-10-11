@@ -10,6 +10,8 @@ add_executable(${_TEST_NAME}_tests
 	test_hotend_collision.cpp
 	test_virtual_tilt_limit.cpp
 	test_auto_planes.cpp
+	test_auto_planes_stack.cpp
+	test_multiplanar_audit.cpp
 	auto_planes_fixtures.hpp
 	test_max_layer_z_multiplanar.cpp
 	test_segment_support_cascade.cpp

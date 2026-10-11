@@ -35,10 +35,25 @@ struct AutoPlanesJobState
     AutoPlanes::PlanResult  result;
 
     // Identity of the request: the object and instance it was planned for, and the cut-plane stack
-    // it started from. A result is applied only if all three still match.
+    // it started from, including placement and instance identity. All must still match when applied.
     ObjectID      source_id;
     int           instance_idx{0};
+    ObjectID      instance_id;
+    Transform3d   source_trafo { Transform3d::Identity() };
     CutPlaneStack source_stack;
+    bool          keep_existing{true};
+
+    bool matches(const ModelObject *object, int instance) const
+    {
+        if (object != nullptr && ! object->instances.empty() &&
+            (instance < 0 || size_t(instance) >= object->instances.size()))
+            instance = 0; // same fallback as the gizmo's instance_matrix() and start_auto_planes()
+        return object != nullptr && object->id() == source_id && instance == instance_idx &&
+               instance >= 0 && size_t(instance) < object->instances.size() &&
+               object->instances[size_t(instance)]->id() == instance_id &&
+               object->instances[size_t(instance)]->get_matrix().isApprox(source_trafo, 0.) &&
+               object->cut_planes == source_stack;
+    }
 
     std::string stage_copy() { std::lock_guard<std::mutex> lk(mtx); return stage; }
 };

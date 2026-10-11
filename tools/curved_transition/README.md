@@ -53,7 +53,7 @@ Alternatively `build_probe.cmd <separate-output-directory>` uses this host's exi
 
 ## Integration requirements
 
-These are the requirements identified by the original geometry experiment. See [ENGINE.md](ENGINE.md) for what the narrow rectangular-ramp integration implements and what remains unsupported.
+These are the requirements identified by the original geometry experiment. See [ENGINE.md](ENGINE.md) for the native mesh/plane transition integration and its current planning limits.
 
 1. Extract and verify a height-field domain from actual model geometry; reject unsupported topology. Apply instance/volume transforms correctly and establish domain-wide bounds. The first milestone should support one bed-mounted prism with a shallow roof and no supports, modifiers or cut-plane stack.
 2. Inverse-map the actual solid before slicing. Refine mesh facets where the nonlinear map curves them and bound the resulting surface error. Slicing an ordinary planar solid and changing only output Z is insufficient.

@@ -7242,7 +7242,7 @@ LayerResult GCode::process_layer(
                     const PrintObject& curved_object=instance_to_print.print_object;
                     const Vec2d curved_origin=unscale(curved_object.instances()[instance_to_print.instance_id].shift) -
                         Vec2d(m_writer.extruder_offset_xy().x(),m_writer.extruder_offset_xy().y());
-                    m_writer.set_curved_blend(curved_object.curved_field(),*curved_object.curved_ramp(),curved_origin,
+                    m_writer.set_curved_blend(curved_object.curved_field(),*curved_object.curved_domain(),curved_origin,
                         std::max(2.,std::max(m_config.nonplanar_approach_distance.value,m_config.nonplanar_departure_distance.value)),
                         print.config().machine_max_speed_z.get_at(0));
                 }
@@ -10013,7 +10013,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
             if (filament_max_volumetric_speed>0.)
                 F=std::min(F,60.*filament_max_volumetric_speed/(_mm3_per_mm*multiplier));
             // Machine Z component is bounded by the certified roof angle.
-            const double slope=m_layer->object()->curved_ramp()->slope();
+            const double slope=m_layer->object()->curved_domain()->slope();
             if (slope>EPSILON)
                 F=std::min(F,60.*m_print->config().machine_max_speed_z.get_at(0)*std::sqrt(1.+slope*slope)/slope);
         }

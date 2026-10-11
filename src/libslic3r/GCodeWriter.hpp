@@ -123,7 +123,7 @@ public:
     //BBS: set offset for gcode writer
     void set_xy_offset(double x, double y) { m_x_offset = x; m_y_offset = y; }
     void set_curved_blend(std::shared_ptr<const CurvedTransition::Field> field,
-                          const CurvedTransition::Ramp& ramp, const Vec2d& origin,
+                          const CurvedTransition::ModelDomain& domain, const Vec2d& origin,
                           double travel_clearance, double z_speed);
     bool has_curved_blend() const { return bool(m_curved_field); }
     void set_curved_path(double w, double width, double height);
@@ -237,7 +237,7 @@ public:
     std::string curved_travel(const Vec3d& physical_target, const std::string& comment);
     std::string curved_extrude(const Vec3d& slice_target, double dE, const std::string& comment, bool no_extrusion);
     std::shared_ptr<const CurvedTransition::Field> m_curved_field;
-    std::optional<CurvedTransition::Ramp> m_curved_ramp;
+    std::optional<CurvedTransition::ModelDomain> m_curved_domain;
     Vec2d m_curved_origin = Vec2d::Zero(); // same placed frame as point_to_gcode, BEFORE plate offset
     double m_curved_safe_z=0., m_curved_z_speed=0., m_curved_w=0., m_curved_width=0., m_curved_height=0.;
 	// Extruders are sorted by their ID, so that binary search is possible.

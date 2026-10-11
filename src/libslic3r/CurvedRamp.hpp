@@ -21,6 +21,7 @@ struct Ramp {
     double roof(double x, double y) const { return intercept + gx*x + gy*y; }
     double slope() const { return std::hypot(gx, gy); }
     double angle_deg() const { return std::atan(slope()) * 180. / 3.14159265358979323846; }
+    ModelDomain domain() const { return {xmin,xmax,ymin,ymax,top_max,slope()}; }
 
     static Ramp certify(const std::vector<Triangle>& triangles)
     {
@@ -99,7 +100,7 @@ struct Ramp {
         if (!std::isfinite(requested) || requested<=0. || min_h<=0. || max_h<min_h || first<min_h || first>max_h)
             throw std::invalid_argument("Curved blend needs explicit valid printer minimum/maximum layer heights");
         const double remaining=f.reference_top_mm()-first;
-        const double lo=min_h*f.jacobian_max()*std::sqrt(1.+slope()*slope());
+        const double lo=min_h*f.jacobian_max()*std::sqrt(1.+f.slope_bound()*f.slope_bound());
         const double hi=std::min(requested,max_h*f.jacobian_min());
         if (hi<lo || remaining<=0.) throw std::invalid_argument("Curved blend cannot meet the configured layer-height range; use a taller or shorter ramp");
         const int count=int(std::ceil(remaining/hi));

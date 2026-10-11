@@ -7685,9 +7685,10 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Curved layer blend (experimental)");
     def->category = L("Others");
     def->mode = comAdvanced;
-    def->tooltip = L("Blend a flat first layer continuously into the roof of one shallow rectangular ramp. "
-                     "Experimental: Virtual printer only, one object and copy, no cut planes, supports, modifiers or variable layer heights. "
-                     "Requires 100% infill, classic walls, no scarf seam, ironing, wipe, arcs or custom layer motion. "
+    def->tooltip = L("Blend layer directions continuously through the selected nonintersecting, height-ordered planes, slicing the original closed mesh without separate cut sections. "
+                     "With no planes, a rectangular ramp can blend from its flat foundation into its roof. "
+                     "Experimental: Virtual printer only, one object and copy, no supports, modifiers or variable layer heights. "
+                     "Requires classic walls, no scarf seam, ironing, wipe, arcs, bridge paths or custom layer motion. "
                      "The engine checks the printer layer-height and clearance limits and may reduce the layer step. "
                      "Review the physical paths in Preview before printing.");
     def->set_default_value(new ConfigOptionBool(false));

@@ -8,10 +8,12 @@
 
 namespace Slic3r::CurvedTransition {
 
-// Geometry-only research kernel. It is deliberately NOT a G-code transform:
-// an eventual backend must slice the inverse-mapped solid AND map its paths back,
-// then recompute flow, contact, travel and collision checks in physical coordinates.
-// No GUI/config integration or machine safety claim is made by this header.
+// Coordinate field used by native mesh slicing and physical path emission.
+// Geometry bounds are separate from machine calibration and material validation.
+struct ModelDomain {
+    double xmin, xmax, ymin, ymax, top_max, slope_max;
+    double slope() const { return slope_max; }
+};
 struct Options {
     bool enabled = false;
     double flat_height_mm = 0.2;
@@ -68,8 +70,13 @@ public:
         m_slope_max = std::tan(m_options.max_slope_deg * pi / 180.);
     }
 
-    bool enabled() const { return m_options.enabled; }
-    double reference_top_mm() const { return m_options.reference_top_mm; }
+    virtual ~Field() = default;
+    virtual bool enabled() const { return m_options.enabled; }
+    virtual double reference_top_mm() const { return m_options.reference_top_mm; }
+    virtual double slope_bound() const { return m_slope_max; }
+    // Hessian norm of the inverse map over the physical model. Zero is reserved
+    // for a boundary known to map exactly (the certified ramp).
+    virtual double inverse_hessian_bound() const { return 0.; }
 
     // Contract: the callback's height bounds and Lipschitz slope bound must be
     // established over the WHOLE model domain by its caller. Checking individual
@@ -89,7 +96,7 @@ public:
     }
 
     // Coordinates of the physical solid in a flat slicing domain. XY is unchanged.
-    double slice_z(double x, double y, double z) const
+    virtual double slice_z(double x, double y, double z) const
     {
         require_finite(z);
         if (!m_options.enabled || z <= m_options.flat_height_mm)
@@ -101,7 +108,7 @@ public:
 
     // Inverse: constant slice_z becomes a genuinely curved physical layer even
     // for a linear wedge roof, since its transition depth depends on XY.
-    double world_z(double x, double y, double w) const
+    virtual double world_z(double x, double y, double w) const
     {
         require_finite(w);
         if (!m_options.enabled || w <= m_options.flat_height_mm)
@@ -120,7 +127,7 @@ public:
         return lo + (hi - lo) * 0.5;
     }
 
-    Gradient gradient(double x, double y, double w) const
+    virtual Gradient gradient(double x, double y, double w) const
     {
         require_finite(w);
         if (!m_options.enabled || w <= m_options.flat_height_mm)
@@ -136,16 +143,16 @@ public:
         return {r.dx * factor, r.dy * factor};
     }
 
-    double jacobian_min() const { return m_jacobian_min; }
-    double jacobian_max() const { return m_jacobian_max; }
+    virtual double jacobian_min() const { return m_jacobian_min; }
+    virtual double jacobian_max() const { return m_jacobian_max; }
 
     SpacingBounds spacing_bounds(double step) const
     {
         if (!finite(step) || step <= 0.)
             throw std::invalid_argument("Layer step must be finite and positive");
-        const double min_vertical = step / m_jacobian_max;
-        return {min_vertical, step / m_jacobian_min,
-                min_vertical / std::sqrt(1. + m_slope_max * m_slope_max)};
+        const double min_vertical = step / jacobian_max();
+        return {min_vertical, step / jacobian_min(),
+                min_vertical / std::sqrt(1. + slope_bound() * slope_bound())};
     }
 
     // Geometry/process feasibility ONLY. Limits are supplied by a calibrated

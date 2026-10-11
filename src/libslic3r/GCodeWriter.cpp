@@ -42,13 +42,13 @@ static inline Vec3d apply_test_rotation2(const Vec3d& v, const Transform3d& traf
 bool GCodeWriter::full_gcode_comment = true;
 
 void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field> field,
-                                  const CurvedTransition::Ramp& ramp, const Vec2d& origin,
+                                  const CurvedTransition::ModelDomain& domain, const Vec2d& origin,
                                   double travel_clearance, double z_speed)
 {
     if (!field || travel_clearance<=0. || z_speed<=0.)
         throw RuntimeError("Curved blend needs positive travel clearance and Z speed");
-    m_curved_field=std::move(field); m_curved_ramp=ramp; m_curved_origin=origin;
-    m_curved_safe_z=ramp.top_max+travel_clearance; m_curved_z_speed=z_speed;
+    m_curved_field=std::move(field); m_curved_domain=domain; m_curved_origin=origin;
+    m_curved_safe_z=domain.top_max+travel_clearance; m_curved_z_speed=z_speed;
 }
 
 void GCodeWriter::set_curved_path(double w, double width, double height)
@@ -64,7 +64,7 @@ double GCodeWriter::curved_max_flow_scale() const
     const double h=m_curved_field->spacing_bounds(m_curved_height).max_vertical_mm;
     return std::max(1.,CurvedTransition::Ramp::bead_area(m_curved_width,h) /
         CurvedTransition::Ramp::bead_area(m_curved_width,m_curved_height) *
-        std::sqrt(1.+m_curved_ramp->slope()*m_curved_ramp->slope()));
+        std::sqrt(1.+m_curved_domain->slope()*m_curved_domain->slope()));
 }
 
 Vec3d GCodeWriter::curved_physical_point(const Vec3d& p) const
@@ -116,7 +116,7 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
         throw RuntimeError("Curved blend path start is not on its layer; refusing a diagonal approach extrusion");
     const double length=(target.head<2>()-start.head<2>()).norm();
     if (length<EPSILON) return {};
-    const int count=CurvedTransition::Ramp::chord_segments(length,m_curved_ramp->slope());
+    const int count=CurvedTransition::Ramp::chord_segments(length,m_curved_domain->slope());
     const double area0=CurvedTransition::Ramp::bead_area(m_curved_width,m_curved_height);
     Vec3d previous=m_pos;
     std::string out;
@@ -206,7 +206,7 @@ bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 
 void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 {
-    m_curved_field.reset(); m_curved_ramp.reset();
+    m_curved_field.reset(); m_curved_domain.reset();
     this->config.apply(print_config, true);
 
     // UNLAYERED_MOD — see extruder_offset_xy(). GCodeConfig does not carry extruder_offset, so the

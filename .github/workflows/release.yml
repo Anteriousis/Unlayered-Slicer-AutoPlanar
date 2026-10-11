@@ -23,6 +23,13 @@ on:
 permissions:
   contents: write
 
+# Where a tagged release is published. This repository is private, so a release published here is
+# invisible to users. To publish to the public repository instead, set the repository variable
+# UNLAYERED_RELEASE_REPO (e.g. Unlayered3D/Unlayered-Slicer) and the secret UNLAYERED_RELEASE_TOKEN,
+# a fine-grained token with contents: write on that repository. The job token cannot write there.
+env:
+  RELEASE_REPO: ${{ vars.UNLAYERED_RELEASE_REPO || github.repository }}
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -36,10 +43,22 @@ jobs:
 
     steps:
       - name: Guard against running on a fork of this fork
-        if: github.repository != 'Unlayered3D/Unlayered-Slicer'
+        if: github.repository_owner != 'Unlayered3D' || github.repository == 'Unlayered3D/Unlayered-Slicer'
         run: |
-          echo "::error::This workflow publishes releases for Unlayered3D/Unlayered-Slicer only."
+          echo "::error::This workflow publishes releases from the private development repository only."
           exit 1
+
+      - name: Check the release target is writable
+        if: github.ref_type == 'tag' && !inputs.dry_run && env.RELEASE_REPO != github.repository
+        shell: bash
+        env:
+          HAS_TOKEN: ${{ secrets.UNLAYERED_RELEASE_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::error::UNLAYERED_RELEASE_REPO is $RELEASE_REPO but the UNLAYERED_RELEASE_TOKEN secret is not set."
+            exit 1
+          fi
+          echo "Publishing this release to $RELEASE_REPO"
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -228,7 +247,7 @@ jobs:
           if ($public) {
               $assets += [ordered]@{
                   name                 = $installerLeaf
-                  browser_download_url = "https://github.com/${{ github.repository }}/releases/download/$tag/$installerLeaf"
+                  browser_download_url = "https://github.com/$env:RELEASE_REPO/releases/download/$tag/$installerLeaf"
                   size                 = $size
                   sha256               = $hash
               }
@@ -266,6 +285,11 @@ jobs:
         if: github.ref_type == 'tag' && !inputs.dry_run
         uses: softprops/action-gh-release@v2
         with:
+          repository: ${{ env.RELEASE_REPO }}
+          token: ${{ env.RELEASE_REPO != github.repository && secrets.UNLAYERED_RELEASE_TOKEN || github.token }}
+          # Another repository does not have this commit, so its tag goes on that repository's
+          # default branch instead. Here it stays on the built commit.
+          target_commitish: ${{ env.RELEASE_REPO == github.repository && github.sha || '' }}
           tag_name: ${{ steps.version.outputs.tag }}
           prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
           generate_release_notes: true

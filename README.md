@@ -10,11 +10,11 @@
 
 Unlayered Slicer is Unlayered 3D's fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer). It is built on OrcaSlicer 2.5.0-dev and keeps its feature set: calibration tools, wall and seam control, adaptive layer heights, tree supports, multi-material printing, and network printing through Klipper, PrusaLink, OctoPrint, Duet and others.
 
-This README describes **Unlayered Slicer 0.1.2**.
+This README describes **Unlayered Slicer 0.1.3**.
 
 - **Website:** <https://unlayered3d.com>
 - **What's new:** [CHANGELOG.md](CHANGELOG.md) lists the changes in each release.
-- **Source:** this repository. Each release is tagged; [`v0.1.2`](https://github.com/Unlayered3D/Unlayered-Slicer/tree/v0.1.2) is the exact source of the 0.1.2 installer.
+- **Source:** this repository. Each release is tagged; [`v0.1.3`](https://github.com/Unlayered3D/Unlayered-Slicer/tree/v0.1.3) is the exact source of the 0.1.3 installer.
 
 # What it adds
 
@@ -61,7 +61,8 @@ A page talks to the slicer only through a documented bridge with per-tab permiss
 These connections are not affected by stealth mode:
 
 - **At launch:** the app checks for a new version at `https://unlayered3d.com/slicer/latest.json`. You can also check manually with **Help ▸ Check for Updates**. Builds whose version ends in `-dev` skip the automatic check.
-- **Updates:** downloading an update needs an Unlayered account. **Help ▸ Sign in to Unlayered** opens unlayered3d.com in your browser; the slicer keeps the resulting sign-in token in the system credential store and sends it only to unlayered3d.com. Signed in, a new version downloads in the background and installs on **Help ▸ Restart to Update** or the next time the app closes.
+- **Updates:** downloading an update needs an Unlayered account. **Help ▸ Sign in to Unlayered** opens unlayered3d.com in your browser; the slicer keeps the resulting sign-in token in the system credential store and sends it only to unlayered3d.com. Signed in, a new version downloads in the background and installs on **Help ▸ Restart to Update** or the next time the app closes. On macOS this works when the app is in *Applications* (or *Applications* in your home folder); a copy anywhere else opens the download page instead.
+- **Usage diagnostics:** on by default. The app sends which features are used, slicing results and errors, crashes, and basic system details (operating system, processor cores, memory, language) to `https://unlayered3d.com/api/slicer/telemetry`, with a random id that is not linked to you or your account. Models, G-code, file and object names, and the names of your own presets are never sent. The site also derives an approximate country from the request (the IP address itself is not stored). Turn it off in **Preferences ▸ Online ▸ Send anonymous usage diagnostics**, or set the `UNLAYERED_NO_TELEMETRY` environment variable to switch it off for every user of the computer. [USAGE_DIAGNOSTICS.md](USAGE_DIAGNOSTICS.md) lists every event and field that is sent, and how long it is kept.
 - **Universe tab:** loads its page from unlayered3d.com when opened.
 - **Firmware button:** reads release information from the GitHub API.
 

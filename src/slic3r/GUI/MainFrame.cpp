@@ -43,6 +43,7 @@
 #include "WebAppPanel.hpp"
 #include "../Utils/NonplanarSliceClient.hpp"
 #include "../Utils/Process.hpp"
+#include "../Utils/UsageTelemetry.hpp"
 // BBS
 #include "PartPlate.hpp"
 #include "Preferences.hpp"
@@ -1287,6 +1288,8 @@ void MainFrame::init_tabpanel() {
         wxWindow* panel = m_tabpanel->GetCurrentPage();
         //wxString page_text = m_tabpanel->GetPageText(sel);
         m_last_selected_tab = m_tabpanel->GetSelectedPageName();
+        // Unlayered: usage diagnostics. Tab ids are fixed ASCII ("prepare", "web_app", ...).
+        UsageTelemetry::count("tab:" + m_last_selected_tab.ToStdString());
         if (panel == m_plater) {
             if (m_last_selected_tab == TAB_ID_PREPARE) {
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLVIEWTOOLBAR_3D));

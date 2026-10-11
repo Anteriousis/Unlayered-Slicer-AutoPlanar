@@ -29,6 +29,7 @@
 #include "Widgets/RadioGroup.hpp"
 #include "slic3r/Utils/bambu_networking.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
+#include "slic3r/Utils/UsageTelemetry.hpp"
 #include "NetworkPluginDialog.hpp"
 #include "DownloadProgressDialog.hpp"
 
@@ -1075,7 +1076,10 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
         //     wxGetApp().switch_staff_pick(pbool);
         // }
 
-        if (param == "sync_user_preset") {
+        if (param == "usage_diagnostics") {
+            UsageTelemetry::set_enabled(*app_config, checkbox->GetValue());
+        }
+        else if (param == "sync_user_preset") {
             bool sync = app_config->get("sync_user_preset") == "true" ? true : false;
             if (sync) {
                 wxGetApp().start_sync_user_preset();
@@ -2483,7 +2487,7 @@ void PreferencesDialog::create_items()
         g_sizer->Add(item_region);
     }
 
-    auto item_stealth_mode     = create_item_checkbox(_L("Stealth mode"), _L("Disables all outbound cloud features. Enabled by default.\nThe check for new versions of Unlayered Slicer still runs, and connections to printers on your own network are unaffected."), "stealth_mode");
+    auto item_stealth_mode     = create_item_checkbox(_L("Stealth mode"), _L("Disables all outbound cloud features. Enabled by default.\nThe check for new versions of Unlayered Slicer still runs, and connections to printers on your own network are unaffected. Usage diagnostics have their own setting below."), "stealth_mode");
     g_sizer->Add(item_stealth_mode);
 
     if (show_cloud_ui) {
@@ -2497,6 +2501,14 @@ void PreferencesDialog::create_items()
         dlg.ShowModal();
     });
     g_sizer->Add(item_network_test);
+
+    // Unlayered: anonymous usage diagnostics (slic3r/Utils/UsageTelemetry.hpp). Its own switch, NOT
+    // part of stealth mode, which is on for everyone by default.
+    wxString diagnostics_tip = _L("Sends which features are used, slicing results and errors, crashes, and this computer's system details (operating system, processor cores, memory) to Unlayered 3D, with a random id that is not linked to you or your account.\nModels, G-code, file and object names, and the names of your own presets never leave this computer.");
+    if (UsageTelemetry::disabled_by_environment())
+        diagnostics_tip += "\n" + _L("Switched off on this computer by the UNLAYERED_NO_TELEMETRY environment variable.");
+    auto item_usage_diagnostics = create_item_checkbox(_L("Send anonymous usage diagnostics"), diagnostics_tip, "usage_diagnostics");
+    g_sizer->Add(item_usage_diagnostics);
 
     // Unlayered: the "Enable Bambu Cloud" option was removed with the Bambu account surface.
     // Bambu printers are used over LAN only; there is no Bambu cloud to opt into.

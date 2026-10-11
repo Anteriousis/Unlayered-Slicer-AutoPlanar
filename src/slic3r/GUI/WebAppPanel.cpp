@@ -805,6 +805,13 @@ void WebAppPanel::OnLoaded(wxWebViewEvent& evt)
     if (evt.GetURL().IsEmpty())
         return;
 
+#ifdef __WXGTK__
+    // WebKitGTK may finish loading its initial blank document while this tab is hidden.
+    // Preserve the deferred home URL so showing the tab starts navigation.
+    if (evt.GetURL() == "about:blank")
+        return;
+#endif
+
     m_url_deferred.clear();
     m_current_origin = origin_of(evt.GetURL());
     update_offsite_bar();

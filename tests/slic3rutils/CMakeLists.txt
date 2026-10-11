@@ -20,6 +20,8 @@ add_executable(${_TEST_NAME}_tests
     test_plugin_cloud_metadata.cpp
     test_plugin_audit.cpp
     test_sys_files_bundle.cpp
+    test_usage_telemetry.cpp
+    test_app_updater_macos.cpp
     ../fff_print/test_helpers.cpp
     )
 

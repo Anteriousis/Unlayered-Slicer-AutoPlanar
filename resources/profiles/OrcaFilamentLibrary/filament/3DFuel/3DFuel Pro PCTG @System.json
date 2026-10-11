@@ -3,7 +3,7 @@
 	"name": "3DFuel Pro PCTG @System",
 	"inherits": "3DFuel Pro PCTG @base",
 	"from": "system",
-	"setting_id": "O3DF001",
+	"setting_id": "IuCZXbhgO0iUUW6T",
 	"instantiation": "true",
 	"compatible_printers": []
 }

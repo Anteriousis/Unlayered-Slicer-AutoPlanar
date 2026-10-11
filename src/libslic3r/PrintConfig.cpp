@@ -5395,7 +5395,9 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Master switch for non-planar printing. This is the single source of truth for "
                      "whether non-planar printing is enabled. The other options in this section are "
                      "hidden unless this is enabled.");
-    def->mode = comAdvanced;
+    // UNLAYERED_MOD -- Simple: fresh installs start in Simple mode, and without this the master
+    // switch for the Cut Planes tool was invisible there (the tool just stayed greyed out).
+    def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 
     // DERIVED from printer type == Virtual; see DynamicPrintConfig::normalize_fdm_1. It is NOT
@@ -5745,7 +5747,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("B/C"));
     def->enum_labels.push_back(L("A/C"));
     def->enum_labels.push_back(L("Virtual"));
-    def->mode = comAdvanced;
+    def->mode = comSimple; // UNLAYERED_MOD -- shown beside enable_nonplanar, which is Simple too
     def->set_default_value(new ConfigOptionEnum<AxisSelection>(AxisSelection::BC));
 
     // Per-axis rotation limits (degrees). Stored only; not consumed by slicing yet.

@@ -3,7 +3,7 @@
     "name": "0.16mm Optimal @Unlayered 5 Axis Printer",
     "inherits": "fdm_process_unlayered_0.4_nozzle_common",
     "from": "system",
-    "setting_id": "GP122",
+    "setting_id": "ajlda6Axx1uldQgQ",
     "instantiation": "true",
     "layer_height": "0.16",
     "compatible_printers": [

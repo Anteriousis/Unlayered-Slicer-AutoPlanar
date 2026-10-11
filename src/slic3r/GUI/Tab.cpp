@@ -42,6 +42,7 @@
 #include "GUI_ObjectList.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
 #include "slic3r/Utils/PresetUpdater.hpp"
+#include "slic3r/Utils/UsageTelemetry.hpp"
 #include "slic3r/plugin/PluginConfig.hpp"
 #include "Plater.hpp"
 #include "MainFrame.hpp"
@@ -2501,6 +2502,18 @@ void Tab::on_presets_changed()
                             nlohmann::json{{"type", WebAppSettings::preset_type_name(m_type)},
                                            {"selected", m_presets->get_selected_preset_name()},
                                            {"dirty", m_presets->current_is_dirty()}});
+
+    // Unlayered: usage diagnostics. This also runs for refreshes that change nothing, so only a
+    // different preset counts.
+    static std::map<int, std::string> last_reported;
+    const Preset &selected = m_presets->get_selected_preset();
+    std::string   base     = UsageTelemetry::preset_base_name(*m_presets, selected);
+    if (last_reported[int(m_type)] != base) {
+        last_reported[int(m_type)] = base;
+        UsageTelemetry::record("preset_selected", {{"kind", WebAppSettings::preset_type_name(m_type)},
+                                                   {"name", base},
+                                                   {"system", selected.is_system}});
+    }
 }
 
 void Tab::build_preset_description_line(ConfigOptionsGroup* optgroup)
@@ -3181,8 +3194,8 @@ void TabPrint::build()
 
 page = add_options_page(L("Others"), "custom-gcode_other"); // ORCA: icon only visible on placeholders
         optgroup = page->new_optgroup(L("Multiplanar"), L"param_multiplanar"); //second paramater is the icon used
-        optgroup->append_single_option_line("layer_rotation_b", "others_settings_multiplanar#layer_rotation_b");
-        optgroup->append_single_option_line("layer_rotation_c", "others_settings_multiplanar#layer_rotation_c");
+        optgroup->append_single_option_line("layer_rotation_b", "multiplanar_tutorial#layer-rotation");
+        optgroup->append_single_option_line("layer_rotation_c", "multiplanar_tutorial#layer-rotation");
 
         optgroup = page->new_optgroup(L("Skirt"), L"param_skirt");
         optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops");
@@ -5662,13 +5675,13 @@ PageShp TabPrinter::build_kinematics_page()
     // Orca non-planar printing section. The "Enable non-planar printing" toggle is the
     // source of truth for non-planar printing; the rest of the section is hidden unless on.
     auto optgroup = page->new_optgroup(L("Non-planar Printing"), "param_nonplanar");
-    optgroup->append_single_option_line("enable_nonplanar", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("enable_nonplanar", "multiplanar_tutorial#printer-settings");
     // "Virtual" is the fourth value of this dropdown; the old virtual_5axis checkbox is gone and the
     // key is now derived in DynamicPrintConfig::normalize_fdm_1.
-    optgroup->append_single_option_line("axis_selection", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("axis_selection", "multiplanar_tutorial#printer-settings");
     {
         Line line = { L("A axis (about X)"), L("Rotation limits of the A axis (rotation about X). Stored for the machine definition; not consumed by slicing yet.") };
-        line.label_path = "printer_motion_ability#non-planar-printing";
+        line.label_path = "multiplanar_tutorial#printer-settings";
         line.append_option(optgroup->get_option("axis_a_rotation_min"));
         line.append_option(optgroup->get_option("axis_a_rotation_max"));
         line.append_option(optgroup->get_option("axis_a_continuous"));
@@ -5676,7 +5689,7 @@ PageShp TabPrinter::build_kinematics_page()
     }
     {
         Line line = { L("B axis (about Y)"), L("Rotation limits of the B axis (rotation about Y). Stored for the machine definition; not consumed by slicing yet.") };
-        line.label_path = "printer_motion_ability#non-planar-printing";
+        line.label_path = "multiplanar_tutorial#printer-settings";
         line.append_option(optgroup->get_option("axis_b_rotation_min"));
         line.append_option(optgroup->get_option("axis_b_rotation_max"));
         line.append_option(optgroup->get_option("axis_b_continuous"));
@@ -5684,7 +5697,7 @@ PageShp TabPrinter::build_kinematics_page()
     }
     {
         Line line = { L("C axis (about Z)"), L("Rotation limits of the C axis (rotation about Z). Stored for the machine definition; not consumed by slicing yet.") };
-        line.label_path = "printer_motion_ability#non-planar-printing";
+        line.label_path = "multiplanar_tutorial#printer-settings";
         line.append_option(optgroup->get_option("axis_c_rotation_min"));
         line.append_option(optgroup->get_option("axis_c_rotation_max"));
         line.append_option(optgroup->get_option("axis_c_continuous"));
@@ -5696,22 +5709,22 @@ PageShp TabPrinter::build_kinematics_page()
     // real machine geometry invited people to "configure" their printer with them. The keys are still
     // in the printer preset, so existing values are honoured and the visualization is unchanged.
     // Inter-chunk travel geometry.
-    optgroup->append_single_option_line("nonplanar_departure_distance", "printer_motion_ability#non-planar-printing");
-    optgroup->append_single_option_line("nonplanar_approach_distance", "printer_motion_ability#non-planar-printing");
-    optgroup->append_single_option_line("nonplanar_nozzle_to_b_axis", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_departure_distance", "multiplanar_tutorial#printer-settings");
+    optgroup->append_single_option_line("nonplanar_approach_distance", "multiplanar_tutorial#printer-settings");
+    optgroup->append_single_option_line("nonplanar_nozzle_to_b_axis", "multiplanar_tutorial#printer-settings");
     // Hotend model for the post-slice collision check.
-    optgroup->append_single_option_line("nonplanar_hotend_cone_height", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_hotend_cone_height", "multiplanar_tutorial#printer-settings");
     // Four sides, because a real toolhead is not round (HotendEnvelope, PrintConfig.hpp).
-    optgroup->append_single_option_line("nonplanar_hotend_angle_xpos", "printer_motion_ability#non-planar-printing");
-    optgroup->append_single_option_line("nonplanar_hotend_angle_xneg", "printer_motion_ability#non-planar-printing");
-    optgroup->append_single_option_line("nonplanar_hotend_angle_ypos", "printer_motion_ability#non-planar-printing");
-    optgroup->append_single_option_line("nonplanar_hotend_angle_yneg", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_hotend_angle_xpos", "multiplanar_tutorial#printer-settings");
+    optgroup->append_single_option_line("nonplanar_hotend_angle_xneg", "multiplanar_tutorial#printer-settings");
+    optgroup->append_single_option_line("nonplanar_hotend_angle_ypos", "multiplanar_tutorial#printer-settings");
+    optgroup->append_single_option_line("nonplanar_hotend_angle_yneg", "multiplanar_tutorial#printer-settings");
     // Virtual-only safety limits; hidden unless Printer type = Virtual (see toggle_line below).
     // The gantry height comes first because it switches on the gantry term of the derived tilt
     // limit; with it unset only the hotend envelope above and the two below limit the tilt.
-    optgroup->append_single_option_line("nonplanar_gantry_height", "printer_motion_ability#non-planar-printing");
-    optgroup->append_single_option_line("nonplanar_virtual_max_angle", "printer_motion_ability#non-planar-printing");
-    optgroup->append_single_option_line("nonplanar_virtual_max_z", "printer_motion_ability#non-planar-printing");
+    optgroup->append_single_option_line("nonplanar_gantry_height", "multiplanar_tutorial#printer-settings");
+    optgroup->append_single_option_line("nonplanar_virtual_max_angle", "multiplanar_tutorial#printer-settings");
+    optgroup->append_single_option_line("nonplanar_virtual_max_z", "multiplanar_tutorial#printer-settings");
     // What the geometry above actually works out to, so the limit that stops a cut-plane drag is
     // legible here rather than only discoverable by hitting it. Refreshed in update_description_lines().
     {

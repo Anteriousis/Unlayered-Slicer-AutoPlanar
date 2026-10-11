@@ -717,6 +717,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/AppUpdater.hpp
     Utils/UnlayeredAccount.cpp
     Utils/UnlayeredAccount.hpp
+    Utils/UsageTelemetry.cpp
+    Utils/UsageTelemetry.hpp
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp

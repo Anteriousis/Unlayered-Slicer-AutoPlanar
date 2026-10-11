@@ -5661,6 +5661,14 @@
    "filament_type": "PLA",
    "filament_vendor": "Elegoo"
   },
+  "OFjSKlce": {
+   "filaments": [
+    "OrcaFilamentLibrary/3DFuel Pro PCTG"
+   ],
+   "name": "3DFuel Pro PCTG",
+   "filament_type": "PCTG",
+   "filament_vendor": "3DFuel"
+  },
   "OFjT9PkZ": {
    "filaments": [
     "OrcaFilamentLibrary/FilAr PLA Tabaco"
@@ -6892,6 +6900,14 @@
    "name": "Artillery PA-CF",
    "filament_type": "PA-CF",
    "filament_vendor": "Artillery"
+  },
+  "OFtK0C7c": {
+   "filaments": [
+    "OrcaFilamentLibrary/SUNLU PLA"
+   ],
+   "name": "SUNLU PLA",
+   "filament_type": "PLA",
+   "filament_vendor": "SUNLU"
   },
   "OFtKeKa9": {
    "filaments": [

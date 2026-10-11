@@ -23,6 +23,13 @@
     #include <tlhelp32.h>
 #endif
 
+#ifdef __APPLE__
+    #include <mach-o/dyld.h>
+    #include <spawn.h>
+    #include <unistd.h>
+    extern char **environ;
+#endif
+
 namespace fs = boost::filesystem;
 
 namespace Slic3r {
@@ -54,6 +61,43 @@ std::string detect_updater_arch()
     return "unknown";
 #endif
 }
+
+#ifdef __APPLE__
+// The running executable, and the .app bundle that contains it.
+fs::path current_exe_path()
+{
+    uint32_t    size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buf(size, '\0');
+    if (_NSGetExecutablePath(buf.data(), &size) != 0)
+        return {};
+    buf.resize(strlen(buf.c_str()));
+
+    boost::system::error_code ec;
+    const fs::path            resolved = fs::canonical(fs::path(buf), ec);
+    return ec ? fs::path(buf) : resolved;
+}
+
+// .../Foo.app/Contents/MacOS/Foo -> .../Foo.app, or empty when not inside a bundle.
+fs::path enclosing_app_bundle(const fs::path &exe)
+{
+    for (fs::path dir = exe.parent_path(); !dir.empty() && dir != dir.root_path(); dir = dir.parent_path()) {
+        if (boost::algorithm::iends_with(dir.filename().string(), ".app"))
+            return dir;
+    }
+    return {};
+}
+
+// Shell single-quoting: close, escape, reopen. Covers spaces, which install paths have.
+std::string sh_quote(const std::string &in)
+{
+    std::string out = "'";
+    for (char c : in)
+        c == '\'' ? out += "'\\''" : out += c;
+    out += "'";
+    return out;
+}
+#endif
 
 #ifdef _WIN32
 fs::path current_exe_path()
@@ -124,8 +168,24 @@ std::optional<AccountDownload> select_account_download(const std::vector<Account
         return d;
     }
     return std::nullopt;
+#elif defined(__APPLE__)
+    for (const auto &d : downloads) {
+        if (!boost::algorithm::iequals(d.platform, updater_platform()))
+            continue;
+        // The macOS build ships as one universal .dmg, so a feed entry may name the
+        // architecture or say "universal"; both are installable here. An entry naming the
+        // other architecture is not.
+        if (!d.arch.empty() && !boost::algorithm::iequals(d.arch, updater_arch()) &&
+            !boost::algorithm::iequals(d.arch, "universal"))
+            continue;
+        if (d.url.empty() || d.sha256.size() != 64)
+            continue;
+        return d;
+    }
+    return std::nullopt;
 #else
-    // Same reasoning as select_platform_asset(): nothing to install in place on these platforms.
+    // Linux: an AppImage has to be made executable and swapped in place, possibly on a
+    // read-only mount. Still the download page.
     (void) downloads;
     return std::nullopt;
 #endif
@@ -152,6 +212,45 @@ std::optional<fs::path> self_updatable_install_dir()
         return std::nullopt;
 
     return dir;
+#elif defined(__APPLE__)
+    // The bundle itself is what gets replaced, so this returns the .app rather than a parent
+    // directory. Refuse anything we could not swap: a build tree, or a copy still running from
+    // a read-only mount such as the installer image.
+    const fs::path exe = current_exe_path();
+    if (exe.empty())
+        return std::nullopt;
+    const fs::path app = enclosing_app_bundle(exe);
+    if (app.empty())
+        return std::nullopt;
+
+    boost::system::error_code ec;
+    if (!fs::exists(app / "Contents" / "Info.plist", ec))
+        return std::nullopt;
+
+    // Only a real installation updates itself. macOS has no install registry to consult the way
+    // the Windows path does, so the test is where the bundle lives: an application directory.
+    // That is what dragging the disk image to Applications produces, and it excludes the two
+    // cases Windows excludes by other means -- a development build run straight from the build
+    // tree, and a copy running from the mounted installer image.
+    const fs::path parent = app.parent_path();
+    const auto     is_dir = [&parent](const fs::path &candidate) {
+        boost::system::error_code e;
+        if (fs::equivalent(parent, candidate, e)) // follows symlinks; false (not throw) if absent
+            return true;
+        return parent.lexically_normal() == candidate.lexically_normal();
+    };
+    const char *home           = ::getenv("HOME");
+    const bool  in_applications = is_dir(fs::path("/Applications")) ||
+                                 (home != nullptr && is_dir(fs::path(home) / "Applications"));
+    if (!in_applications)
+        return std::nullopt;
+
+    // Writable by this user without authorisation; an install owned by another admin, or one on
+    // a read-only volume, falls back to the download page.
+    if (::access(app.c_str(), W_OK) != 0 || ::access(parent.c_str(), W_OK) != 0)
+        return std::nullopt;
+
+    return app;
 #else
     return std::nullopt;
 #endif
@@ -222,10 +321,32 @@ std::optional<AppUpdateAsset> select_platform_asset(const std::vector<AppUpdateA
         }
     }
     return std::nullopt;
+#elif defined(__APPLE__)
+    const std::string arch = updater_arch(); // "arm64" or "x64"
+    for (const auto &a : assets) {
+        const std::string n = boost::algorithm::to_lower_copy(a.name);
+        if (!boost::algorithm::iends_with(n, ".dmg"))
+            continue;
+        // Published alongside the installer; none of them is the application.
+        if (n.find("validator") != std::string::npos || n.find("pdb") != std::string::npos ||
+            n.find("portable") != std::string::npos)
+            continue;
+        // One universal .dmg covers both architectures. Accept it, or an image that names this
+        // architecture, but never one that names only the other.
+        const bool universal = n.find("universal") != std::string::npos;
+        const bool this_arch = n.find(arch) != std::string::npos ||
+                               (arch == "x64" && n.find("x86_64") != std::string::npos);
+        const bool other_arch = !universal && !this_arch &&
+                                (n.find("arm64") != std::string::npos || n.find("x86_64") != std::string::npos ||
+                                 n.find("x64") != std::string::npos);
+        if (other_arch)
+            continue;
+        return a;
+    }
+    return std::nullopt;
 #else
-    // macOS and Linux fall back to the download page. A .dmg has to be mounted and dragged to
-    // /Applications, and an AppImage has to be made executable and swapped in place - possibly on
-    // a read-only mount. Neither is a two-line launch, and neither is the primary platform.
+    // Linux falls back to the download page: an AppImage has to be made executable and swapped
+    // in place, possibly on a read-only mount.
     (void) assets;
     return std::nullopt;
 #endif
@@ -460,6 +581,74 @@ bool launch_silent_update(const fs::path &installer, const fs::path &install_dir
     }
     BOOST_LOG_TRIVIAL(info) << "updater: silent update started: " << installer.string() << " "
                             << boost::nowide::narrow(params);
+    return true;
+#elif defined(__APPLE__)
+    // A running .app cannot replace itself, so hand the job to a small detached script that
+    // waits for this process to go away first. Same shape as the Windows path, where the NSIS
+    // installer waits on /WAITPID.
+    //
+    // The copy is staged beside the target and swapped in, so a failure part-way leaves the
+    // installed application untouched rather than half-written. ditto is used rather than cp
+    // because it preserves the extended attributes and the code signature of the bundle.
+    const fs::path app = install_dir; // the .app itself; see self_updatable_install_dir()
+    if (app.empty() || !boost::algorithm::iends_with(app.filename().string(), ".app")) {
+        error_out = "The installed application could not be located.";
+        return false;
+    }
+
+    const fs::path script = installer.parent_path() / "install-update.sh";
+    const std::string mount = (installer.parent_path() / "mnt").string();
+
+    std::string sh;
+    sh += "#!/bin/sh\n";
+    sh += "set -e\n";
+    // Wait for the slicer to exit; give up rather than hang forever if it never does.
+    sh += "for i in $(seq 1 600); do kill -0 " + std::to_string(get_current_pid()) +
+          " 2>/dev/null || break; sleep 0.5; done\n";
+    sh += "MNT=" + sh_quote(mount) + "\n";
+    sh += "APP=" + sh_quote(app.string()) + "\n";
+    sh += "DMG=" + sh_quote(installer.string()) + "\n";
+    sh += "mkdir -p \"$MNT\"\n";
+    sh += "hdiutil attach \"$DMG\" -nobrowse -noautoopen -mountpoint \"$MNT\" >/dev/null\n";
+    // Undo the mount whatever happens next, so a failed update leaves no attached image behind.
+    sh += "trap 'hdiutil detach \"$MNT\" -quiet >/dev/null 2>&1 || true' EXIT\n";
+    sh += "SRC=$(find \"$MNT\" -maxdepth 1 -name '*.app' -print -quit)\n";
+    sh += "[ -n \"$SRC\" ] || exit 1\n";
+    sh += "NEW=\"$APP.update-staging\"\n";
+    sh += "rm -rf \"$NEW\"\n";
+    sh += "ditto \"$SRC\" \"$NEW\"\n";
+    // Swap: move the old aside, put the new in place, then delete the old. The window in which
+    // neither exists is one rename long.
+    sh += "rm -rf \"$APP.update-old\"\n";
+    sh += "mv \"$APP\" \"$APP.update-old\"\n";
+    sh += "mv \"$NEW\" \"$APP\" || { mv \"$APP.update-old\" \"$APP\"; exit 1; }\n";
+    sh += "rm -rf \"$APP.update-old\"\n";
+    if (relaunch)
+        sh += "open \"$APP\"\n";
+    // The download directory holds the image, this script and the mount point.
+    sh += "rm -rf " + sh_quote(installer.parent_path().string()) + " >/dev/null 2>&1 || true\n";
+
+    {
+        boost::filesystem::ofstream f(script);
+        if (!f) {
+            error_out = "Could not write the update script.";
+            return false;
+        }
+        f << sh;
+    }
+    boost::system::error_code ec;
+    fs::permissions(script, fs::owner_all, ec);
+
+    // Detached, so it outlives this process -- which is the whole point.
+    const std::string script_path = script.string();
+    char *const       argv[]      = {const_cast<char *>("/bin/sh"), const_cast<char *>(script_path.c_str()), nullptr};
+    pid_t             pid         = 0;
+    if (::posix_spawn(&pid, "/bin/sh", nullptr, nullptr, argv, environ) != 0) {
+        error_out = "Could not start the update script.";
+        BOOST_LOG_TRIVIAL(error) << "updater: " << error_out;
+        return false;
+    }
+    BOOST_LOG_TRIVIAL(info) << "updater: update script started (pid " << pid << ") for " << app.string();
     return true;
 #else
     (void) installer;

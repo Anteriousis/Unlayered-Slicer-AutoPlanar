@@ -2,6 +2,46 @@
 
 All notable changes to Unlayered Slicer are listed here, newest first.
 
+## 0.1.3 — 2026-10-11
+
+Changes since **0.1.2** (2026-10-10).
+
+### New
+
+- **Anonymous usage diagnostics.** Unlayered Slicer now tells us which features are used, how
+  slicing went (including errors), when it crashes, and basic system details (operating system,
+  processor cores, memory, language), with a random id that is not linked to you or your account.
+  Models, G-code, file and object names, and the names of your own presets are never sent. It is on
+  by default: turn it off in **Preferences > Online > Send anonymous usage diagnostics**, or set the
+  `UNLAYERED_NO_TELEMETRY` environment variable to switch it off for the whole computer. A notice
+  says so the first time it runs.
+- **macOS: the slicer updates itself**, as it already did on Windows. Signed in with your Unlayered
+  account, a new version downloads in the background and replaces the app when you choose *Restart
+  to update* or close it. This works when the app is in *Applications* (or *Applications* in your
+  home folder); a copy anywhere else still opens the download page.
+
+### Changed
+
+- **Easier to get started with multiplanar printing.**
+  - The Cut Planes tool is greyed out until non-planar printing is turned on for your printer. Its
+    tooltip now says so. Clicking it offers to turn non-planar printing on, with Printer type set
+    to Virtual (for an ordinary 3-axis printer). Unlayered 5-axis printers already have it on.
+  - *Enable non-planar printing* and *Printer type* (Printer settings > Motion ability) now show in
+    Simple mode. Before, you had to switch to Advanced mode to find them.
+  - The multiplanar tutorial (Help > Multiplanar Tutorial) has been rewritten. It explains what a
+    cut plane is for, lists the settings you need *before* the quick start, shows the toolbar
+    icon, gives the correct setting locations, and adds a settings reference.
+  - The help links on the non-planar and layer-rotation settings open that tutorial. Before, they
+    went to web pages that don't exist.
+
+### Fixed
+
+- **macOS: "Unlayered Slicer quit unexpectedly" on every quit** while the Bambu Lab network plug-in
+  was installed. The plug-in is now unloaded before the app exits.
+- **Linux: embedded web tabs (such as Universe) could open blank.**
+- **Building from source on macOS and Linux** works again, including the universal (Intel and Apple
+  silicon) macOS build.
+
 ## 0.1.2 — 2026-10-10
 
 Changes since **0.1.1** (2026-09-21).

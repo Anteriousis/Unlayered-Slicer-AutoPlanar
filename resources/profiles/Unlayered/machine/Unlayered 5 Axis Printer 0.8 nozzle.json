@@ -3,7 +3,7 @@
     "name": "Unlayered 5 Axis Printer 0.8 nozzle",
     "inherits": "fdm_unlayered_5axis_printer",
     "from": "system",
-    "setting_id": "GM032",
+    "setting_id": "rTC4yoCJNkmzldJQ",
     "instantiation": "true",
     "printer_model": "Unlayered 5 Axis Printer",
     "printer_variant": "0.8",

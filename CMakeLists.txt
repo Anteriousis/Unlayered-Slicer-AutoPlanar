@@ -1043,18 +1043,18 @@ function(unlayered_copy_dlls target config postfix output_dlls)
             ${TOP_LEVEL_PROJECT_DIR}/deps/WebView2/lib/win-${_arch}/WebView2Loader.dll
         DESTINATION ${_out_dir})
 
-    # When find_package(OpenSSL) picks up a shared OpenSSL 3 (a system install on the dev PATH), its runtime
-    # DLLs are statically imported by UnlayeredSlicer.dll, so they must be copied and shipped or the app fails
-    # to load on a clean machine. The static OpenSSL from deps/ has no DLLs to ship. Derive the bin dir from
-    # the found include dir.
+    # When find_package(OpenSSL) picks up a shared system OpenSSL 3 (only on the dev PATH), its runtime
+    # DLLs are statically imported by UnlayeredSlicer.dll, so they must be copied and shipped or the app
+    # fails to load on a clean machine. The deps build (CI, release) links OpenSSL statically and has
+    # no such DLLs. Derive the bin dir from the found include dir.
     get_filename_component(_openssl_bin_dir "${OPENSSL_INCLUDE_DIR}/../bin" ABSOLUTE)
     set(_openssl_dlls "")
-    if (EXISTS "${_openssl_bin_dir}/libcrypto-3-x64.dll")
-        file(COPY ${_openssl_bin_dir}/libcrypto-3-x64.dll
-                ${_openssl_bin_dir}/libssl-3-x64.dll
-            DESTINATION ${_out_dir})
-        set(_openssl_dlls ${_out_dir}/libcrypto-3-x64.dll ${_out_dir}/libssl-3-x64.dll)
-    endif ()
+    foreach (_dll libcrypto-3-x64.dll libssl-3-x64.dll)
+        if (EXISTS "${_openssl_bin_dir}/${_dll}")
+            file(COPY "${_openssl_bin_dir}/${_dll}" DESTINATION ${_out_dir})
+            list(APPEND _openssl_dlls "${_out_dir}/${_dll}")
+        endif ()
+    endforeach ()
 
     file(COPY ${CMAKE_PREFIX_PATH}/bin/occt/TKBO.dll
             ${CMAKE_PREFIX_PATH}/bin/occt/TKBRep.dll

@@ -1712,6 +1712,7 @@ bool PrintObject::invalidate_state_by_config_options(
             steps.emplace_back(posPerimeters);
         } else if (
                opt_key == "layer_height"
+            || opt_key == "curved_layer_blend"
             || opt_key == "mmu_segmented_region_max_width"
             || opt_key == "mmu_segmented_region_interlocking_depth"
             || opt_key == "raft_layers"

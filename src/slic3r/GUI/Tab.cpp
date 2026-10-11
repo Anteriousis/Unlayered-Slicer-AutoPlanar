@@ -3183,6 +3183,7 @@ page = add_options_page(L("Others"), "custom-gcode_other"); // ORCA: icon only v
         optgroup = page->new_optgroup(L("Multiplanar"), L"param_multiplanar"); //second paramater is the icon used
         optgroup->append_single_option_line("layer_rotation_b", "others_settings_multiplanar#layer_rotation_b");
         optgroup->append_single_option_line("layer_rotation_c", "others_settings_multiplanar#layer_rotation_c");
+        optgroup->append_single_option_line("curved_layer_blend");
 
         optgroup = page->new_optgroup(L("Skirt"), L"param_skirt");
         optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops");

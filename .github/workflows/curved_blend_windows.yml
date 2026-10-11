@@ -1,0 +1,23 @@
+name: Curved blend Windows experiment
+on:
+  push:
+    branches: [codex/curved-layer-engine]
+  workflow_dispatch:
+concurrency:
+  group: curved-blend-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build_windows:
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: windows-latest
+      arch: x64
+      compiler: clang
+    secrets: inherit
+  tests:
+    needs: build_windows
+    if: ${{ !cancelled() && needs.build_windows.result != 'cancelled' }}
+    uses: ./.github/workflows/unit_tests.yml
+    with:
+      os: windows-latest
+      artifact: ${{ github.sha }}-tests-windows-x64

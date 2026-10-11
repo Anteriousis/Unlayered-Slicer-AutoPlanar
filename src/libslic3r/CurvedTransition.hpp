@@ -69,6 +69,7 @@ public:
     }
 
     bool enabled() const { return m_options.enabled; }
+    double reference_top_mm() const { return m_options.reference_top_mm; }
 
     // Contract: the callback's height bounds and Lipschitz slope bound must be
     // established over the WHOLE model domain by its caller. Checking individual

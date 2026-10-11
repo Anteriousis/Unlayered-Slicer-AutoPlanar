@@ -8,6 +8,7 @@
 
 #include "BoundingBox.hpp"
 #include "CutPlaneSegmentation.hpp"
+#include "CurvedRamp.hpp"
 #include "Support/SupportDirection.hpp"
 #include "BeltBrim.hpp"   // BELT_MOD
 #include "ExtrusionEntityCollection.hpp"
@@ -499,6 +500,9 @@ public:
     // The height is snug.
     coord_t 				     height() const         { return m_size.z(); }
     double                      max_z() const         { return m_max_z; }
+    const std::shared_ptr<const CurvedTransition::Field>& curved_field() const { return m_curved_field; }
+    const std::optional<CurvedTransition::Ramp>& curved_ramp() const { return m_curved_ramp; }
+    std::string curved_blend_error() const;
     // Centering offset of the sliced mesh from the scaled and rotated mesh of the model.
     const Point& 			     center_offset() const  { return m_center_offset; }
 
@@ -727,6 +731,8 @@ private:
     // See object_to_slice(). Kept in sync with m_post_trafo by update_slice_frame().
     Transform3d m_object_to_slice = Transform3d::Identity();
     Transform3d m_slice_to_object = Transform3d::Identity();
+    std::shared_ptr<const CurvedTransition::Field> m_curved_field;
+    std::optional<CurvedTransition::Ramp> m_curved_ramp;
 
     // Declarative cut planes: segment descriptor, set by Print::apply right after construction.
     std::optional<CutSegmentDescriptor> m_segment;

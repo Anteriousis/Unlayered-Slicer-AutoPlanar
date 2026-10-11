@@ -41,6 +41,107 @@ static inline Vec3d apply_test_rotation2(const Vec3d& v, const Transform3d& traf
 
 bool GCodeWriter::full_gcode_comment = true;
 
+void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field> field,
+                                  const CurvedTransition::Ramp& ramp, const Vec2d& origin,
+                                  double travel_clearance, double z_speed)
+{
+    if (!field || travel_clearance<=0. || z_speed<=0.)
+        throw RuntimeError("Curved blend needs positive travel clearance and Z speed");
+    m_curved_field=std::move(field); m_curved_ramp=ramp; m_curved_origin=origin;
+    m_curved_safe_z=ramp.top_max+travel_clearance; m_curved_z_speed=z_speed;
+}
+
+void GCodeWriter::set_curved_path(double w, double width, double height)
+{
+    if (!m_curved_field) return;
+    if (height<=0. || width<=height) throw RuntimeError("Curved blend requires a positive non-bridge bead height smaller than its width");
+    m_curved_w=w; m_curved_width=width; m_curved_height=height;
+}
+
+double GCodeWriter::curved_max_flow_scale() const
+{
+    if (!m_curved_field) return 1.;
+    const double h=m_curved_field->spacing_bounds(m_curved_height).max_vertical_mm;
+    return std::max(1.,CurvedTransition::Ramp::bead_area(m_curved_width,h) /
+        CurvedTransition::Ramp::bead_area(m_curved_width,m_curved_height) *
+        std::sqrt(1.+m_curved_ramp->slope()*m_curved_ramp->slope()));
+}
+
+Vec3d GCodeWriter::curved_physical_point(const Vec3d& p) const
+{
+    Vec3d q=p;
+    q.z()=m_curved_field->world_z(p.x()-m_curved_origin.x(),p.y()-m_curved_origin.y(),p.z());
+    return q;
+}
+
+std::string GCodeWriter::curved_travel(const Vec3d& target, const std::string& comment)
+{
+    // Traverse ABOVE THE WHOLE certified solid, not merely above a logical layer
+    // number. Straight vertical departure and approach are outside printed
+    // material; the configured slope envelope bounds the surrounding head.
+    // All three moves are native writer output and are read by Preview.
+    const double safe=std::max({m_curved_safe_z,m_pos.z(),target.z()});
+    const double speed=std::min(this->travel_xy_speed(),m_curved_z_speed)*60.;
+    std::string out;
+    GCodeG1Formatter lift;
+    lift.emit_z(safe); lift.emit_f(speed);
+    lift.emit_comment(GCodeWriter::full_gcode_comment,"curved blend: vertical departure");
+    out+=lift.string();
+    GCodeG1Formatter across;
+    across.emit_xyz(Vec3d(target.x()-m_x_offset,target.y()-m_y_offset,safe)); across.emit_f(speed);
+    across.emit_comment(GCodeWriter::full_gcode_comment,"curved blend: traverse above solid");
+    out+=across.string();
+    GCodeG1Formatter descend;
+    descend.emit_z(target.z()); descend.emit_f(speed);
+    descend.emit_comment(GCodeWriter::full_gcode_comment,comment);
+    out+=descend.string();
+    m_pos=target; m_lifted=0.; m_to_lift=0.; set_current_position_clear(true);
+    return out;
+}
+
+std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const std::string& comment, bool no_extrusion)
+{
+    if (!is_current_position_clear()) throw RuntimeError("Curved blend extrusion has no known start position");
+    Vec3d start=m_pos;
+    const double x=start.x()-m_curved_origin.x(), y=start.y()-m_curved_origin.y();
+    start.z()=m_curved_field->slice_z(x,y,start.z());
+    // Special Z-varying path generators are rejected in Print::validate. Every
+    // ordinary perimeter/infill path remains on exactly one field isosurface.
+    if (std::abs(start.z()-target.z())>1e-4)
+        throw RuntimeError("Curved blend path start is not on its layer; refusing a diagonal approach extrusion");
+    const double length=(target.head<2>()-start.head<2>()).norm();
+    if (length<EPSILON) return {};
+    const int count=CurvedTransition::Ramp::chord_segments(length,m_curved_ramp->slope());
+    const double area0=CurvedTransition::Ramp::bead_area(m_curved_width,m_curved_height);
+    Vec3d previous=m_pos;
+    std::string out;
+    for (int i=1;i<=count;++i) {
+        const Vec3d logical=start+(target-start)*(double(i)/count);
+        const Vec3d physical=curved_physical_point(logical);
+        const Vec3d midpoint=start+(target-start)*((double(i)-.5)/count);
+        const double mx=midpoint.x()-m_curved_origin.x(), my=midpoint.y()-m_curved_origin.y();
+        const double dz=m_curved_field->world_z(mx,my,target.z())-
+                        m_curved_field->world_z(mx,my,target.z()-m_curved_height);
+        const auto gradient=m_curved_field->gradient(mx,my,target.z());
+        const double h=dz/std::sqrt(1.+gradient.dx*gradient.dx+gradient.dy*gradient.dy);
+        // Physical bead area times physical path length. Upstream's dE already
+        // contains material/role ratios; preserve those, replacing only geometry.
+        const double ratio=CurvedTransition::Ramp::bead_area(m_curved_width,h)/area0 *
+                           (physical-previous).norm()/(length/count);
+        char height_tag[64];
+        std::snprintf(height_tag,sizeof(height_tag),";HEIGHT:%.6f\n",h);
+        out+=height_tag;
+        GCodeG1Formatter move;
+        move.emit_xyz(Vec3d(physical.x()-m_x_offset,physical.y()-m_y_offset,physical.z()));
+        if (!no_extrusion) { filament()->extrude(dE/count*ratio); move.emit_e(filament()->E()); }
+        move.emit_comment(GCodeWriter::full_gcode_comment,comment);
+        out+=move.string(); previous=physical;
+        if (!no_extrusion) m_max_extrusion_z=std::max(m_max_extrusion_z,physical.z());
+    }
+    m_pos=previous; m_lifted=0.; m_to_lift=0.;
+    return out;
+}
+
 // BELT_MOD -- a lift emitted through _travel_to_z() re-emits the stored logical X/Y under a
 // mapping that must emit every axis. While the position is unknown that X/Y is the
 // uninitialised origin, which maps to a real but wrong machine point, so the lift has to be
@@ -91,6 +192,7 @@ bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 
 void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 {
+    m_curved_field.reset(); m_curved_ramp.reset();
     this->config.apply(print_config, true);
 
     // UNLAYERED_MOD — see extruder_offset_xy(). GCodeConfig does not carry extruder_offset, so the
@@ -816,6 +918,8 @@ std::string GCodeWriter::set_speed(double F, const std::string &comment, const s
 
 std::string GCodeWriter::travel_to_xy(const Vec2d &point, const std::string &comment)
 {
+    if (m_curved_field)
+        return curved_travel(Vec3d(point.x(),point.y(),m_pos.z()),comment);
     m_pos(0) = point(0);
     m_pos(1) = point(1);
 
@@ -945,6 +1049,8 @@ std::string GCodeWriter::eager_lift(const LiftType type) {
 
 std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &comment, bool force_z, Transform3d trafo)
 {
+    if (m_curved_field)
+        return curved_travel(curved_physical_point(point),comment);
     // FIXME: This function was not being used when travel_speed_z was separated (bd6badf).
     // Calculation of feedrate was not updated accordingly. If you want to use
     // this function, fix it first.
@@ -1233,6 +1339,12 @@ std::string GCodeWriter::travel_to_xyz_high_then_down(const Vec3d &local_point, 
 
 std::string GCodeWriter::travel_to_z(double z, const std::string &comment, bool force)
 {
+    if (m_curved_field) {
+        m_lifted=0.; m_to_lift=0.;
+        // A pure layer-change Z is a logical height, not the local physical
+        // height at the previous seam. Leave descent to the next XYZ approach.
+        return _travel_to_z(std::max(m_curved_safe_z,m_pos.z()),comment);
+    }
     /*  If target Z is lower than current Z but higher than nominal Z
         we don't perform the move but we only adjust the nominal Z by
         reducing the lift amount that will be used for unlift. */
@@ -1367,6 +1479,8 @@ bool GCodeWriter::will_move_z(double z) const
 
 std::string GCodeWriter::extrude_to_xy(const Vec2d &point, double dE, const std::string &comment, bool force_no_extrusion)
 {
+    if (m_curved_field)
+        return curved_extrude(Vec3d(point.x(),point.y(),m_curved_w),dE,comment,force_no_extrusion);
     m_pos(0) = point(0);
     m_pos(1) = point(1);
     if(std::abs(dE) <= std::numeric_limits<double>::epsilon())
@@ -1434,6 +1548,7 @@ std::string GCodeWriter::extrude_arc_as_polyline(const Vec2d &point, const Vec2d
 //center_offset is I and J axis
 std::string GCodeWriter::extrude_arc_to_xy(const Vec2d& point, const Vec2d& center_offset, double dE, const bool is_ccw, const std::string& comment, bool force_no_extrusion)
 {
+    if (m_curved_field) throw RuntimeError("Curved blend cannot emit circular arcs");
     // BELT_MOD: arcs emit only X/Y/I/J, so a mapping that moves logical X or Y cannot be
     // expressed as a G2/G3. GCode's arc-fitting gate normally stops arcs being generated at all
     // for such a mapping, but this is public API, so define the behaviour rather than asserting.
@@ -1463,6 +1578,8 @@ std::string GCodeWriter::extrude_arc_to_xy(const Vec2d& point, const Vec2d& cent
 
 std::string GCodeWriter::extrude_to_xyz(const Vec3d &point, double dE, const std::string &comment, bool force_no_extrusion, Transform3d trafo)
 {
+    if (m_curved_field)
+        return curved_extrude(point,dE,comment,force_no_extrusion);
     // Check if Z actually changes (at export precision) before emitting it.
     // ZAA sloped extrusions call this for every segment, but many consecutive
     // segments share the same quantized Z — emitting it every time is redundant.

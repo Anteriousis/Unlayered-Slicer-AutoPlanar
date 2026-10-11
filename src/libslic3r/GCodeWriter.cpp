@@ -101,6 +101,8 @@ std::string GCodeWriter::curved_travel(const Vec3d& target, const std::string& c
 
 std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const std::string& comment, bool no_extrusion)
 {
+    if (no_extrusion)
+        throw RuntimeError("Curved blend refuses a surface wipe; use the ordinary retracted travel planner");
     if (!is_current_position_clear()) throw RuntimeError("Curved blend extrusion has no known start position");
     Vec3d start=m_pos;
     const double x=start.x()-m_curved_origin.x(), y=start.y()-m_curved_origin.y();

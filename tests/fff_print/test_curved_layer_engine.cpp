@@ -143,6 +143,12 @@ TEST_CASE("Curved blend rejects unsupported inputs and excessive tilt", "[curved
         REQUIRE_FALSE(p.validate().string.empty());
         REQUIRE_THROWS(Test::gcode(p));
     }
+    SECTION("surface wipe is not a retracted travel") {
+        auto config=curved_config(); config.set_deserialize_strict({{"wipe_on_loops","1"}});
+        Print p; Model m; Test::init_print({ramp()},p,m,config);
+        REQUIRE_FALSE(p.validate().string.empty());
+        REQUIRE_THROWS(Test::gcode(p));
+    }
     SECTION("curved roof not yet implemented") {
         Print p; Model m;
         Test::init_print({TriangleMesh(AutoPlanesFixtures::curved_top_block())},p,m,curved_config());
@@ -245,6 +251,7 @@ TEST_CASE("Curved writer subdivides paths, compensates flow and avoids diagonal 
     REQUIRE(writer.max_extrusion_z()>0.);
     REQUIRE_THROWS(writer.extrude_arc_to_xy(Vec2d(120.,100.),Vec2d(0.,5.),1.,true));
     REQUIRE_THROWS(writer.extrude_to_xyz(Vec3d(120.,100.,3.),1.));
+    REQUIRE_THROWS(writer.extrude_to_xy(Vec2d(120.,100.),0.,"surface wipe",true));
     const auto layer_change=writer.travel_to_z(2.2);
     REQUIRE(layer_change.find("F300")!=std::string::npos);
 }

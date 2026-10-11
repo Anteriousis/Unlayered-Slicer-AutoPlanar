@@ -196,7 +196,11 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
                 const Sample &s = samples[i];
                 const float   z_max = s.p.z() - 0.5f * (s.p.z() - s.bottom);   // below this bead's mid-height
                 Kind kn = Kind::Model, kw = Kind::Model;
-                const float near_top = grid.highest_below(samples, s.p, float(params.reach_factor) * s.width, z_max, kn);
+                // Reach: this bead's half-width plus half a typical bead below. Using this bead's width
+                // alone missed the bead underneath a narrow line (gap fill, ~0.24 mm) whenever it fell
+                // between the beads below and reported a full-layer gap that is not there.
+                const float reach    = std::max(float(params.reach_factor) * s.width, 0.5f * s.width + 0.25f);
+                const float near_top = grid.highest_below(samples, s.p, reach, z_max, kn);
                 const float wide_top = grid.highest_below(samples, s.p, kSpanRadius, z_max, kw);
 
                 auto allowance = [&](Kind below) -> float {
@@ -233,10 +237,17 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
                         const float allow = std::isfinite(near_top) ? allowance(kn) : 0.f;
                         const double g = double(gap_near) - double(allow);
                         trans_gaps[key].push_back(std::max(0., g));
-                        if (g > tol)  { ++ t.voids;    t.max_gap_mm     = std::max(t.max_gap_mm, g); }
+                        if (g > tol)  {
+                            ++ t.voids;    t.max_gap_mm     = std::max(t.max_gap_mm, g);
+                            t.worst_voids.push_back({ s.p, g, s.object_label, s.segment, int(s.kind), s.gcode_id, s.layer_id });
+                            if (t.worst_voids.size() > 64) {
+                                std::sort(t.worst_voids.begin(), t.worst_voids.end(), [](const UnfoundedSample &l, const UnfoundedSample &r) { return l.gap_mm > r.gap_mm; });
+                                t.worst_voids.resize(10);
+                            }
+                        }
                         // Overlap: material of an EARLIER section standing inside this bead's own height.
                         Kind ko = Kind::Model;
-                        const float other_top = grid.highest_below(samples, s.p, float(params.reach_factor) * s.width,
+                        const float other_top = grid.highest_below(samples, s.p, reach,
                                                                    s.p.z() - 0.01f, ko, &s);
                         if (std::isfinite(other_top) && other_top > s.bottom + tol) {
                             ++ t.overlaps;
@@ -254,6 +265,8 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
         if (fs->worst.size() > 25) fs->worst.resize(25);
     }
     for (auto &[key, t] : trans) {
+        std::sort(t.worst_voids.begin(), t.worst_voids.end(), [](const UnfoundedSample &l, const UnfoundedSample &r) { return l.gap_mm > r.gap_mm; });
+        if (t.worst_voids.size() > 10) t.worst_voids.resize(10);
         t.p95_gap_mm = percentile(trans_gaps[key], 0.95);
         out.transitions.push_back(t);
     }
@@ -293,6 +306,18 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
             ss.seam_below = a.p; ss.seam_above = b.p;
             ss.xy_jump_mm = double((b.p.head<2>() - a.p.head<2>()).norm());
             out.seams.push_back(ss);
+        }
+    }
+
+    for (SeamStats &ss : out.seams) {
+        std::vector<double> d;
+        for (const LayerSeam &r : seams)
+            if (r.obj == ss.object_label && r.seg == ss.segment_above)
+                d.push_back(double((r.p.head<2>() - ss.seam_below.head<2>()).norm()));
+        ss.layers_above = d.size();
+        if (! d.empty()) {
+            ss.median_offset_mm = percentile(d, 0.5);
+            ss.share_within_2mm = double(std::count_if(d.begin(), d.end(), [](double x) { return x <= 2.; })) / double(d.size());
         }
     }
 
@@ -347,13 +372,20 @@ std::string MultiplanarAuditResult::to_json() const
         const TransitionStats &t = transitions[i];
         ss << (i ? "," : "") << "{\"object\":" << t.object_label << ",\"section\":" << t.segment << ",\"samples\":" << t.samples
            << ",\"voids\":" << t.voids << ",\"overlaps\":" << t.overlaps << ",\"max_gap_mm\":" << f3(t.max_gap_mm)
-           << ",\"p95_gap_mm\":" << f3(t.p95_gap_mm) << ",\"max_overlap_mm\":" << f3(t.max_overlap_mm) << "}";
+           << ",\"p95_gap_mm\":" << f3(t.p95_gap_mm) << ",\"max_overlap_mm\":" << f3(t.max_overlap_mm) << ",\"worst_voids\":[";
+        for (size_t k = 0; k < t.worst_voids.size(); ++ k) {
+            const UnfoundedSample &u = t.worst_voids[k];
+            ss << (k ? "," : "") << "{\"at\":[" << f3(u.at.x()) << "," << f3(u.at.y()) << "," << f3(u.at.z()) << "],\"gap_mm\":" << f3(u.gap_mm)
+               << ",\"layer\":" << u.layer_id << ",\"gcode_line\":" << u.gcode_line << ",\"kind\":" << u.role << "}";
+        }
+        ss << "]}";
     }
     ss << "],\"seams\":[";
     for (size_t i = 0; i < seams.size(); ++ i) {
         const SeamStats &s = seams[i];
         ss << (i ? "," : "") << "{\"object\":" << s.object_label << ",\"below\":" << s.segment_below << ",\"above\":" << s.segment_above
-           << ",\"xy_jump_mm\":" << f3(s.xy_jump_mm) << ",\"seam_below\":[" << f3(s.seam_below.x()) << "," << f3(s.seam_below.y()) << "," << f3(s.seam_below.z())
+           << ",\"xy_jump_mm\":" << f3(s.xy_jump_mm) << ",\"layers_above\":" << s.layers_above
+           << ",\"median_offset_mm\":" << f3(s.median_offset_mm) << ",\"share_within_2mm\":" << f3(s.share_within_2mm) << ",\"seam_below\":[" << f3(s.seam_below.x()) << "," << f3(s.seam_below.y()) << "," << f3(s.seam_below.z())
            << "],\"seam_above\":[" << f3(s.seam_above.x()) << "," << f3(s.seam_above.y()) << "," << f3(s.seam_above.z()) << "]}";
     }
     ss << "],\"rotary_words\":" << rotary_words << "}";
@@ -375,8 +407,9 @@ std::string MultiplanarAuditResult::to_text() const
            << " voids (max " << f3(t.max_gap_mm) << ", p95 " << f3(t.p95_gap_mm) << " mm), " << t.overlaps << " overlaps (max "
            << f3(t.max_overlap_mm) << " mm)\n";
     for (const SeamStats &s : seams)
-        ss << "Seam object " << s.object_label << " section " << s.segment_below << " -> " << s.segment_above << ": jump "
-           << f3(s.xy_jump_mm) << " mm\n";
+        ss << "Seam object " << s.object_label << " section " << s.segment_below << " -> " << s.segment_above << ": first-layer jump "
+           << f3(s.xy_jump_mm) << " mm; over " << s.layers_above << " layers above, median offset " << f3(s.median_offset_mm)
+           << " mm, " << f3(100. * s.share_within_2mm) << "% within 2 mm of the seam line\n";
     ss << "Rotary axis words: " << rotary_words << "\n";
     return ss.str();
 }

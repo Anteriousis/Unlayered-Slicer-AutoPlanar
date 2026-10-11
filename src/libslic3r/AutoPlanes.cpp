@@ -636,11 +636,31 @@ PlanResult plan(const ModelObject &object, const Transform3d &T, const DynamicPr
 
     report(10, "Finding sloped and overhanging regions");
     std::vector<Seed> seeds = region_seeds(world, res.process, std::max(1., worst_limit));
-    // Drop regions too small to matter: under 2% of the part's surface or 20 mm2.
-    double total_area = 0.;
-    for (const Face &f : faces_of(world)) total_area += f.area;
-    seeds.erase(std::remove_if(seeds.begin(), seeds.end(), [&](const Seed &s) {
-        return s.area < std::max(20., 0.02 * total_area); }), seeds.end());
+    // Drop only regions too small to print a visible difference on (an absolute floor, not a share of
+    // the part: a share made every feature of a large part disappear -- each 56 mm2 ramp of a 76 mm
+    // test part was under 2%). Then merge regions of the same kind leaning the same way (within 15
+    // degrees of azimuth): a fixed nozzle tilts them by the same few degrees anyway, so one section
+    // serves them all, and eight ramps on one side need one plane, not eight.
+    seeds.erase(std::remove_if(seeds.begin(), seeds.end(), [](const Seed &s) { return s.area < 10.; }), seeds.end());
+    {
+        std::vector<Seed> merged;
+        for (const Seed &s : seeds) {
+            const double az = std::atan2(s.normal.y(), s.normal.x());
+            auto it = std::find_if(merged.begin(), merged.end(), [&](const Seed &m) {
+                if (m.origin != s.origin) return false;
+                double d = std::abs(std::atan2(m.normal.y(), m.normal.x()) - az);
+                d = std::min(d, 2. * PI - d);
+                return d < rad(15.);
+            });
+            if (it == merged.end()) { merged.push_back(s); continue; }
+            const double a = it->area + s.area;
+            it->normal    = ((it->normal * it->area + s.normal * s.area) / a).normalized();
+            it->area      = a;
+            if (s.low_point.z() < it->low_point.z()) it->low_point = s.low_point;
+        }
+        seeds = std::move(merged);
+    }
+    std::sort(seeds.begin(), seeds.end(), [](const Seed &l, const Seed &r) { return l.area > r.area; });
     if (seeds.size() > 6) seeds.resize(6);
 
     // Branch analysis -- only proposes; the proposals face the same limits as everything else.

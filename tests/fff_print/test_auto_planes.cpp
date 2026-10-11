@@ -69,9 +69,15 @@ ModelObject *add_part(Model &model, const indexed_triangle_set &its, const Vec3d
         mi->set_rotation(Vec3d(rotation_deg * (PI / 180.)));
     if (mirror_x)
         mi->set_mirror(Vec3d(-1., 1., 1.));
-    mo->ensure_on_bed();
+    // Centre the mesh on the object origin, then put the part ON the bed explicitly. (Centring after
+    // ensure_on_bed() sinks the part by half its height, and ensure_on_bed() then leaves a part that
+    // deep alone as deliberately sunk -- which is how earlier versions of these tests ran on
+    // half-buried parts.)
     mo->center_around_origin();
-    mo->ensure_on_bed();
+    const double min_z = mo->instance_bounding_box(0).min.z();
+    mi->set_offset(Z, mi->get_offset(Z) - min_z);
+    mo->invalidate_bounding_box();
+    REQUIRE(std::abs(mo->instance_bounding_box(0).min.z()) < 1e-6);
     return mo;
 }
 
@@ -459,4 +465,42 @@ TEST_CASE("Tilted-floor section support has a foundation", "[autoplanes][cascade
     // column missing underneath shows up as a gap of millimetres.
     CHECK(audit.support.worst_gap_mm < 0.3);
     CHECK(audit.rotary_words == 0);   // fixed-nozzle output carries no rotary axis words
+    // Floor gap fill: the bonding layer's beads reach the section below without doubling up on it.
+    for (const TransitionStats &t : audit.transitions)
+        CHECK(t.overlaps == 0);
+    CHECK(audit.model.unfounded == 0);
+}
+
+// The seam of a tilted section continues the seam line of the section below instead of restarting
+// wherever that section's own placement puts it (reproduced as a 36.8 mm jump on a saved project).
+TEST_CASE("Seam continues across a cut-plane transition", "[autoplanes][seam]")
+{
+    DynamicPrintConfig config = virtual_printer_config();
+    config.set_deserialize_strict({ { "seam_position", "aligned" }, { "enable_support", "0" }, { "enable_arc_fitting", "0" } });
+    Model model;
+    ModelObject *mo = add_part(model, its_make_cube(20., 20., 20.));
+    const Transform3d T = mo->instances.front()->get_matrix();
+    CutPlane cp;
+    cp.point            = T.inverse() * Vec3d(128., 128., 10.);
+    cp.normal           = AutoPlanes::normal_to_local(T, Vec3d::UnitZ());
+    const double a      = 4. * PI / 180.;
+    cp.build_normal     = AutoPlanes::normal_to_local(T, Vec3d(std::sin(a), 0., std::cos(a)));
+    cp.has_build_normal = true;
+    mo->cut_planes.enabled = true;
+    mo->cut_planes.planes  = { cp };
+
+    Print print;
+    print.apply(model, config);
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.validate().string.empty());
+    print.process();
+    ScopedTemporaryFile tmp(".gcode");
+    GCodeProcessorResult result;
+    print.export_gcode(tmp.string(), &result, nullptr);
+    const MultiplanarAuditResult audit = audit_multiplanar_toolpaths(result, tmp.string(), MultiplanarAuditParams());
+    INFO(audit.to_text());
+    REQUIRE(audit.seams.size() == 1);
+    // A cube's upper section is a full square on every tilted layer, so the seam can sit on the
+    // vertical line of the one below throughout.
+    CHECK(audit.seams.front().share_within_2mm >= 0.8);
 }

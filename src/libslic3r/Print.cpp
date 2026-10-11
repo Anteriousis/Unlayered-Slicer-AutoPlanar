@@ -1580,10 +1580,10 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             }
             const double reach   = object->effective_build_reach();
             const double derived = virtual_tilt_limit_deg(envelope, m_config.nonplanar_gantry_height.value, reach, azimuth);
-            // Whichever is stricter, ignoring the ones that are switched off (0 = not applied).
-            double limit = 0.;
-            if (derived > 0. && manual > 0.) limit = std::min(derived, manual);
-            else                             limit = std::max(derived, manual);
+            // Whichever is stricter, ignoring the ones that are switched off (0 = not applied). The one
+            // shared definition, also used by the GUI drag limit and the automatic plane planner.
+            const double limit = virtual_tilt_limit_enforced_deg(envelope, m_config.nonplanar_gantry_height.value,
+                                                                 manual, reach, azimuth);
             if (limit <= 0. || tilt <= limit + EPSILON)
                 continue;
 

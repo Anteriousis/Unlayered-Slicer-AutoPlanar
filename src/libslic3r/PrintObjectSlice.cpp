@@ -1126,9 +1126,10 @@ std::string PrintObject::curved_blend_error() const
         const auto& rc=printing_region(i).config();
         if (rc.sparse_infill_density.value<100.-EPSILON || rc.infill_combination.value ||
             m_config.wall_generator.value!=PerimeterGeneratorType::Classic || rc.seam_slope_type.value!=SeamScarfType::None ||
+            rc.wipe_on_loops.value || rc.wipe_before_external_loop.value ||
             rc.ironing_type.value!=IroningType::NoIroning || rc.fuzzy_skin.value!=FuzzySkinType::None ||
             rc.zaa_enabled.value || rc.wave_overhangs.value || rc.make_overhang_printable.value)
-            return "Curved blend currently requires 100% infill, classic walls, no combined infill, scarf, ironing, fuzzy skin, Z anti-aliasing or wave overhangs.";
+            return "Curved blend currently requires 100% infill, classic walls, no combined infill, surface wipe, scarf, ironing, fuzzy skin, Z anti-aliasing or wave overhangs.";
     }
     return {};
 }

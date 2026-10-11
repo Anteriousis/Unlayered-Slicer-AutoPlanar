@@ -21,6 +21,7 @@
 
 #include "auto_planes_fixtures.hpp"
 #include "test_helpers.hpp"
+#include "test_utils.hpp"
 
 using namespace Slic3r;
 using namespace AutoPlanesFixtures;
@@ -65,7 +66,7 @@ ModelObject *add_part(Model &model, const indexed_triangle_set &its, const Vec3d
     ModelInstance *mi = mo->add_instance();
     mi->set_offset(offset);
     if (rotation_deg != Vec3d::Zero())
-        mi->set_rotation(Geometry::deg2rad(rotation_deg));
+        mi->set_rotation(Vec3d(rotation_deg * (PI / 180.)));
     if (mirror_x)
         mi->set_mirror(Vec3d(-1., 1., 1.));
     mo->ensure_on_bed();

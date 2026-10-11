@@ -38,11 +38,21 @@ std::string fmt0(double v) { return (boost::format("%.0f") % v).str(); }
 
 template<class T> const T *opt(const ConfigBase &c, const char *key) { return c.option<T>(key); }
 
+// Numeric scalar option as double. getFloat() throws on an int option (support_threshold_angle is
+// one), so dispatch on the type; anything else falls back to the default rather than throwing.
 double get_float(const ConfigBase &c, const char *key, double dflt)
 {
-    if (const ConfigOption *o = c.option(key))
-        return o->getFloat();
-    return dflt;
+    const ConfigOption *o = c.option(key);
+    if (o == nullptr)
+        return dflt;
+    switch (o->type()) {
+    case coFloat:
+    case coPercent:
+    case coFloatOrPercent: return o->getFloat();
+    case coInt:            return double(o->getInt());
+    case coBool:           return o->getBool() ? 1. : 0.;
+    default:               return dflt;
+    }
 }
 
 double get_first_float(const ConfigBase &c, const char *key, double dflt)
@@ -130,6 +140,8 @@ void accumulate(PredictedMetrics &m, const std::vector<Face> &faces, const Vec3d
         if (c > 0.) {
             // Upward in this segment's frame.
             const double theta = deg(std::acos(clamp1(c)));   // face from the layer plane
+            if (theta < kTopLikeDeg)
+                m.upward_area_mm2 += f.area;
             if (theta > kFlatDeg && theta < kTopLikeDeg) {
                 m.stepped_area_mm2  += f.area;
                 // Layer boundaries cross the surface every h / sin(theta) along it, so a face of area A
@@ -427,13 +439,18 @@ double net_benefit(const Candidate &c, const Candidate &base, Preference pref, s
                                        : "Predicted support volume " + fmt0(-100. * f) + "% higher") +
                                 " (" + fmt0(b.support_volume_mm3) + " -> " + fmt0(m.support_volume_mm3) + " mm3, estimate).");
     }
-    if (b.terrace_length_mm > 5.) {
-        const double f = (b.terrace_length_mm - m.terrace_length_mm) / b.terrace_length_mm;
+    // Finish: the change in the SHARE of upward-facing surface that prints stepped. A tilt can remove
+    // steps (a slope printed parallel to its layers) and create them (a flat top printed on tilted
+    // layers turns into a staircase); measuring both against the part's whole upward surface keeps
+    // the penalty proportional to how much of the part is affected, even when planar had no steps.
+    const double up_ref = std::max(b.upward_area_mm2, m.upward_area_mm2);
+    if (up_ref > 1.) {
+        const double f = (b.stepped_area_mm2 - m.stepped_area_mm2) / up_ref;
         total += wf * f;
         if (benefits && std::abs(f) > 0.005)
-            benefits->push_back((f > 0 ? "Predicted terrace edges on upper surfaces " + fmt0(100. * f) + "% shorter"
-                                       : "Predicted terrace edges on upper surfaces " + fmt0(-100. * f) + "% longer") +
-                                " (estimate).");
+            benefits->push_back((f > 0 ? "Stepped upper surface reduced by " + fmt0(100. * f) + "% of the part's upward area"
+                                       : "Stepped upper surface increased by " + fmt0(-100. * f) + "% of the part's upward area") +
+                                " (" + fmt0(b.stepped_area_mm2) + " -> " + fmt0(m.stepped_area_mm2) + " mm2, estimate).");
     }
     if (b.effort_index_s > 0.) {
         const double f = (m.effort_index_s - b.effort_index_s) / b.effort_index_s;
@@ -477,7 +494,7 @@ std::vector<Seed> region_seeds(const indexed_triangle_set &world, const ProcessP
             const double theta = deg(std::acos(clamp1(c)));
             if (theta > kFlatDeg && theta < std::min(kTopLikeDeg, 3. * max_useful_tilt_deg + 5.))
                 kind[i] = Slope;
-        } else if (c < 0. && process.support_enabled) {
+        } else if (c < 0.) {   // also with supports off: an unsupported overhang sags, so a tilt matters more
             if (f.v[0].z() < kBedEps && f.v[1].z() < kBedEps && f.v[2].z() < kBedEps)
                 continue;
             const double beta = deg(std::acos(clamp1(-c)));
@@ -680,9 +697,15 @@ PlanResult plan(const ModelObject &object, const Transform3d &T, const DynamicPr
         if (angle_between_deg(dir, Vec3d::UnitZ()) < 0.2)
             continue;
         const Vec3d dir_local = normal_to_local(T, dir);
-        for (int orient = 0; orient < 2; ++ orient) {
-            // orient 0: cut parallel to the tilted layers; 1: horizontal cut, tilted layers above it.
-            const Vec3d cut_world = orient == 0 ? dir : Vec3d::UnitZ();
+        const Vec2d lean_xy   = dir.head<2>().norm() > 1e-9 ? Vec2d(dir.head<2>().normalized()) : Vec2d::Zero();
+        for (int orient = 0; orient < 3; ++ orient) {
+            // orient 0: cut parallel to the tilted layers; 1: horizontal cut, tilted layers above it;
+            // 2: vertical cut facing the lean, so only what lies beyond the region's root is tilted --
+            //    the shape that lets two features leaning opposite ways (bracket arms) each get their own
+            //    section, where any plane spanning the part would tilt one of them the wrong way.
+            if (orient == 2 && lean_xy.squaredNorm() < 0.5)
+                continue;
+            const Vec3d cut_world = orient == 0 ? dir : orient == 1 ? Vec3d::UnitZ() : Vec3d(lean_xy.x(), lean_xy.y(), 0.);
             // Lowest point of the region along the cut normal, then a little below so the whole region
             // is in the tilted section.
             for (double drop : { h, 3. * h }) {
@@ -703,7 +726,7 @@ PlanResult plan(const ModelObject &object, const Transform3d &T, const DynamicPr
                 std::vector<CutPlane> planes = fixed;
                 planes.push_back(p);
                 proposals.push_back({ planes, seed.origin + " " + std::to_string(seed_no) +
-                                      (orient == 0 ? ", cut parallel to layers" : ", horizontal cut") +
+                                      (orient == 0 ? ", cut parallel to layers" : orient == 1 ? ", horizontal cut" : ", side cut") +
                                       (drop > 1.5 * h ? ", lower" : ""), seed.origin });
             }
         }
@@ -733,18 +756,27 @@ PlanResult plan(const ModelObject &object, const Transform3d &T, const DynamicPr
 
     // Two-plane combinations of the best feasible single-plane candidates from different regions.
     if (options.max_planes >= 2 && ! canceled()) {
+        // The best feasible variant of each REGION, whatever its sign: two features leaning opposite
+        // ways only pay off together, so each alone can score below planar.
+        std::map<std::string, size_t> best_per_region;
+        for (size_t i = 0; i < res.candidates.size(); ++ i) {
+            const Candidate &c = res.candidates[i];
+            if (! c.feasible || c.planes.empty())
+                continue;
+            const std::string region = c.name.substr(0, c.name.find(','));
+            auto it = best_per_region.find(region);
+            if (it == best_per_region.end() || c.net_benefit > res.candidates[it->second].net_benefit)
+                best_per_region[region] = i;
+        }
         std::vector<size_t> good;
-        for (size_t i = 0; i < res.candidates.size(); ++ i)
-            if (res.candidates[i].feasible && res.candidates[i].net_benefit > 0.)
-                good.push_back(i);
+        for (const auto &kv : best_per_region)
+            good.push_back(kv.second);
         std::sort(good.begin(), good.end(), [&](size_t l, size_t r) { return res.candidates[l].net_benefit > res.candidates[r].net_benefit; });
-        if (good.size() > 3) good.resize(3);
+        if (good.size() > 4) good.resize(4);
         for (size_t a = 0; a < good.size(); ++ a)
             for (size_t b = a + 1; b < good.size(); ++ b) {
                 if (canceled()) break;
                 const Candidate &ca = res.candidates[good[a]], &cb = res.candidates[good[b]];
-                if (ca.planes.back().origin == cb.planes.back().origin && ca.name.substr(0, 16) == cb.name.substr(0, 16))
-                    continue;   // same region, different variant
                 Proposal pr;
                 pr.planes = fixed;
                 pr.planes.push_back(ca.planes.back().plane);

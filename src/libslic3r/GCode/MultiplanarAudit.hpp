@@ -39,6 +39,17 @@ struct MultiplanarAuditParams
     int    transition_layers    = 3;     // layers of a non-root section examined at its transition
 };
 
+struct UnfoundedSample
+{
+    Vec3f    at = Vec3f::Zero();
+    double   gap_mm = 0.;
+    int      object = -1;     // object label, or spatial cluster when the G-code carries no labels
+    int      segment = -1;
+    int      role = 0;        // ExtrusionRole
+    unsigned gcode_line = 0;
+    unsigned layer_id = 0;
+};
+
 struct FoundationStats
 {
     size_t samples          = 0;
@@ -47,6 +58,7 @@ struct FoundationStats
     double worst_gap_mm     = 0.;
     Vec3f  worst_at         = Vec3f::Zero();
     unsigned worst_gcode_id = 0;
+    std::vector<UnfoundedSample> worst;   // the largest gaps, up to 25, worst first
     double unfounded_ratio() const { return samples ? double(unfounded) / double(samples) : 0.; }
 };
 

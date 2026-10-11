@@ -134,6 +134,7 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
         const float len = (b - a).norm();
         const int   n   = std::max(1, int(std::ceil(len / float(params.sample_step_mm))));
         move_first.push_back(samples.size());
+
         for (int j = 1; j <= n; ++ j) {
             const Vec3f p = a + (b - a) * (float(j) / float(n));
             samples.push_back({ p, p.z() - std::max(0.01f, m.height), std::max(0.1f, m.width), k,
@@ -142,6 +143,37 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
         }
     }
     move_first.push_back(samples.size());
+
+    // Separate objects by XY connectivity on a 2 mm grid, so per-object transition and seam figures
+    // do not merge objects printed in the same file.
+    // Always by position: label ids are not guaranteed to be present or distinct per object, while
+    // separately placed objects are always separated in XY.
+    const float cell = 2.f;
+    const int   nx = samples.empty() ? 1 : std::max(1, int((hi.x() - lo.x()) / cell) + 1);
+    const int   ny = samples.empty() ? 1 : std::max(1, int((hi.y() - lo.y()) / cell) + 1);
+    std::vector<int> grid(size_t(nx) * size_t(ny), -2);
+    auto at = [&](const Vec3f &p) { return size_t(std::clamp(int((p.y() - lo.y()) / cell), 0, ny - 1)) * size_t(nx) + size_t(std::clamp(int((p.x() - lo.x()) / cell), 0, nx - 1)); };
+    auto cluster_of = [&](const Vec3f &p) { return samples.empty() ? -1 : grid[at(p)]; };
+    if (! samples.empty()) {
+        for (const Sample &s : samples) grid[at(s.p)] = -1;
+        int label = 0;
+        for (size_t c = 0; c < grid.size(); ++ c) {
+            if (grid[c] != -1) continue;
+            std::vector<size_t> st { c }; grid[c] = label;
+            while (! st.empty()) {
+                const size_t q = st.back(); st.pop_back();
+                const int qx = int(q % size_t(nx)), qy = int(q / size_t(nx));
+                for (int dy = -1; dy <= 1; ++ dy) for (int dx = -1; dx <= 1; ++ dx) {
+                    const int x = qx + dx, y = qy + dy;
+                    if (x < 0 || y < 0 || x >= nx || y >= ny) continue;
+                    const size_t r = size_t(y) * size_t(nx) + size_t(x);
+                    if (grid[r] == -1) { grid[r] = label; st.push_back(r); }
+                }
+            }
+            ++ label;
+        }
+        for (Sample &s : samples) s.object_label = grid[at(s.p)];
+    }
 
     // First layer of every (object, section), for the transition window.
     std::map<std::pair<int, int>, unsigned> first_layer;
@@ -187,6 +219,7 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
                         ++ fs.unfounded;
                         const double g = std::min(gap_near, gap_wide);
                         if (g > fs.worst_gap_mm) { fs.worst_gap_mm = g; fs.worst_at = s.p; fs.worst_gcode_id = s.gcode_id; }
+                        fs.worst.push_back({ s.p, g, s.object_label, s.segment, int(s.kind), s.gcode_id, s.layer_id });
                     }
                 }
 
@@ -216,6 +249,10 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
                 grid.insert(uint32_t(i), samples[i].p);
         }
     }
+    for (FoundationStats *fs : { &out.model, &out.support }) {
+        std::sort(fs->worst.begin(), fs->worst.end(), [](const UnfoundedSample &l, const UnfoundedSample &r) { return l.gap_mm > r.gap_mm; });
+        if (fs->worst.size() > 25) fs->worst.resize(25);
+    }
     for (auto &[key, t] : trans) {
         t.p95_gap_mm = percentile(trans_gaps[key], 0.95);
         out.transitions.push_back(t);
@@ -232,8 +269,9 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
             const auto &m = result.moves[i];
             if (m.type != EMoveType::Extrude || m.delta_extruder <= 0.f)
                 continue;
-            if (m.object_label_id != cur_obj || m.cut_segment_id != cur_seg || m.layer_id != cur_layer) {
-                cur_obj = m.object_label_id; cur_seg = m.cut_segment_id; cur_layer = m.layer_id; taken = false;
+            const int obj = cluster_of(m.position);
+            if (obj != cur_obj || m.cut_segment_id != cur_seg || m.layer_id != cur_layer) {
+                cur_obj = obj; cur_seg = m.cut_segment_id; cur_layer = m.layer_id; taken = false;
             }
             if (! taken && m.extrusion_role == erExternalPerimeter) {
                 seams.push_back({ cur_obj, cur_seg, cur_layer, result.moves[i - 1].position });
@@ -241,10 +279,15 @@ MultiplanarAuditResult audit_multiplanar_toolpaths(const GCodeProcessorResult &r
             }
         }
     }
-    // A transition is where, for one object, the section changes between consecutive seam records.
-    for (size_t i = 1; i < seams.size(); ++ i) {
-        const LayerSeam &a = seams[i - 1], &b = seams[i];
-        if (a.obj == b.obj && a.seg != b.seg && b.seg > 0) {
+    // A transition is where, for one object, the section changes between that object's consecutive
+    // seam records (objects interleave in "by group" order, so neighbours in the file are not enough).
+    std::map<int, LayerSeam> last_of;
+    for (const LayerSeam &b : seams) {
+        auto it = last_of.find(b.obj);
+        if (it == last_of.end()) { last_of.emplace(b.obj, b); continue; }
+        const LayerSeam a = it->second;
+        it->second = b;
+        if (a.seg != b.seg && b.seg > 0) {
             SeamStats ss;
             ss.object_label = a.obj; ss.segment_below = a.seg; ss.segment_above = b.seg;
             ss.seam_below = a.p; ss.seam_above = b.p;
@@ -289,7 +332,13 @@ std::string MultiplanarAuditResult::to_json() const
         ss << "\"" << name << "\":{\"samples\":" << f.samples << ",\"unfounded\":" << f.unfounded << ",\"spanned\":" << f.bridged
            << ",\"unfounded_ratio\":" << f3(f.unfounded_ratio()) << ",\"worst_gap_mm\":" << f3(f.worst_gap_mm)
            << ",\"worst_at\":[" << f3(f.worst_at.x()) << "," << f3(f.worst_at.y()) << "," << f3(f.worst_at.z()) << "]"
-           << ",\"worst_gcode_line\":" << f.worst_gcode_id << "}";
+           << ",\"worst_gcode_line\":" << f.worst_gcode_id << ",\"worst\":[";
+        for (size_t i = 0; i < f.worst.size(); ++ i) {
+            const UnfoundedSample &u = f.worst[i];
+            ss << (i ? "," : "") << "{\"at\":[" << f3(u.at.x()) << "," << f3(u.at.y()) << "," << f3(u.at.z()) << "],\"gap_mm\":" << f3(u.gap_mm)
+               << ",\"object\":" << u.object << ",\"section\":" << u.segment << ",\"layer\":" << u.layer_id << ",\"gcode_line\":" << u.gcode_line << "}";
+        }
+        ss << "]}";
     };
     ss << "{\"multiplanar\":" << (multiplanar ? "true" : "false") << ",";
     fs("model_foundation", model); ss << ",";

@@ -81,18 +81,21 @@ std::string GCodeWriter::curved_travel(const Vec3d& target, const std::string& c
     // material; the configured slope envelope bounds the surrounding head.
     // All three moves are native writer output and are read by Preview.
     const double safe=std::max({m_curved_safe_z,m_pos.z(),target.z()});
-    const double speed=std::min(this->travel_xy_speed(),m_curved_z_speed)*60.;
+    const double xy_speed=this->travel_xy_speed(false)*60.;
+    double configured_z=this->config.travel_speed_z.get_at(m_cached_extruder_idx);
+    if (configured_z<=0.) configured_z=this->travel_xy_speed(false);
+    const double z_speed=std::min(configured_z,m_curved_z_speed)*60.;
     std::string out;
     GCodeG1Formatter lift;
-    lift.emit_z(safe); lift.emit_f(speed);
+    lift.emit_z(safe); lift.emit_f(z_speed);
     lift.emit_comment(GCodeWriter::full_gcode_comment,"curved blend: vertical departure");
     out+=lift.string();
     GCodeG1Formatter across;
-    across.emit_xyz(Vec3d(target.x()-m_x_offset,target.y()-m_y_offset,safe)); across.emit_f(speed);
+    across.emit_xyz(Vec3d(target.x()-m_x_offset,target.y()-m_y_offset,safe)); across.emit_f(xy_speed);
     across.emit_comment(GCodeWriter::full_gcode_comment,"curved blend: traverse above solid");
     out+=across.string();
     GCodeG1Formatter descend;
-    descend.emit_z(target.z()); descend.emit_f(speed);
+    descend.emit_z(target.z()); descend.emit_f(z_speed);
     descend.emit_comment(GCodeWriter::full_gcode_comment,comment);
     out+=descend.string();
     m_pos=target; m_lifted=0.; m_to_lift=0.; set_current_position_clear(true);

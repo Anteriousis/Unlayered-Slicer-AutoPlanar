@@ -1507,6 +1507,41 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
 // one: blocked points are never taken, a candidate overhanging more than the placer's own choice is
 // skipped, and a loop with no candidate within kMaxReach of the line keeps its own seam. Only for the placements that produce a deliberate seam line (aligned,
 // aligned back, rear); nearest and random are left alone.
+std::optional<size_t> SeamPlacerImpl::continuation_seam_candidate(
+    const PrintObjectSeamData::LayerSeams &layer, const Perimeter &per,
+    const std::vector<Vec2f> &targets, float max_reach)
+{
+    if (per.end_index > layer.points.size() || per.end_index < per.start_index + 3)
+        return std::nullopt;
+    // The regular seam placer gives painting top priority and may finalize a point
+    // at the centre of an enforced patch. Keep that decision on painted loops.
+    for (size_t i = per.start_index; i < per.end_index; ++ i)
+        if (layer.points[i].type == EnforcedBlockedSeamPoint::Enforced)
+            return std::nullopt;
+
+    size_t own = per.seam_index;
+    if (per.finalized) {
+        float dmin = std::numeric_limits<float>::max();
+        for (size_t i = per.start_index; i < per.end_index; ++ i) {
+            const float d = (layer.points[i].position - per.final_seam_position).squaredNorm();
+            if (d < dmin) { dmin = d; own = i; }
+        }
+    }
+    const float own_overhang = own < layer.points.size() ? layer.points[own].overhang : 0.f;
+    std::optional<size_t> best;
+    float best_d = max_reach;
+    for (size_t i = per.start_index; i < per.end_index; ++ i) {
+        const SeamCandidate &c = layer.points[i];
+        if (c.type == EnforcedBlockedSeamPoint::Blocked || c.overhang > own_overhang + 0.1f)
+            continue;
+        for (const Vec2f &tg : targets) {
+            const float d = (c.position.head<2>() - tg).norm();
+            if (d < best_d) { best_d = d; best = i; }
+        }
+    }
+    return best;
+}
+
 void SeamPlacer::continue_seams_across_sections(const Print &print)
 {
   using namespace SeamPlacerImpl;
@@ -1573,32 +1608,11 @@ void SeamPlacer::continue_seams_across_sections(const Print &print)
           const double t = (double(z) - r.z()) / up_slice.z();
           targets.emplace_back((r + t * up_slice).head<2>().cast<float>());
         }
-        // The overhang of the seam the placer chose (for an aligned seam, of the candidate nearest its
-        // final position), so a moved seam is never worse in that respect.
-        size_t own = per.seam_index;
-        if (per.finalized) {
-            float dmin = std::numeric_limits<float>::max();
-            for (size_t i = per.start_index; i < per.end_index; ++ i) {
-                const float d = (layer.points[i].position - per.final_seam_position).squaredNorm();
-                if (d < dmin) { dmin = d; own = i; }
-            }
-        }
-        const float own_overhang = own < layer.points.size() ? layer.points[own].overhang : 0.f;
-        size_t best = size_t(-1);
-        float  best_d = kMaxReach;
-        for (size_t i = per.start_index; i < per.end_index; ++ i) {
-          const SeamCandidate &c = layer.points[i];
-          if (c.type == EnforcedBlockedSeamPoint::Blocked || c.overhang > own_overhang + 0.1f)
-            continue;
-          for (const Vec2f &tg : targets) {
-            const float d = (c.position.head<2>() - tg).norm();
-            if (d < best_d) { best_d = d; best = i; }
-          }
-        }
-        if (best != size_t(-1)) {
-          per.seam_index          = best;
+        const auto best = continuation_seam_candidate(layer, per, targets, kMaxReach);
+        if (best) {
+          per.seam_index          = *best;
           per.finalized           = true;
-          per.final_seam_position = layer.points[best].position;
+          per.final_seam_position = layer.points[*best].position;
         }
       }
     }

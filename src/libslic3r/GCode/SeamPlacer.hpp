@@ -41,7 +41,7 @@ enum class EnforcedBlockedSeamPoint {
 // struct representing single perimeter loop
 struct Perimeter {
   size_t start_index{};
-  size_t end_index{}; //inclusive!
+  size_t end_index{}; // exclusive, matching the candidate range [start_index, end_index)
   size_t seam_index{};
   float flow_width{};
 
@@ -107,6 +107,14 @@ struct PrintObjectSeamData
     layers.clear();
   }
 };
+
+namespace SeamPlacerImpl {
+// Choose a continuation seam without overriding a painted enforcer or the existing
+// overhang/blocker constraints. A missing result means keep the placer's own seam.
+std::optional<size_t> continuation_seam_candidate(const PrintObjectSeamData::LayerSeams &layer,
+                                                 const Perimeter &perimeter,
+                                                 const std::vector<Vec2f> &targets, float max_reach);
+}
 
 class SeamPlacer {
 public:

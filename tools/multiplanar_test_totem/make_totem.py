@@ -4,9 +4,9 @@
 One print shows, side by side on one plate:
 
   * TILT LADDERS   four rows of ramps, one per side (+X, -X, +Y, -Y), each rising away from the centre at
-                   graded angles. A fixed-nozzle printer tilts only the rungs within its per-side limit; a
-                   5-axis printer tilts them all. Where a ladder switches from tilted to planar layers is the
-                   printer's real limit for that side -- and the four sides differ because hotends do.
+                   graded angles. Which rungs use tilted layers depends on the planner, the available
+                   planes and the configured machine limits. A planar rung is not a measurement of
+                   the printer's collision limit.
   * OVERHANG SHELVES  eight shelves on the central tower, undersides at graded angles from horizontal, to
                    see where a small tilt removes support and where it cannot.
   * DOME CAP       a shallow spherical cap on the tower: curved-surface finish, planar vs tilted.
@@ -25,7 +25,7 @@ subset can be printed.
 
     python3 make_totem.py --out out_dir [--scale 1.0] [--tilts ...] [--overhangs ...] [--preview]
 
-Requires: numpy, trimesh, manifold3d (booleans); matplotlib for --preview.
+Requires: numpy, trimesh, manifold3d (booleans), scipy; matplotlib for --preview.
 """
 
 import argparse
@@ -39,6 +39,7 @@ from trimesh.creation import box, cylinder, icosphere
 
 DEFAULT_TILTS = [2, 3, 4, 5, 7, 10, 15, 25]          # deg, ramp top from horizontal; 8 rungs per side
 DEFAULT_OVERHANGS = [15, 20, 25, 30, 35, 40, 45, 55]  # deg, shelf underside from horizontal; 8 shelves
+MODULE_NAMES = {"base", "tower_dome", "shelves", "tilt_ladders", "cube", "arch", "fork", "seam_witness"}
 
 
 def wedge(x0, x1, y0, y1, z0, h_in, slope_deg):
@@ -62,15 +63,16 @@ def wedge(x0, x1, y0, y1, z0, h_in, slope_deg):
     return m
 
 
-def shelf(depth, width, z_root, overhang_deg, top_thick):
+def shelf(depth, width, z_root, overhang_deg, top_thick, root_inset=1.0):
     """Shelf sticking out along +X from x=0: underside rises at overhang_deg from horizontal going out,
     top is flat. Width centred on y=0."""
     t = math.tan(math.radians(overhang_deg))
     z_tip_under = z_root + depth * t
+    z_inside_under = z_root - root_inset * t
     z_top = z_tip_under + top_thick
     v = np.array([
-        [-1.0, -width / 2, z_root], [depth, -width / 2, z_tip_under], [depth, width / 2, z_tip_under], [-1.0, width / 2, z_root],
-        [-1.0, -width / 2, z_top], [depth, -width / 2, z_top], [depth, width / 2, z_top], [-1.0, width / 2, z_top],
+        [-root_inset, -width / 2, z_inside_under], [depth, -width / 2, z_tip_under], [depth, width / 2, z_tip_under], [-root_inset, width / 2, z_inside_under],
+        [-root_inset, -width / 2, z_top], [depth, -width / 2, z_top], [depth, width / 2, z_top], [-root_inset, width / 2, z_top],
     ])
     f = np.array([[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4],
                   [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]])
@@ -133,7 +135,7 @@ def build(p):
     for i, ang in enumerate(p.overhangs[:8]):
         face, level = i // 2, i % 2
         offset = (-1 if level == 0 else 1) * 4.5 * s if True else 0
-        sh = shelf(shelf_depth, shelf_w, levels[level], ang, shelf_top)
+        sh = shelf(shelf_depth, shelf_w, levels[level], ang, shelf_top, root_inset=s)
         sh = move(sh, tower / 2, offset, 0)
         shelves.append(rot_z(sh, 90 * face))
     modules["shelves"] = trimesh.boolean.union(shelves, engine="manifold")
@@ -193,7 +195,7 @@ def build(p):
     modules["cube"] = move(box([10 * s, 10 * s, 10 * s + lap]), c, -c, z_base - lap + (10 * s + lap) / 2)
 
     if p.only:
-        keep = set(p.only.split(","))
+        keep = {x.strip() for x in p.only.split(",") if x.strip()}
         modules = {k: v for k, v in modules.items() if k in keep or k == "base"}
     totem = trimesh.boolean.union(list(modules.values()), engine="manifold")
     return totem, modules
@@ -258,6 +260,16 @@ def main():
     p = ap.parse_args()
     p.tilts = [float(x) for x in p.tilts.split(",") if x]
     p.overhangs = [float(x) for x in p.overhangs.split(",") if x]
+
+    if not math.isfinite(p.scale) or p.scale <= 0 or not math.isfinite(p.plate) or p.plate <= 0:
+        ap.error("--scale and --plate must be finite positive numbers")
+    if not p.tilts or any(not math.isfinite(x) or not 0 <= x < 90 for x in p.tilts):
+        ap.error("--tilts must contain at least one finite angle from 0 (inclusive) to 90 (exclusive)")
+    if not p.overhangs or len(p.overhangs) > 8 or any(not math.isfinite(x) or not 0 <= x < 90 for x in p.overhangs):
+        ap.error("--overhangs must contain 1 to 8 finite angles from 0 (inclusive) to 90 (exclusive)")
+    unknown = {x.strip() for x in p.only.split(",") if x.strip()} - MODULE_NAMES
+    if unknown:
+        ap.error("unknown --only module(s): " + ", ".join(sorted(unknown)))
 
     os.makedirs(p.out, exist_ok=True)
     totem, modules = build(p)

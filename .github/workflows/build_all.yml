@@ -138,7 +138,9 @@ jobs:
   unit_tests_windows_x64:
     name: Windows x64
     needs: build_windows
-    if: ${{ !cancelled() && success() }}
+    # The Windows matrix also builds arm64. A failure there must not skip
+    # testing the successfully built x64 binary used by ordinary Windows PCs.
+    if: ${{ !cancelled() && needs.build_windows.result != 'cancelled' && !inputs.build-deps-only }}
     uses: ./.github/workflows/unit_tests.yml
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}

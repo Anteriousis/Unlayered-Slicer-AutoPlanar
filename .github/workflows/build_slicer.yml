@@ -562,5 +562,16 @@ jobs:
           name: Unlayered_Slicer_profile_validator_Linux_ubuntu_${{ env.ubuntu-ver }}_${{ env.ver }}
           path: './build/src/Release/UnlayeredSlicer_profile_validator'
 
+      # Machine-readable artifact consumed by build_all.yml's slice check.
+      # Keep it separate from the user-facing download name and publish for both arches.
+      - name: Upload profile validator for slice check
+        if: ${{ ! env.ACT && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.sha }}-profile-validator-linux-${{ inputs.arch == 'aarch64' && 'aarch64' || 'x86_64' }}
+          path: './build/src/Release/UnlayeredSlicer_profile_validator'
+          retention-days: 5
+          if-no-files-found: error
+
 
 

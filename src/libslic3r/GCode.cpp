@@ -10880,6 +10880,14 @@ LiftType GCode::to_lift_type(ZHopType z_hop_types) {
 
 bool GCode::needs_retraction(const Polyline &travel, ExtrusionRole role, LiftType& lift_type)
 {
+    if (m_writer.has_curved_blend()) {
+        // A short XY gap still travels above the entire solid and back down.
+        // The ordinary in-layer distance/inside-infill tests cannot describe
+        // that physical path. Use the configured ordinary retraction on every
+        // such approach, with a straight lift; do not replay a planar wipe.
+        lift_type=LiftType::NormalLift;
+        return true;
+    }
     if (travel.length() < scale_(FILAMENT_CONFIG(retraction_minimum_travel))) {
         // skip retraction if the move is shorter than the configured threshold
         return false;

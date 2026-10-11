@@ -123,14 +123,23 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
         const double dz=m_curved_field->world_z(mx,my,target.z())-
                         m_curved_field->world_z(mx,my,target.z()-m_curved_height);
         const auto gradient=m_curved_field->gradient(mx,my,target.z());
-        const double h=dz/std::sqrt(1.+gradient.dx*gradient.dx+gradient.dy*gradient.dy);
+        const double normal_length=std::sqrt(1.+gradient.dx*gradient.dx+gradient.dy*gradient.dy);
+        const double h=dz/normal_length;
         // Physical bead area times physical path length. Upstream's dE already
         // contains material/role ratios; preserve those, replacing only geometry.
         const double ratio=CurvedTransition::Ramp::bead_area(m_curved_width,h)/area0 *
                            (physical-previous).norm()/(length/count);
         char height_tag[64];
-        std::snprintf(height_tag,sizeof(height_tag),";HEIGHT:%.6f\n",h);
+        std::snprintf(height_tag,sizeof(height_tag),";%s%.6f\n",
+                      GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height).c_str(),h);
         out+=height_tag;
+        // In Virtual mode this tag orients the bead, not the actual nozzle:
+        // GCodeProcessorResult::tool_axis_fixed keeps its marker upright.
+        char normal_tag[128];
+        std::snprintf(normal_tag,sizeof(normal_tag),";%s%.8f,%.8f,%.8f\n",
+                      GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Tool_Axis).c_str(),
+                      -gradient.dx/normal_length,-gradient.dy/normal_length,1./normal_length);
+        out+=normal_tag;
         GCodeG1Formatter move;
         move.emit_xyz(Vec3d(physical.x()-m_x_offset,physical.y()-m_y_offset,physical.z()));
         if (!no_extrusion) { filament()->extrude(dE/count*ratio); move.emit_e(filament()->E()); }
@@ -1371,6 +1380,8 @@ std::string GCodeWriter::_travel_to_z(double z, const std::string &comment)
         speed = m_is_first_layer ? this->config.get_abs_value_at("initial_layer_travel_speed", m_cached_extruder_idx)
                                  : this->config.travel_speed.get_at(m_cached_extruder_idx);
     }
+    if (m_curved_field)
+        speed = std::min(speed, m_curved_z_speed);
 
     GCodeG1Formatter w;
     if (has_axis_remap()) {

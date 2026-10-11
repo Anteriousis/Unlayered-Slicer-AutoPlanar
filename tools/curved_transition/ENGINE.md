@@ -20,7 +20,8 @@ variable heights, multiple objects and belt/rotary printers are refused.
 
 The process must have 100% infill, classic walls, no combined infill, scarf seam,
 ironing, fuzzy skin, Z anti-aliasing, wave overhangs, wipe or circular arcs. Normal
-retraction is available. XY shape compensation and Z offset must be zero;
+retraction is available. Draft shields and adaptive pressure advance are refused.
+XY shape and elephant-foot compensation and Z offset must be zero;
 shrinkage compensation must be 100%. Layer-change code may be empty or G92 E0.
 External slicing/G-code scripts, timelapse motion and height-change custom G-code
 are outside this integration. Start and end code stay in their physical frame.
@@ -43,15 +44,23 @@ are outside this integration. Start and end code stay in their physical frame.
   coordinate rounding. Physical bead area and physical segment length replace
   the original geometric flow factor; material/role flow ratios are retained.
   The bead model is an engineering approximation, not a bonding guarantee.
-* Writes physical XYZ and local HEIGHT tags natively. Preview processes those
-  same paths before the user exports; this is not export-only Z post-processing.
+* Writes physical XYZ, local height and layer-normal tags natively. Preview
+  processes those same paths and orients the bead sections before the user
+  exports. Virtual mode keeps the actual nozzle marker upright. This is not
+  export-only Z post-processing.
 * Uses the configured asymmetric hotend pyramid, the gantry limit and the manual
   angle ceiling in the actual uphill direction, including diagonals. This checks
   the represented envelope only, not missing CAD parts or physical deviations.
+  The legacy checker for independent cut-plane episodes does not partition a
+  continuous curved pass correctly, so this narrow mode uses the analytical
+  whole-ramp bounds instead; it does not claim a general mesh collision check.
 * Travels vertically away, traverses above the entire certified solid plus at
   least 2 mm and approaches vertically. This intentionally prioritizes a simple
   bounded commissioning case over travel efficiency. Z velocity and volumetric
-  flow are limited using the configured machine/material values.
+  flow are limited using the configured machine/material values. Every such
+  travel requests the profile's ordinary retraction, including short XY gaps:
+  the actual lifted path is longer than a normal in-layer move. This may be slow
+  and does not establish string-free material tuning.
 * Limits parts to 10 mm in this first integration and checks travel against the
   configured machine and virtual Z ceilings. **10 mm is an implementation scope
   restriction, not a measured safe nonplanar print height.**

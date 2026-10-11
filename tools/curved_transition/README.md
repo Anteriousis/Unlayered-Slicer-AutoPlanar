@@ -1,6 +1,6 @@
 # Curved transition geometry prototype
 
-Status: a tested geometry kernel, **not integrated into slicing, Preview or a runnable printer feature**. The existing portable application and presets are unchanged. This experiment produces geometry CSV/JSON, never print G-code.
+This directory contains the standalone geometry experiment and tests. The probe produces geometry CSV/JSON, never print G-code. The separate native engine integration is described in [ENGINE.md](ENGINE.md); its release status must be checked against the actual build and test results.
 
 The current auto-plane backend uses one affine frame per section. A curved transition must replace that assumption, rather than append extra independent cut-plane sections or change Z only after exporting G-code. In particular, the Centauri's post-processing path does not update Preview after script changes. A post-processing shortcut would therefore make the reviewed Preview differ from the print output.
 
@@ -51,7 +51,9 @@ ctest --test-dir <separate-output-directory> -C Release --output-on-failure
 
 Alternatively `build_probe.cmd <separate-output-directory>` uses this host's existing MSVC installation. The executable requires `--self-test` or explicit `--enable OUTPUT_PREFIX`. The latter writes two diagnostic cases: the original 40 mm / 4 degree ramp and a 20 mm / 5 degree ramp. The additional Catch2 cases are registered in the main libslic3r test target.
 
-## Required before a slicer release
+## Integration requirements
+
+These are the requirements identified by the original geometry experiment. See [ENGINE.md](ENGINE.md) for what the narrow rectangular-ramp integration implements and what remains unsupported.
 
 1. Extract and verify a height-field domain from actual model geometry; reject unsupported topology. Apply instance/volume transforms correctly and establish domain-wide bounds. The first milestone should support one bed-mounted prism with a shallow roof and no supports, modifiers or cut-plane stack.
 2. Inverse-map the actual solid before slicing. Refine mesh facets where the nonlinear map curves them and bound the resulting surface error. Slicing an ordinary planar solid and changing only output Z is insufficient.

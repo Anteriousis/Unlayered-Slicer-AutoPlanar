@@ -149,6 +149,10 @@ private:
   void calculate_candidates_visibility(const PrintObject *po,
                                        const SeamPlacerImpl::GlobalModelInfo &global_model_info);
   void calculate_overhangs_and_layer_embedding(const PrintObject *po);
+  // UNLAYERED_MOD -- carry the seam across declarative cut-plane sections: every non-root section
+  // places its seams independently in its own (tilted) slice frame, so the seam jumped between the
+  // planar and tilted parts of one physical object (measured 36.8 mm on a saved Centauri project).
+  void continue_seams_across_sections(const Print &print);
   void align_seam_points(const PrintObject *po, const SeamPlacerImpl::SeamComparator &comparator);
   std::vector<std::pair<size_t, size_t>> find_seam_string(const PrintObject *po,
                                                           std::pair<size_t, size_t> start_seam,

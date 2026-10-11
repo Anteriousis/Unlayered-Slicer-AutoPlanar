@@ -72,6 +72,7 @@ struct TransitionStats
     double max_gap_mm     = 0.;    // largest void
     double max_overlap_mm = 0.;    // deepest overlap (positive number)
     double p95_gap_mm     = 0.;
+    std::vector<UnfoundedSample> worst_voids;   // up to 10, largest first
 };
 
 struct SeamStats
@@ -80,6 +81,12 @@ struct SeamStats
     int    segment_below = -1, segment_above = -1;
     Vec3f  seam_below = Vec3f::Zero(), seam_above = Vec3f::Zero();
     double xy_jump_mm = 0.;        // horizontal distance between the last seam below and the first above
+    // Over ALL layers of the section above: how far each layer's seam sits (horizontally) from the
+    // last seam below. The first tilted layers are often strips that do not reach the seam line at
+    // all, so the first-layer jump alone overstates a discontinuity; this is the line the seam follows.
+    size_t layers_above = 0;
+    double median_offset_mm = 0.;
+    double share_within_2mm = 0.;  // fraction of the layers above whose seam is within 2 mm of the line
 };
 
 struct MultiplanarAuditResult

@@ -123,7 +123,12 @@ int main(int argc, char **argv)
     for (const std::string &cp : config_paths) {
         DynamicPrintConfig c;
         ConfigSubstitutionContext ctx(ForwardCompatibilitySubstitutionRule::Enable);
-        c.load_from_json(cp, ctx, true);
+        std::map<std::string, std::string> kv;
+        std::string reason;
+        if (c.load_from_json(cp, ctx, true, kv, reason) != 0) {
+            std::cerr << "config " << cp << ": " << reason << "\n";
+            return 3;
+        }
         config.apply(c, true);
     }
     for (const std::string &kv : sets) {
@@ -141,7 +146,7 @@ int main(int argc, char **argv)
         if (rot_deg != Vec3d::Zero() || mirror_x) {
             for (ModelInstance *mi : mo->instances) {
                 if (rot_deg != Vec3d::Zero())
-                    mi->set_rotation(Geometry::deg2rad(rot_deg));
+                    mi->set_rotation(Vec3d(rot_deg * (PI / 180.)));
                 if (mirror_x)
                     mi->set_mirror(Vec3d(-1., 1., 1.));
             }

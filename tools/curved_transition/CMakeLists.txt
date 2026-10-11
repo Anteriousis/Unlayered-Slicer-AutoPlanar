@@ -7,6 +7,7 @@ add_test(NAME curved_transition_geometry COMMAND curved_transition_probe --self-
 add_executable(curved_transition_tests
     ../../tests/libslic3r/test_curved_transition.cpp
     ../../tests/libslic3r/test_curved_ramp.cpp
+    ../../tests/libslic3r/test_curved_plane_program.cpp
     ../../tests/catch2/extras/catch_amalgamated.cpp)
 target_compile_features(curved_transition_tests PRIVATE cxx_std_17)
 target_compile_definitions(curved_transition_tests PRIVATE CURVED_TRANSITION_STANDALONE)

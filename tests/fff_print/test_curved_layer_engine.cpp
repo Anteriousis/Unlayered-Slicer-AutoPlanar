@@ -3,6 +3,9 @@
 #include "auto_planes_fixtures.hpp"
 #include "test_utils.hpp"
 #include "libslic3r/GCodeWriter.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/CurvedPlaneProgram.hpp"
+#include "libslic3r/CurvedMesh.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include <sstream>
 #include <regex>
@@ -34,6 +37,102 @@ TriangleMesh ramp(double angle=5.)
 {
     return TriangleMesh(AutoPlanesFixtures::heightfield_block(20.,20.,4,[angle](double x){return 3.+x*std::tan(angle*PI/180.);}));
 }
+
+TriangleMesh holed_part()
+{
+    indexed_triangle_set mesh;
+    for(int i=0;i<16;++i) {
+        const double angle=i*2.*PI/16.;
+        for(const auto& rz:std::vector<std::pair<double,double>>{{10.,0.},{10.,12.},{3.,0.},{3.,12.}})
+            mesh.vertices.emplace_back(float(rz.first*std::cos(angle)),float(rz.first*std::sin(angle)),float(rz.second));
+    }
+    auto add=[&](int a,int b,int c){mesh.indices.emplace_back(a,b,c);};
+    for(int i=0;i<16;++i) {
+        const int a=4*i,b=4*((i+1)%16);
+        add(a,b,b+1);add(a,b+1,a+1); // outer
+        add(a+2,a+3,b+3);add(a+2,b+3,b+2); // bore
+        add(a+1,b+1,b+3);add(a+1,b+3,a+3); // roof
+        add(a,a+2,b+2);add(a,b+2,b); // bed
+    }
+    return TriangleMesh(std::move(mesh));
+}
+
+void add_plane(ModelObject& object,double height,double gx,double gy=0.)
+{
+    CutPlane p; p.point=Vec3d(0.,0.,height); p.normal=Vec3d(-gx,-gy,1.).normalized();
+    object.cut_planes.enabled=true; object.cut_planes.planes.push_back(p);
+}
+}
+
+TEST_CASE("Curved planes slice a curved roof without independent sections", "[curved-engine][planes]")
+{
+    Print print;Model model;
+    const auto config=curved_config();
+    Test::init_print({TriangleMesh(AutoPlanesFixtures::curved_top_block())},print,model,config);
+    auto* object=model.objects.front();
+    const auto before=object->volumes.front()->mesh().its.vertices;
+    add_plane(*object,1.7,.02);
+    print.apply(model,config);
+    REQUIRE(print.objects().size()==1);
+    REQUIRE_FALSE(print.objects().front()->is_segment());
+    const auto output=Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    REQUIRE(object->volumes.front()->mesh().its.vertices==before);
+    REQUIRE(print.objects().front()->curved_field());
+    REQUIRE_FALSE(print.objects().front()->curved_ramp());
+    const auto* program=dynamic_cast<const CurvedTransition::PlaneProgram*>(print.objects().front()->curved_field().get());
+    REQUIRE(program);
+    REQUIRE(program->blends().size()==1);
+}
+
+TEST_CASE("Curved plane mesh mapping keeps a through hole and bounded facet error", "[curved-engine][planes][mesh]")
+{
+    using namespace CurvedTransition;
+    const auto mesh=holed_part().its;
+    PlaneProgram program({-10.,10.,-10.,10.,12.,.07},.2,.2,{{6.,.07,0.}});
+    const auto mapped=map_mesh(mesh,program,[]{});
+    REQUIRE(mapped.indices.size()>mesh.indices.size());
+    REQUIRE(its_num_open_edges(mapped)==0);
+    // Genus-one boundary: refinement preserves the bore's Euler characteristic.
+    std::set<std::pair<int,int>> edges;
+    for(const auto& f:mapped.indices) for(int i=0;i<3;++i) {
+        const auto edge=std::minmax(f[i],f[(i+1)%3]);edges.emplace(edge.first,edge.second);
+    }
+    REQUIRE(int64_t(mapped.vertices.size())-int64_t(edges.size())+int64_t(mapped.indices.size())==0);
+    for(const auto& f:mapped.indices) {
+        Vec3d p=Vec3d::Zero(); double physical=0.;
+        for(int i=0;i<3;++i) {
+            const Vec3d q=mapped.vertices[f[i]].cast<double>();p+=q/3.;
+            physical+=program.world_z(q.x(),q.y(),q.z())/3.;
+        }
+        REQUIRE(std::abs(program.world_z(p.x(),p.y(),p.z())-physical)<=.0101);
+    }
+    Print print;Model model; const auto config=curved_config();
+    Test::init_print({holed_part()},print,model,config);
+    add_plane(*model.objects.front(),6.,.07);
+    print.apply(model,config); print.process();
+    REQUIRE(print.objects().size()==1);
+    const auto* object=print.objects().front();
+    size_t holes=0;
+    for(const auto* layer:object->layers()) for(const auto& poly:layer->lslices) holes+=poly.holes.size();
+    REQUIRE(holes>object->layers().size()/2);
+    REQUIRE_FALSE(Test::gcode(print).empty());
+}
+
+TEST_CASE("Curved engine blends two plane changes and refuses intersecting branches", "[curved-engine][planes]")
+{
+    Print print;Model model; const auto config=curved_config();
+    Test::init_print({TriangleMesh(its_make_cube(20.,20.,18.))},print,model,config);
+    add_plane(*model.objects.front(),4.,.035);
+    add_plane(*model.objects.front(),11.,-.035);
+    print.apply(model,config); print.process();
+    REQUIRE(print.objects().size()==1);
+    const auto* program=dynamic_cast<const CurvedTransition::PlaneProgram*>(print.objects().front()->curved_field().get());
+    REQUIRE(program); REQUIRE(program->blends().size()==2);
+    REQUIRE_FALSE(Test::gcode(print).empty());
+    model.objects.front()->cut_planes.planes.back().point.z()=4.1;
+    print.apply(model,config);
+    REQUIRE_THROWS(Test::gcode(print));
 }
 
 TEST_CASE("Curved blend slices the flattened solid and writes physical paths", "[curved-engine]")
@@ -226,7 +325,7 @@ TEST_CASE("Curved writer subdivides paths, compensates flow and avoids diagonal 
     GCodeWriter writer;
     writer.set_extruders({0}); writer.set_extruder(0);
     const Vec2d origin(100.,80.);
-    writer.set_curved_blend(field,r,origin,2.,5.);
+    writer.set_curved_blend(field,r.domain(),origin,2.,5.);
     writer.set_curved_path(2.,.45,.2);
     const auto approach=writer.travel_to_xyz(Vec3d(100.,90.,2.));
     REQUIRE(approach.find("Z6.6")!=std::string::npos);

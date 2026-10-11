@@ -1,89 +1,108 @@
 # Experimental native curved layer blend
 
-This branch connects the transition field to the actual mesh slicer and native
-G-code writer. It is a deliberately narrow first integration, not general curved
-surface slicing and not a physically validated printer profile.
+The engine slices the original mesh through one continuous coordinate field,
+generates contours and infill in that domain, and emits physical XYZ paths through
+the inverse field. This is native slicing and Preview integration. It is not a
+physically validated printer profile or a guarantee that every plane can be blended.
 
 ## User flow
 
 Use **Advanced → Process → Others → Multiplanar → Curved layer blend (experimental)**.
 Enable nonplanar printing, choose a Virtual printer and keep belt printing off.
-Import a single shallow rectangular ramp, leave layer rotations B/C at zero and
-remove cut planes. The user presses Slice plate, reviews Preview, exports and
-starts a print. Suggest planes remains the separate piecewise-planar feature.
+Keep process layer rotations B/C at zero. Add or accept planes whose centres are
+ordered by height and whose surfaces do not intersect within the model bounds.
+Press Slice plate yourself and inspect Preview before exporting. The original
+object is sliced as one object; planes guide layer direction without creating
+separately sliced sections.
 
-This first version accepts one object/copy/volume, a closed mesh with a flat bed
-face, four vertical rectangular sides and one planar shallow roof. The curved
-transition spans from the flat first layer up to that roof. A genuinely curved
-roof, supports, branches, cavities, modifier volumes, painting, cut-plane stacks,
-variable heights, multiple objects and belt/rotary printers are refused.
+A plane specifies its target build direction and the centre height of the
+transition, not a sharp material cut. The engine chooses the transition depth
+from object size, direction change, layer spacing and clearance margin. Crowded
+planes, steep changes and insufficient transition height are refused with a reason.
+Suggest planes still estimates piecewise-planar results; its cost estimates and
+section warnings do not predict curved-blend output.
 
-The process must have 100% infill, classic walls, no combined infill, scarf seam,
-ironing, fuzzy skin, Z anti-aliasing, wave overhangs, wipe or circular arcs. Normal
-retraction is available. Draft shields and adaptive pressure advance are refused.
-XY shape and elephant-foot compensation and Z offset must be zero;
-shrinkage compensation must be 100%. Layer-change code may be empty or G92 E0.
-External slicing/G-code scripts, timelapse motion and height-change custom G-code
-are outside this integration. Start and end code stay in their physical frame.
+The mesh may have a curved roof, curved outline, through holes and other contours.
+The current integration supports one closed mesh, one object/copy/volume. Supports,
+modifiers, painting, variable heights, independently directed branches and
+intersecting branch planes are not integrated. Bridge extrusion is refused during
+path generation. These are planning limits, not a ramp-only mesh restriction.
+With no planes, a certified rectangular ramp remains a calibration mode blending
+from its flat foundation into its exact roof.
 
-## What the engine does
+Classic walls are required. Combined infill, scarf seams, ironing, fuzzy skin,
+Z anti-aliasing, wave overhangs, wipe and circular arcs are off. Ordinary retraction
+is available. Draft shields and adaptive pressure advance are refused. XY and
+elephant-foot compensation and Z offset are zero; shrinkage compensation is 100%.
+Layer-change code may be empty or G92 E0. External slicing/G-code scripts,
+timelapse motion and height-change code are outside this integration. Start/end
+code remain in the physical machine frame.
 
-* Verifies all triangles lie on the six oriented boundary faces, their areas
-  cover exactly one ramp, and the mesh is closed. Checks instance and volume
-  transforms before certification; does not mutate the user's model.
-* Flattens a private copy of the actual solid before slicing. For this domain
-  the entire boundary maps exactly to a cuboid: no curved facet approximation is
-  required. Standard contour, perimeter and solid infill generation then operate
-  in that flat coordinate domain.
-* Chooses an integer layer count and reference height that land the final layer
-  on the original roof and satisfy the printer's explicit minimum normal gap and
-  maximum vertical layer height. A profile's nominal step is an upper bound;
-  the generated logical step can be smaller. No setting is silently rewritten.
-* Maps each path back through the transition field and subdivides it. A global
-  Lipschitz bound certifies at most 0.005 mm vertical chord error before G-code
-  coordinate rounding. Physical bead area and physical segment length replace
-  the original geometric flow factor; material/role flow ratios are retained.
-  The bead model is an engineering approximation, not a bonding guarantee.
-* Writes physical XYZ, local height and layer-normal tags natively. Preview
-  processes those same paths and orients the bead sections before the user
-  exports. Virtual mode keeps the actual nozzle marker upright. This is not
-  export-only Z post-processing.
-* Uses the configured asymmetric hotend pyramid, the gantry limit and the manual
-  angle ceiling in the actual uphill direction, including diagonals. This checks
-  the represented envelope only, not missing CAD parts or physical deviations.
-  The legacy checker for independent cut-plane episodes does not partition a
-  continuous curved pass correctly, so this narrow mode uses the analytical
-  whole-ramp bounds instead; it does not claim a general mesh collision check.
-* Travels vertically away, traverses above the entire certified solid plus at
-  least 2 mm and approaches vertically. This intentionally prioritizes a simple
-  bounded commissioning case over travel efficiency. Z velocity and volumetric
-  flow are limited using the configured machine/material values. Every such
-  travel requests the profile's ordinary retraction, including short XY gaps:
-  the actual lifted path is longer than a normal in-layer move. This may be slow
-  and does not establish string-free material tuning.
-* Limits parts to 10 mm in this first integration and checks travel against the
-  configured machine and virtual Z ceilings. **10 mm is an implementation scope
-  restriction, not a measured safe nonplanar print height.**
+## Field and geometry bounds
 
-The feature defaults off. Config/preset serialization and relevant slice
-invalidation are wired into the normal application flow. Windows packaging keeps
-the stock JSON preset catalog as well as the preset cache, so loading a portable
-build does not lose its stock printer parents.
+For selected planes the physical-to-logical mapping is
+`w = z - gx(z)*(x-cx) - gy(z)*(y-cy)`. A quintic smoothstep blends each successive
+target gradient over a physical height interval. Intermediate constant-w layers
+are curved in XY, not merely tilted flat planes. The foundation is identity-mapped.
+After a blend, layers follow its target direction until the next blend. The last
+target need not match an arbitrary curved roof: the original mesh still determines
+where material exists.
 
-## Verification
+The maximum smoothstep derivative is 15/8. Bounds on its projected displacement
+over the entire model rectangle establish a strictly positive Jacobian and an
+upper bound on every intermediate slope. The engine reserves clearance margin
+for that bound. The general plane program conservatively uses the worst configured
+azimuth; each target is also checked in its own direction. The certified ramp uses
+its known directional bound. Sparse facet sampling is not a collision certificate.
 
-The dependency-free geometry tests run through the standalone CMake project in
-this folder. The main `fff_print_tests` additionally exercises real model
-slicing, native output, writer subdivision/flow/travel, rejection behavior,
-configuration round trips and re-slicing after disabling the feature. The branch
-has a Windows x64 build/test workflow. Record actual results and exact commit
-before distributing a build; a compiled application is not a physical print
-validation.
+The physical mesh is copied and conformingly refined using a global Hessian bound
+before changing coordinates. Shared edge midpoints preserve connectivity and hole
+topology. The bound limits physical boundary interpolation error to 0.01 mm before
+float rounding and normal slicer simplification. Resource limits fail explicitly
+rather than silently coarsening the mesh. The ramp boundary maps exactly. The
+user's model and Prepare geometry are unchanged.
 
-## Further work
+An integer schedule respects explicit printer minimum normal spacing and maximum
+vertical layer height. Requested nominal layer step is an upper bound; the engine
+may choose a smaller logical step. Paths are subdivided using a Lipschitz bound
+of at most 0.005 mm vertical chord error before coordinate rounding. Physical bead
+area and segment length replace the planar geometric flow factor while retaining
+material/role ratios. This bead model is not a bonding guarantee.
 
-Support arbitrary verified height-field roofs with mesh refinement and domain
-handling, physical bridge/contact classification, solid/sparse infill testing,
-additional model topology, supports, multiple objects, physical seam planning,
-and a measured full toolhead model. Those require independent integration and
-tests. This version must not silently claim they are implemented.
+## Motion and Preview
+
+The writer emits physical XYZ, local bead-height and layer-normal tags. Preview
+processes those same paths and orients extrusion cross-sections. Virtual mode
+keeps the actual nozzle upright and emits no rotary B/C motions.
+
+The represented asymmetric hotend pyramid and gantry bounds apply to the whole
+layer field. The legacy checker for independent cut-plane episodes does not
+partition a continuous curved pass correctly and is bypassed only for this bounded
+mode. This does not claim a general CAD mesh collision checker or cover missing
+hardware. With one mesh and no supports, earlier material lies beneath earlier
+field isosurfaces, allowing the global slope bound to bound the represented head.
+
+Travel leaves vertically, traverses above the whole solid by at least 2 mm and
+descends vertically. Every such travel requests ordinary retraction, including
+short nominal XY gaps. XY and Z speed are separate; Z velocity and volumetric flow
+respect configured limits. This may be slow and does not establish string-free
+material tuning. Model height plus travel must remain below machine and Virtual Z
+limits. The no-plane ramp's 10 mm cap is a calibration scope restriction. No number
+here establishes a measured generally safe nonplanar print height.
+
+The option defaults off. Serialization, preset lists and slice invalidation are
+wired into the normal app flow. Disabling it restores ordinary slicing. Windows
+packaging retains stock preset JSON files and the cached preset catalog.
+
+## Verification and remaining work
+
+Standalone tests cover field inversion, curvature, spacing, successive direction
+changes and infeasible-plane rejection. Native fff_print tests cover actual mesh
+slicing, original-model preservation, curved roofs, a through hole, conforming
+refinement, output, Preview, flow, travel and disabling/reslicing. Record actual
+results and exact commit before distributing a build.
+
+Intersecting branch fields, multiple object scheduling, support/contact planning,
+physical bridge classification, seam optimization across changing topology and
+full measured toolhead meshes need further integration and regression cases.
+Software tests and physical prints are separate evidence.

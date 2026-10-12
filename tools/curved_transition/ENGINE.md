@@ -141,7 +141,12 @@ shared-carriage profiles, a single used filament still performs startup tool
 selection; generic T commands use the mapped physical tool number. The BBL S/H
 protocol and manual material tags retain their existing slot semantics. Standard
 heater T/P parameters also use the mapped physical tool, including heating before
-selection. It refuses an
+selection. Generic tool commands carry a mandatory filament-slot comment so
+streaming and imported Preview can map the physical command back to the correct
+material and bed-frame offset. Unannotated physical commands require an
+unambiguous or already-active material mapping. Manual material-change tags do
+not select a physical tool and are rejected for multi-nozzle curved jobs.
+The writer refuses an
 unexpected nozzle/material switch before mutating the active tool. Z speed uses
 the slowest configured normal-mode limit; unused silent-mode placeholders are
 ignored consistently with the existing writer.

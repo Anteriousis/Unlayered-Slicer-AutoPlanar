@@ -33,6 +33,8 @@ struct ToolheadState {
                 throw std::invalid_argument("The measured carriage nozzle count does not match this printer. Adding or removing a nozzle requires reviewing every whole-carriage envelope.");
             if (count>1 && (dynamic_mapping || config.filament_map_mode.value < fmmManual))
                 throw std::invalid_argument("Curved multi-nozzle printing requires a fixed manual filament-to-nozzle mapping; automatic nozzle reassignment is not supported.");
+            if (count>1 && config.manual_filament_change.value)
+                throw std::invalid_argument("Curved multi-nozzle printing requires an actual physical tool-selection command; manual material-change tags alone do not select the measured nozzle.");
             auto exact = [count](const auto& option) { return option.values.size() == count; };
             if (!exact(config.nonplanar_state_nozzle_id) || !exact(config.nonplanar_state_complete) ||
                 !exact(config.nonplanar_state_envelope_height) || !exact(config.nonplanar_state_angle_xpos) ||

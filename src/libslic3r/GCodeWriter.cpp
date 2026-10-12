@@ -913,6 +913,8 @@ std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
             // and manual material tags retain their existing slot identities.
             const unsigned int command_tool = m_shared_carriage_tools && !m_is_bbl_printers && !config.manual_filament_change ?
                 m_curr_extruder_id : filament_id;
+            if (m_shared_carriage_tools && !m_is_bbl_printers && !config.manual_filament_change)
+                gcode << ";" << GCodeProcessor::Physical_Tool_Filament_Tag << filament_id << "\n";
             gcode << this->toolchange_prefix() << command_tool;
         }
         if (GCodeWriter::full_gcode_comment)

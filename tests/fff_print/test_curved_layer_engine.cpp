@@ -233,6 +233,7 @@ TEST_CASE("Curved multi-nozzle printing requires recorded shared-carriage geomet
     SECTION("missing source") {config.nonplanar_state_source.values[1].clear();}
     SECTION("independent carriage") {config.nonplanar_shared_carriage.value=false;}
     SECTION("automatic assignment") {config.filament_map_mode.value=fmmAutoForFlush;}
+    SECTION("manual material tags do not select a nozzle") {config.manual_filament_change.value=true;}
     SECTION("dynamic mapping") {REQUIRE_THROWS(CurvedTransition::ToolheadState::from_config(config,1,true));return;}
     SECTION("missing active offset") {config.extruder_offset.values.resize(1);}
     SECTION("unknown side angle") {config.nonplanar_state_angle_xneg.values[1]=0.;}
@@ -298,6 +299,48 @@ TEST_CASE("Curved writer keeps the active offset and refuses switching before mu
     REQUIRE(writer.filament()->extruder_id()==1);REQUIRE(writer.get_position()==position);
     GCodeWriter bbl;bbl.set_is_bbl_machine(true);bbl.apply_print_config(config);bbl.set_extruders({0});
     REQUIRE(bbl.set_extruder(0).find("M1020 S0 H1")!=std::string::npos);
+}
+
+TEST_CASE("Curved shared-carriage Preview maps physical tools back to their filament and bed frame", "[curved-engine][multi-nozzle][preview]")
+{
+    const int active=GENERATE(0,1);
+    auto config=shared_carriage_config(active);
+    config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"curved_layer_blend","0"}});
+    Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
+    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
+    print.process();
+    ScopedTemporaryFile temp(".gcode");GCodeProcessorResult preview;
+    print.export_gcode(temp.string(),&preview,nullptr);
+    const auto* object=print.objects().front();
+    REQUIRE(object->curved_field());REQUIRE(preview.tool_axis_fixed);
+    const auto& domain=*object->curved_ramp();
+    const Vec2d shift=unscale(object->instances().front().shift);
+    size_t deposits=0;
+    for (const auto& move:preview.moves) {
+        if (move.type!=EMoveType::Extrude || move.extrusion_role==erCustom) continue;
+        ++deposits;
+        REQUIRE(move.extruder_id==0); // filament slot zero, even when T1 selected the physical tool
+        const Vec2d local=move.position.head<2>().cast<double>()-shift;
+        REQUIRE(local.x()>=domain.xmin-.1);REQUIRE(local.x()<=domain.xmax+.1);
+        REQUIRE(local.y()>=domain.ymin-.1);REQUIRE(local.y()<=domain.ymax+.1);
+        const auto grad=object->curved_field()->gradient(local.x(),local.y(),
+            object->curved_field()->slice_z(local.x(),local.y(),move.position.z()));
+        const Vec3f expected=Vec3f(float(-grad.dx),float(-grad.dy),1.f).normalized();
+        REQUIRE((preview.tool_axes.at(move.tool_axis_id)-expected).norm()<.002f);
+    }
+    REQUIRE(deposits>1000);
+    // Replaying the emitted metadata with a dynamic config (the imported-file
+    // path) must retain the same bed-frame positions and material identity.
+    GCodeProcessor replay;replay.process_file(temp.string());
+    size_t replay_deposits=0;
+    for (const auto& move:replay.get_result().moves) {
+        if (move.type!=EMoveType::Extrude || move.extrusion_role==erCustom) continue;
+        ++replay_deposits;REQUIRE(move.extruder_id==0);
+        const Vec2d local=move.position.head<2>().cast<double>()-shift;
+        REQUIRE(local.x()>=domain.xmin-.1);REQUIRE(local.x()<=domain.xmax+.1);
+        REQUIRE(local.y()>=domain.ymin-.1);REQUIRE(local.y()<=domain.ymax+.1);
+    }
+    REQUIRE(replay_deposits==deposits);
 }
 
 TEST_CASE("Curved plane project reload preserves world positions when the volume origin moves", "[curved-engine][planes][3mf]")

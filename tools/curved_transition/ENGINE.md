@@ -201,7 +201,9 @@ supports and every instance. The generated first-layer hull, including brim and
 skirt bead margins, is checked against the common and active-nozzle printable areas.
 By-layer printing (or one shared nonzero print group)
 uses each field's displacement bound plus the larger actual layer allowance to bound relative
-height. Sequential groups use full part heights. Insufficient head/gantry spacing
+height. Sequential groups use full part heights and also include generated brim
+and skirt paths in the nozzle approach footprint against neighbouring models.
+Insufficient head/gantry spacing
 is refused with a message; the engine does not silently raise clearance limits.
 All members of a curved plate must use compatible frame/process settings. Protected
 planar paths retain ordinary overhang speed and fan splitting; curved paths use the

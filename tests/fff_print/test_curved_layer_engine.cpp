@@ -396,6 +396,26 @@ TEST_CASE("Curved plate validates generated brim and skirt reach", "[curved-engi
         Catch::Matchers::ContainsSubstring("brim/skirt exceeds"));
 }
 
+TEST_CASE("Sequential curved plates include generated adhesion paths in neighbour clearance", "[curved-engine][multi-model][clearance]")
+{
+    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},
+        {"print_sequence","by object"},{"brim_type","no_brim"},{"brim_width","50"}});
+    bool adhesion=false;
+    SECTION("model spacing without adhesion") {}
+    SECTION("wide brim approaches an earlier part") {
+        adhesion=true;config.set_deserialize_strict({{"brim_type","outer_only"}});
+    }
+    Print print;Model model;Test::init_print({ramp(2.),ramp(2.)},print,model,config);
+    model.objects[0]->instances.front()->set_offset(Vec3d(100.,100.,0.));
+    model.objects[1]->instances.front()->set_offset(Vec3d(180.,100.,0.));print.apply(model,config);
+    print.process();REQUIRE(print.objects()[0]->curved_field());REQUIRE(print.objects()[1]->curved_field());
+    if(adhesion) {
+        ScopedTemporaryFile output(".gcode");
+        REQUIRE_THROWS_WITH(print.export_gcode(output.string(),nullptr,nullptr),
+            Catch::Matchers::ContainsSubstring("too close"));
+    } else REQUIRE_FALSE(Test::gcode(print).empty());
+}
+
 TEST_CASE("Full Centauri MCT-1 retains curved roof regions alongside planar support paths", "[curved-engine][regions][totem]")
 {
     Model input;

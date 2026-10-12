@@ -188,7 +188,7 @@ static double curved_plate_top(const Print& print) {
 // built before the next starts and therefore use their complete physical height.
 static void validate_curved_plate(const Print& print) {
     if(!has_curved_objects(print)) return;
-    struct Member {const PrintObject* object;BoundingBox box;double amplitude,top,logical_step;};
+    struct Member {const PrintObject* object;BoundingBox box, nozzle_box;double amplitude,top,logical_step;};
     std::vector<Member> members;
     const auto& pc=print.config();
     const auto head=HotendEnvelope::from_config(pc);
@@ -222,9 +222,28 @@ static void validate_curved_plate(const Print& print) {
         double logical_step=pc.max_layer_height.get_at(o->curved_nozzle_index());
         for(const auto* layer:o->layers()) logical_step=std::max(logical_step,layer->height);
         for(const auto* layer:o->support_layers()) logical_step=std::max(logical_step,layer->height);
-        for(const auto& inst:o->instances()) {
+        for(size_t instance_id=0;instance_id<o->instances().size();++instance_id) {
+            const auto& inst=o->instances()[instance_id];
             auto placed=footprint;placed.translate(inst.shift);
-            members.push_back({o,placed,amplitude,top,logical_step});
+            auto nozzle_box=placed;
+            const ObjectInstanceID key{o->id(),instance_id};
+            // Adhesion paths are already in plate coordinates. A later sequential
+            // member may descend to them alongside a fully built neighbour, so
+            // model-only spacing is insufficient even if every path fits the bed.
+            for(const auto& group:print.skirt_brim_groups()) {
+                Points points;
+                if(std::find(group.instances.begin(),group.instances.end(),key)!=group.instances.end())
+                    group.skirt.collect_points(points);
+                for(const auto& brim:group.brims)
+                    if(std::find(brim.instances.begin(),brim.instances.end(),key)!=brim.instances.end())
+                        brim.brim.collect_points(points);
+                if(!points.empty()) {
+                    BoundingBox adhesion(points);
+                    adhesion.offset(scale_(std::max(print.brim_flow().width(),print.skirt_flow().width())*.5+.02));
+                    nozzle_box.merge(adhesion);
+                }
+            }
+            members.push_back({o,placed,nozzle_box,amplitude,top,logical_step});
             // Check generated supports as well as the model, for every copy.
             if(!fits(placed.polygon(),pc.printable_area.values) || (pc.nozzle_diameter.size()==2 && !fits(placed.polygon(),pc.extruder_printable_area.values[o->curved_nozzle_index()])))
                 throw SlicingError("Curved plate model/support footprint exceeds the active printable area; move it away from the edge.");
@@ -239,9 +258,13 @@ static void validate_curved_plate(const Print& print) {
             std::max(a.top,b.top);
         if(height>=pc.nonplanar_gantry_height.value)
             throw SlicingError("Objects on this curved plate can exceed the gantry clearance. Use By layer or one shared print group, or print separately.");
-        const double dx=unscale<double>(std::max({a.box.min.x()-b.box.max.x(),b.box.min.x()-a.box.max.x(),coord_t(0)}));
-        const double dy=unscale<double>(std::max({a.box.min.y()-b.box.max.y(),b.box.min.y()-a.box.max.y(),coord_t(0)}));
-        if(dx<=height*sx && dy<=height*sy)
+        const auto separated=[&](const BoundingBox& lhs,const BoundingBox& rhs) {
+            const double dx=unscale<double>(std::max({lhs.min.x()-rhs.max.x(),rhs.min.x()-lhs.max.x(),coord_t(0)}));
+            const double dy=unscale<double>(std::max({lhs.min.y()-rhs.max.y(),rhs.min.y()-lhs.max.y(),coord_t(0)}));
+            return dx>height*sx || dy>height*sy;
+        };
+        if(!separated(a.box,b.box) || (!interleaved &&
+            (!separated(a.nozzle_box,b.box) || !separated(b.nozzle_box,a.box))))
             throw SlicingError("Models/supports are too close for the configured curved toolhead envelope. Increase their spacing or print separately.");
     }
     const double clearance=std::max(2.,std::max(pc.nonplanar_approach_distance.value,pc.nonplanar_departure_distance.value));

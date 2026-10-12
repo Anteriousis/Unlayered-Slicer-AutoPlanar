@@ -214,6 +214,20 @@ TEST_CASE("Curved layer scripts retain Bambu cooling and progress but reject exp
     config.set_deserialize_strict({{"layer_change_gcode","G92 E0"},{"machine_start_gcode","G28\nT0 H-1"}});
     print.apply(model,config);
     REQUIRE_THROWS_WITH(Test::gcode(print),Catch::Matchers::ContainsSubstring("startup to explicitly select"));
+    for(const std::string start:{"G28\nT0 H1e30","G28\nT0 H0\nT255",
+                                "G28\nT0 H0\nM1020 S0 H1"}) {
+        config.set_deserialize_strict({{"machine_start_gcode",start}});print.apply(model,config);
+        REQUIRE_THROWS_WITH(Test::gcode(print),Catch::Matchers::ContainsSubstring("startup to explicitly select"));
+    }
+    config.set_deserialize_strict({{"machine_start_gcode","G28\nT0 H0\nM1020 S0 H0"}});print.apply(model,config);
+    REQUIRE_NOTHROW(Test::gcode(print));
+    for(const auto& script:std::vector<std::pair<std::string,std::string>>{
+            {"filament_start_gcode","T0 H1"},{"process_change_extrusion_role_gcode","G1 X0"},
+            {"layer_change_gcode","{position[0] = 1234}"}}) {
+        auto unsafe=config;unsafe.set_deserialize_strict({{script.first,script.second}});print.apply(model,unsafe);
+        REQUIRE_THROWS_WITH(Test::gcode(print),Catch::Matchers::ContainsSubstring(
+            script.first=="layer_change_gcode"?"Expanded layer code":"Expanded curved custom code"));
+    }
 }
 
 TEST_CASE("Curved planes slice a curved roof without independent sections", "[curved-engine][planes]")

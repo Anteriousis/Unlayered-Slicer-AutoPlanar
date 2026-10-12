@@ -301,7 +301,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
     for (const t_config_option_key &opt_key : opt_keys) {
         // Curved geometry/schedule feasibility depends on these printer limits.
         // Keep ordinary prints on their existing export-only invalidation path.
-        if (std::any_of(m_objects.begin(),m_objects.end(),[](const PrintObject* o){return o->config().curved_layer_blend.value;}) &&
+        if (std::any_of(m_objects.begin(),m_objects.end(),[](const PrintObject* o){return o->config().curved_layer_blend.value || o->config().automatic_layer_strategy.value;}) &&
             (opt_key.rfind("nonplanar_",0)==0 || opt_key=="virtual_5axis" || opt_key=="min_layer_height" ||
              opt_key=="max_layer_height" || opt_key=="printable_height"))
             osteps.emplace_back(posSlice);
@@ -1433,6 +1433,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         return { L("No extrusions under current settings.") };
 
     for (const PrintObject* object : m_objects) {
+        if (object->config().automatic_layer_strategy.value) {
+            if (std::abs(object->config().layer_rotation_b.value)>EPSILON || std::abs(object->config().layer_rotation_c.value)>EPSILON ||
+                object_has_directed_parts(*object->model_object()))
+                return {L("Automatic layer selection requires layer rotations B/C at zero and no per-part build directions. Disable automatic selection to use manual build directions."),object->model_object(),"automatic_layer_strategy"};
+            warn(L("Automatic layer selection will choose curved or planar during slicing. It preserves supports and process settings, and does not certify the real toolhead clearance or print quality."),
+                 "automatic_layer_strategy",object->model_object());
+            continue;
+        }
         const std::string error = object->curved_blend_error();
         if (!error.empty()) return {error,object->model_object(),"curved_layer_blend"};
         if (object->config().curved_layer_blend.value)

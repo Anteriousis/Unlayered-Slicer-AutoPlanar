@@ -7,6 +7,30 @@ physically validated printer profile or a guarantee that every plane can be blen
 
 ## User flow
 
+**Automatic curved or planar selection (experimental)** runs inside Slice plate.
+It takes precedence over the manual curved-blend switch. Existing enabled planes
+are tested as a continuous stack. Otherwise the selector tries a bounded global
+roof direction and local surface-region proposals, including two successive
+directions. Up to eight proposals run through the actual field, conforming mesh
+mapping, layer schedule and configured printer-limit checks. The original model
+and its saved plane list are preserved; inferred planes are internal to the slice.
+
+The roof direction and regional planner scores are mesh-based finish heuristics.
+The regional scores describe piecewise-planar estimates and only rank proposals;
+they do not predict curved print time, support savings or surface quality. The
+selector does not yet optimize strength or independently directed branches.
+Symmetric curved surfaces need not have a beneficial global direction. Supports,
+unsupported undersides, less than 100% infill, incompatible process options and
+infeasible transitions keep the job planar without changing those settings or
+raising any printer limit. Explicit B/C rotations or directed parts conflict with
+automatic selection and require the user to choose manual mode instead.
+
+The decision and reason are displayed as a slicing notification and recorded in
+the `layer_strategy` G-code header. A later extrusion or motion safety refusal
+still stops slicing: automatic mode does not conceal such errors or export a
+partially failed curved job. It is off in existing presets by default. An optional
+automatic trial process is provided alongside the explicit curved trial.
+
 Use **Advanced → Process → Others → Multiplanar → Curved layer blend (experimental)**.
 Enable nonplanar printing, choose a Virtual printer and keep belt printing off.
 Keep process layer rotations B/C at zero. Add or accept planes whose centres are

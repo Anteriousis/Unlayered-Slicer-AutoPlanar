@@ -1272,6 +1272,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               layer_rotation_b))
     ((ConfigOptionFloat,               layer_rotation_c))
     ((ConfigOptionBool,                curved_layer_blend))
+    ((ConfigOptionBool,                automatic_layer_strategy))
     ((ConfigOptionFloat,               support_top_z_distance))
     ((ConfigOptionFloat,               support_bottom_z_distance))
     ((ConfigOptionInt,                 enforce_support_layers))

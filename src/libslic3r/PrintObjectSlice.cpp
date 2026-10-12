@@ -15,6 +15,8 @@
 #include "Print.hpp"
 #include "CurvedPlaneProgram.hpp"
 #include "CurvedMesh.hpp"
+#include "AutomaticCurvedSelection.hpp"
+#include "AutoPlanes.hpp"
 //BBS
 #include "ShortestPath.hpp"
 #include "Support/SegmentSupportBounds.hpp"
@@ -1103,9 +1105,9 @@ void PrintObject::update_slice_frame()
     assert((m_object_to_slice * m_slice_to_object).isApprox(Transform3d::Identity(), 1e-9));
 }
 
-std::string PrintObject::curved_blend_error() const
+std::string PrintObject::curved_blend_error(bool automatic) const
 {
-    if (!m_config.curved_layer_blend.value) return {};
+    if (!automatic && !m_config.curved_layer_blend.value) return {};
     const auto& pc = m_print->config();
     if (!pc.enable_nonplanar.value || !pc.virtual_5axis.value || pc.belt_printer.value)
         return "Curved blend requires nonplanar printing enabled and a Virtual printer with belt printing off.";
@@ -1200,12 +1202,23 @@ void PrintObject::slice()
     m_curved_ramp.reset();
     m_curved_domain.reset();
     m_curved_mesh.reset();
-    if (m_config.curved_layer_blend.value) {
-        const std::string error = this->curved_blend_error();
-        if (!error.empty()) throw SlicingError(error);
+    m_layer_strategy_decision.clear();
+    const bool automatic=m_config.automatic_layer_strategy.value;
+    bool use_curved=automatic || m_config.curved_layer_blend.value;
+    if (use_curved) {
+        std::string error = this->curved_blend_error(automatic);
+        if (automatic && error.empty())
+            for (size_t i=0;i<num_printing_regions();++i)
+                if (printing_region(i).config().sparse_infill_density.value<100.) {
+                    error="Automatic curved selection currently requires 100% infill to avoid unplanned internal bridge paths.";break;
+                }
+        if (!error.empty()) {
+            if (!automatic) throw SlicingError(error);
+            use_curved=false;m_layer_strategy_decision="Automatic selection: planar. "+error;
+        }
+    }
+    if (use_curved) {
         const ModelVolume& volume = *m_model_object->volumes.front();
-        if (its_num_open_edges(volume.mesh().its) != 0)
-            throw SlicingError("Curved blend requires a closed mesh; repair the model first.");
         const Transform3d transform = m_object_to_slice * volume.get_matrix();
         std::vector<CurvedTransition::Ramp::Triangle> triangles;
         triangles.reserve(volume.mesh().its.indices.size());
@@ -1219,7 +1232,70 @@ void PrintObject::slice()
             triangles.push_back(t);
         }
         try {
-            if (m_model_object->has_cut_planes()) {
+            if (its_num_open_edges(volume.mesh().its) != 0)
+                throw std::invalid_argument("Curved blend requires a closed mesh; repair the model first.");
+            std::vector<CutPlane> selected_planes;
+            std::vector<std::vector<CutPlane>> proposals;
+            std::string proposal_reason;
+            if (m_model_object->has_cut_planes())
+                for (const auto& plane:m_model_object->cut_planes.planes) if (plane.enabled) selected_planes.push_back(plane);
+            if (automatic) {
+                const auto& pc=m_print->config();
+                const HotendEnvelope envelope=HotendEnvelope::from_config(pc);
+                double xmin=INFINITY,xmax=-INFINITY,ymin=INFINITY,ymax=-INFINITY,top=-INFINITY;
+                for (const auto& t:triangles) for (const auto& p:t) {
+                    xmin=std::min(xmin,p[0]);xmax=std::max(xmax,p[0]);
+                    ymin=std::min(ymin,p[1]);ymax=std::max(ymax,p[1]);top=std::max(top,p[2]);
+                }
+                const double limit=virtual_tilt_limit_enforced_deg(envelope,pc.nonplanar_gantry_height.value,
+                    pc.nonplanar_virtual_max_angle.value,std::hypot(xmax-xmin,ymax-ymin));
+                const double allowed=std::tan(limit*PI/180.);
+                const auto target=CurvedTransition::automatic_target(triangles,allowed);
+                if (target.needs_support_planning) throw std::invalid_argument(target.reason);
+                if (selected_planes.empty()) {
+                    proposal_reason=target.reason;
+                    if (target.useful) {
+                        const double slope=std::hypot(target.gx,target.gy);
+                        const double budget=std::min(.25,.95*(1.-slope/allowed));
+                        const double projection=std::abs(target.gx)*((xmax-xmin)*.5+1e-4)+
+                                                std::abs(target.gy)*((ymax-ymin)*.5+1e-4);
+                        const double depth=std::max(3.*m_config.layer_height.value,1.875*projection/budget);
+                        const double first=m_slicing_params.first_object_layer_height;
+                        if (first+depth+m_config.layer_height.value*.5<=top) {
+                            CutPlane plane;
+                            plane.point=m_object_to_slice.inverse()*Vec3d((xmin+xmax)*.5,(ymin+ymax)*.5,first+depth*.5);
+                            plane.normal=(m_object_to_slice.linear().transpose()*Vec3d(-target.gx,-target.gy,1.)).normalized();
+                            proposals.push_back({plane});
+                        } else proposal_reason="not enough model height for the inferred curved transition";
+                    }
+                    // The existing planner supplies LOCAL surface-region and
+                    // multi-direction proposals. Its piecewise-planar scores
+                    // are only a ranking heuristic here, not a curved result.
+                    AutoPlanes::Options options;
+                    options.preference=AutoPlanes::Preference::Finish;
+                    options.keep_existing=false;options.max_planes=2;
+                    options.skeleton=AutoPlanes::Options::Skeleton::Off;
+                    AutoPlanes::Progress progress;
+                    progress.canceled=[this]{return m_print->canceled();};
+                    const auto regional=AutoPlanes::plan(*m_model_object,
+                        m_model_object->instances.front()->get_matrix(),m_print->full_print_config(),options,&progress);
+                    m_print->throw_if_canceled();
+                    for (const auto& candidate:regional.candidates) {
+                        if (!candidate.feasible || candidate.is_planar() || candidate.net_benefit<options.min_net_benefit) continue;
+                        // Do not infer support savings from the planner's proxy.
+                        const double base=regional.planar.predicted.terrace_length_mm;
+                        if (base<=0. || candidate.predicted.terrace_length_mm>base*.90) continue;
+                        std::vector<CutPlane> planes;
+                        for (const auto& plane:candidate.planes) planes.push_back(plane.plane);
+                        proposals.push_back(std::move(planes));
+                        if (proposals.size()>=8) break;
+                    }
+                    if (proposals.empty()) throw std::invalid_argument(proposal_reason);
+                }
+            }
+            if (!selected_planes.empty() || !automatic) proposals.push_back(selected_planes);
+            auto build_candidate=[&](const std::vector<CutPlane>& selected_planes) {
+            if (!selected_planes.empty()) {
                 using namespace CurvedTransition;
                 ModelDomain domain{INFINITY,-INFINITY,INFINITY,-INFINITY,-INFINITY,0.};
                 double bottom=INFINITY;
@@ -1236,7 +1312,7 @@ void PrintObject::slice()
                 struct PlacedPlane { PlaneProgram::Target target; double gx,gy; };
                 std::vector<PlacedPlane> planes;
                 const double cx=(domain.xmin+domain.xmax)*.5,cy=(domain.ymin+domain.ymax)*.5;
-                for (const CutPlane& plane:m_model_object->cut_planes.planes) if (plane.enabled) {
+                for (const CutPlane& plane:selected_planes) if (plane.enabled) {
                     const Vec3d point=m_object_to_slice*plane.point;
                     Vec3d normal=(m_object_to_slice.linear().inverse().transpose()*plane.normal).normalized();
                     Vec3d build=(m_object_to_slice.linear().inverse().transpose()*plane.effective_build_normal()).normalized();
@@ -1326,9 +1402,32 @@ void PrintObject::slice()
             if (!m_curved_field) throw std::invalid_argument("Curved blend cannot meet the configured minimum/maximum layer heights at the requested layer step");
             m_curved_domain=r.domain();
             }
+            };
+            std::string last_rejection;
+            for (const auto& proposal:proposals) {
+                m_print->throw_if_canceled();
+                m_curved_field.reset();m_curved_ramp.reset();m_curved_domain.reset();m_curved_mesh.reset();object_layers.clear();
+                try {build_candidate(proposal);break;}
+                catch (const std::invalid_argument& e) {if (!automatic) throw;last_rejection=e.what();}
+                catch (const SlicingError& e) {if (!automatic) throw;last_rejection=e.what();}
+            }
+            if (!m_curved_field) throw std::invalid_argument(last_rejection.empty()?"no useful curved direction was found":last_rejection);
             m_slicing_params.object_print_z_max = m_curved_field->reference_top_mm();
             m_slicing_params.object_print_z_uncompensated_max = m_slicing_params.object_print_z_max;
-        } catch (const std::invalid_argument& e) { throw SlicingError(e.what()); }
+            if (automatic) m_layer_strategy_decision="Automatic selection: curved. Continuous transitions passed the configured geometry and layer-spacing checks; physical clearance and finish are unverified.";
+        } catch (const std::invalid_argument& e) {
+            if (!automatic) throw SlicingError(e.what());
+            m_curved_field.reset();m_curved_ramp.reset();m_curved_domain.reset();m_curved_mesh.reset();
+            object_layers.clear();m_layer_strategy_decision="Automatic selection: planar. "+std::string(e.what());
+        } catch (const SlicingError& e) {
+            if (!automatic) throw;
+            m_curved_field.reset();m_curved_ramp.reset();m_curved_domain.reset();m_curved_mesh.reset();
+            object_layers.clear();m_layer_strategy_decision="Automatic selection: planar. "+std::string(e.what());
+        }
+        if (automatic && !m_curved_field) {
+            this->update_layer_height_profile(*this->model_object(),m_slicing_params,layer_height_profile);
+            object_layers=generate_object_layers(m_slicing_params,layer_height_profile,m_config.precise_z_height.value);
+        }
     } else if (this->is_segment()) {
         // A segment's slicing parameters are sized to its own extent (see
         // update_slicing_parameters), so validating the object's layer-height profile against that
@@ -1401,6 +1500,8 @@ void PrintObject::slice()
         this->update_layer_height_profile(*this->model_object(), m_slicing_params, layer_height_profile); //ok so this line of code would need to be replaced. All it does is update layer height profile
         object_layers = generate_object_layers(m_slicing_params, layer_height_profile, m_config.precise_z_height.value);
     }
+    if (automatic && !m_layer_strategy_decision.empty())
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,m_layer_strategy_decision);
     m_print->throw_if_canceled();
     m_typed_slices = false;
     this->clear_layers();

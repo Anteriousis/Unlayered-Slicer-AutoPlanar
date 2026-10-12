@@ -3499,6 +3499,12 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 
         coordf_t max_height_z = -1;
         for (const auto& object : print.objects()) {
+            if (!object->layer_strategy_decision().empty()) {
+                std::string decision=object->layer_strategy_decision();
+                std::replace(decision.begin(),decision.end(),'\n',' ');
+                std::replace(decision.begin(),decision.end(),'\r',' ');
+                file.writeln("; layer_strategy: "+decision);
+            }
             // Curved print_z is a reference-field coordinate. Report the
             // physical deposition bound instead of that logical layer height.
             const double top = object->curved_domain() ? object->curved_domain()->top_max : object->layers().back()->print_z;

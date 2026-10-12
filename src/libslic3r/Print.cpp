@@ -303,7 +303,10 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         // Keep ordinary prints on their existing export-only invalidation path.
         if (std::any_of(m_objects.begin(),m_objects.end(),[](const PrintObject* o){return o->config().curved_layer_blend.value || o->config().automatic_layer_strategy.value;}) &&
             (opt_key.rfind("nonplanar_",0)==0 || opt_key=="virtual_5axis" || opt_key=="min_layer_height" ||
-             opt_key=="max_layer_height" || opt_key=="printable_height"))
+             opt_key=="max_layer_height" || opt_key=="printable_height" || opt_key=="extruder_offset" ||
+             opt_key=="extruder_printable_area" || opt_key=="extruder_printable_height" ||
+             opt_key=="nozzle_diameter" || opt_key=="filament_map" || opt_key=="filament_map_mode" ||
+             opt_key=="enable_filament_dynamic_map" || opt_key=="physical_extruder_map" || opt_key=="machine_max_speed_z"))
             osteps.emplace_back(posSlice);
         if (steps_gcode.find(opt_key) != steps_gcode.end()) {
             // These options only affect G-code export or they are just notes without influence on the generated G-code,

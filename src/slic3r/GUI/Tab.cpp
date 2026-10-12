@@ -5740,6 +5740,9 @@ PageShp TabPrinter::build_kinematics_page()
     optgroup->append_single_option_line("nonplanar_gantry_height", "multiplanar_tutorial#printer-settings");
     optgroup->append_single_option_line("nonplanar_virtual_max_angle", "multiplanar_tutorial#printer-settings");
     optgroup->append_single_option_line("nonplanar_virtual_max_z", "multiplanar_tutorial#printer-settings");
+    for(const auto key:{"nonplanar_fixed_nozzle","nonplanar_clearance_nozzle",
+                       "nonplanar_fixed_clearance_recorded","nonplanar_fixed_clearance_source"})
+        optgroup->append_single_option_line(key,"multiplanar_tutorial#printer-settings");
     // What the geometry above actually works out to, so the limit that stops a cut-plane drag is
     // legible here rather than only discoverable by hitting it. Refreshed in update_description_lines().
     {
@@ -6656,7 +6659,9 @@ void TabPrinter::toggle_options()
                          "nonplanar_hotend_angle_xpos", "nonplanar_hotend_angle_xneg",
                          "nonplanar_hotend_angle_ypos", "nonplanar_hotend_angle_yneg",
                          "nonplanar_gantry_height",
-                         "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"})
+                         "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z",
+                         "nonplanar_fixed_nozzle", "nonplanar_clearance_nozzle",
+                         "nonplanar_fixed_clearance_recorded", "nonplanar_fixed_clearance_source"})
             toggle_line(opt, enable_nonplanar);
         // UNLAYERED_MOD -- the A/C machine geometry only means something on an A/C printer.
         {

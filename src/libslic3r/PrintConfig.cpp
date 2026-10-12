@@ -5593,6 +5593,32 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.0));
 
+    def = this->add("nonplanar_fixed_nozzle", coInt);
+    def->label = L("Fixed active nozzle for curved printing");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("0 keeps ordinary single-nozzle mode. On a supported two-nozzle shared carriage, choose nozzle 1 or 2 and manually map the one used filament to it. The other nozzle remains parked throughout deposition. No in-print nozzle or material changes are supported.");
+    def->min=0;def->max=2;def->mode=comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("nonplanar_clearance_nozzle", coInt);
+    def->label = L("Active nozzle used for clearance measurements");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("The nozzle number used as the origin for the common hotend angles, envelope, gantry and Z bounds. Must match the fixed active nozzle. Include the parked nozzle and the complete moving toolhead.");
+    def->min=0;def->max=2;def->mode=comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("nonplanar_fixed_clearance_recorded", coBool);
+    def->label = L("Whole toolhead clearance recorded for fixed nozzle");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Set only after establishing conservative whole-toolhead bounds with this nozzle active and the other nozzle parked. This declaration does not measure or certify clearance.");
+    def->mode=comAdvanced;def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("nonplanar_fixed_clearance_source", coString);
+    def->label = L("Fixed-nozzle clearance measurement source");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Record the installed active tip, parked nozzle position, complete toolhead, method, uncertainty and clearance allowance. Recheck after hardware or active-nozzle changes.");
+    def->mode=comAdvanced;def->set_default_value(new ConfigOptionString(""));
+
     // ---- BELT_MOD: belt printer ----
     // Key names, enum values and defaults are OrcaSlicer's so its belt printer profiles import.
     def = this->add("belt_printer", coBool);

@@ -3,6 +3,7 @@
 #include "GCodeWriter.hpp"
 #include "Polygon.hpp"
 #include "PrintConfig.hpp"
+#include "CurvedFixedNozzle.hpp"
 #include "libslic3r.h"
 #include "I18N.hpp"
 #include "GCode.hpp"
@@ -195,6 +196,11 @@ static bool is_multi_nozzle_printer(const FullPrintConfig &config)
 
 static int hotend_id_for_gcode_placeholder(const FullPrintConfig &config, int hotend_id)
 {
+    // Fixed dual-carriage jobs must resolve startup's H explicitly instead of
+    // X2D's ordinary firmware-assigned H-1. Preserve the existing logical-nozzle
+    // numbering used by the BBL T/M1020 protocol; do not remap it twice.
+    if(config.nozzle_diameter.size()==2 && config.nonplanar_fixed_nozzle.value>0)
+        return hotend_id;
     return is_bambu_x2d_printer(config) ? -1 : hotend_id;
 }
 
@@ -4138,6 +4144,22 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     update_placeholder_parser_with_variant_params();
 
     std::string machine_start_gcode = this->placeholder_parser_process("machine_start_gcode", print.config().machine_start_gcode.value, initial_extruder_id);
+    const bool fixed_curved_job=print.config().nozzle_diameter.size()==2 &&
+        std::any_of(print.objects().begin(),print.objects().end(),[](const PrintObject* o){return bool(o->curved_field());});
+    if(fixed_curved_job) {
+        int selected_filament=-1,selected_nozzle=-1;
+        GCodeReader reader;
+        reader.parse_buffer(machine_start_gcode,[&](GCodeReader&,const GCodeReader::GCodeLine& line) {
+            const std::string command(line.cmd());
+            if(command.size()<2 || command.front()!='T') return;
+            char* end=nullptr;const long id=std::strtol(command.c_str()+1,&end,10);
+            if(end!=command.c_str()+command.size() || id<0 || id>254) return;
+            selected_filament=int(id);float h=-1.f;
+            selected_nozzle=line.has_value('H',h) && std::isfinite(h) && h==std::floor(h)?int(h):-1;
+        });
+        if(selected_filament!=int(initial_extruder_id) || selected_nozzle!=extruder_id)
+            throw SlicingError("Fixed-nozzle curved printing requires startup to explicitly select the planned filament and nozzle with T<filament> H<nozzle>; automatic H-1 selection is not accepted.");
+    }
     if (print.config().gcode_flavor != gcfKlipper) {
         // Set bed temperature if the start G-code does not contain any bed temp control G-codes.
         // Waits for the bed (M190) as upstream does; a fork experiment had turned this into a no-wait M140.
@@ -5897,8 +5919,12 @@ LayerResult GCode::process_belt_brim_layer(const Print &print, const std::vector
         config.set_key_value("layer_num",   new ConfigOptionInt(m_layer_index + 1));
         config.set_key_value("layer_z",     new ConfigOptionFloat(print_z));
         config.set_key_value("max_layer_z", new ConfigOptionFloat(max_layer_z_for_templates()));
-        gcode += this->placeholder_parser_process("before_layer_change_gcode",
-            print.config().before_layer_change_gcode.value, m_writer.filament()->id(), &config) + "\n";
+        const auto expanded=this->placeholder_parser_process("before_layer_change_gcode",
+            print.config().before_layer_change_gcode.value,m_writer.filament()->id(),&config);
+        if(std::any_of(print.objects().begin(),print.objects().end(),[](const PrintObject* o){return bool(o->curved_field());}) &&
+           !CurvedTransition::layer_code_safe(expanded))
+            throw SlicingError("Expanded layer code contains unsupported motion, tool or frame commands in curved mode.");
+        gcode+=expanded+"\n";
     }
 
     gcode += this->change_layer(print_z);
@@ -5908,8 +5934,12 @@ LayerResult GCode::process_belt_brim_layer(const Print &print, const std::vector
         config.set_key_value("layer_num",   new ConfigOptionInt(m_layer_index));
         config.set_key_value("layer_z",     new ConfigOptionFloat(print_z));
         config.set_key_value("max_layer_z", new ConfigOptionFloat(max_layer_z_for_templates()));
-        gcode += this->placeholder_parser_process("layer_change_gcode",
-            print.config().layer_change_gcode.value, m_writer.filament()->id(), &config) + "\n";
+        const auto expanded=this->placeholder_parser_process("layer_change_gcode",
+            print.config().layer_change_gcode.value,m_writer.filament()->id(),&config);
+        if(std::any_of(print.objects().begin(),print.objects().end(),[](const PrintObject* o){return bool(o->curved_field());}) &&
+           !CurvedTransition::layer_code_safe(expanded))
+            throw SlicingError("Expanded layer code contains unsupported motion, tool or frame commands in curved mode.");
+        gcode+=expanded+"\n";
     }
     gcode += ";_SET_FAN_SPEED_CHANGING_LAYER\n";
 
@@ -6356,9 +6386,12 @@ LayerResult GCode::process_layer(
         config.set_key_value("layer_num",   new ConfigOptionInt(m_layer_index + 1));
         config.set_key_value("layer_z",     new ConfigOptionFloat(print_z));
         config.set_key_value("max_layer_z", new ConfigOptionFloat(max_layer_z_for_templates()));
-        gcode += this->placeholder_parser_process("before_layer_change_gcode",
-            print.config().before_layer_change_gcode.value, m_writer.filament()->id(), &config)
-            + "\n";
+        const auto expanded=this->placeholder_parser_process("before_layer_change_gcode",
+            print.config().before_layer_change_gcode.value,m_writer.filament()->id(),&config);
+        if(std::any_of(print.objects().begin(),print.objects().end(),[](const PrintObject* o){return bool(o->curved_field());}) &&
+           !CurvedTransition::layer_code_safe(expanded))
+            throw SlicingError("Expanded layer code contains unsupported motion, tool or frame commands in curved mode.");
+        gcode+=expanded+"\n";
     }
 
     PrinterStructure printer_structure           = m_config.printer_structure.value;
@@ -6440,9 +6473,12 @@ LayerResult GCode::process_layer(
         config.set_key_value("curr_accumulated_mass", new ConfigOptionFloat(curr_accumulated_mass));
         config.set_key_value("curr_layer_mass", new ConfigOptionFloat(curr_layer_mass));
 
-        gcode += this->placeholder_parser_process("layer_change_gcode",
-            print.config().layer_change_gcode.value, m_writer.filament()->id(), &config)
-            + "\n";
+        const auto expanded=this->placeholder_parser_process("layer_change_gcode",
+            print.config().layer_change_gcode.value,m_writer.filament()->id(),&config);
+        if(std::any_of(print.objects().begin(),print.objects().end(),[](const PrintObject* o){return bool(o->curved_field());}) &&
+           !CurvedTransition::layer_code_safe(expanded))
+            throw SlicingError("Expanded layer code contains unsupported motion, tool or frame commands in curved mode.");
+        gcode+=expanded+"\n";
         config.set_key_value("max_layer_z", new ConfigOptionFloat(max_layer_z_for_templates()));
     }
     //BBS: set layer time fan speed after layer change gcode
@@ -7257,7 +7293,8 @@ LayerResult GCode::process_layer(
                         Vec2d(m_writer.extruder_offset_xy().x(),m_writer.extruder_offset_xy().y());
                     m_writer.set_curved_blend(curved_object.curved_field(),*curved_object.curved_domain(),curved_origin,
                         std::max(2.,std::max(m_config.nonplanar_approach_distance.value,m_config.nonplanar_departure_distance.value)),
-                        print.config().machine_max_speed_z.get_at(0));
+                        CurvedTransition::FixedNozzleLimits::from_config(print.config(),curved_object.curved_nozzle_index()).z_speed,
+                        print.config().nozzle_diameter.size()==2?int(curved_object.curved_nozzle_index()):-1);
                 }
                 if (m_config.reduce_crossing_wall)
                     m_avoid_crossing_perimeters.init_layer(*m_layer);

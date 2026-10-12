@@ -1522,7 +1522,9 @@ static std::vector<std::string> s_Preset_printer_options {
     "first_layer_plane", "first_layer_plane_offset", "first_layer_plane_thickness", "belt_initial_temperature_length",
     "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z",
     "ac_pivot_height", "ac_c_axis_offset_x", "ac_c_axis_offset_y", "ac_solution", "ac_table_radius",
-    "ac_transition_clearance", "ac_rotation_speed"
+    "ac_transition_clearance", "ac_rotation_speed",
+    "nonplanar_fixed_nozzle", "nonplanar_clearance_nozzle",
+    "nonplanar_fixed_clearance_recorded", "nonplanar_fixed_clearance_source"
     };
 
 static std::vector<std::string> s_Preset_sla_print_options {

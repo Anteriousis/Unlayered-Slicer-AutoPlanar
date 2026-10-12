@@ -7708,10 +7708,11 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionEnum<SkirtType>(stCombined));
 
     def = this->add("automatic_layer_strategy", coBool);
-    def->label = L("Automatic curved or planar selection (experimental)");
+    def->label = L("Automatic layer mode (experimental)");
     def->category = L("Others");
     def->mode = comAdvanced;
-    def->tooltip = L("When Slice plate runs, try continuous curved transitions through existing planes or infer directions from shallow roofs and local surface regions. "
+    def->tooltip = L("Automatically choose curved or planar layers when Slice plate runs. The manual curved layers option is inactive while this is enabled. "
+                     "Try continuous curved transitions through existing planes or infer directions from shallow roofs and local surface regions. "
                      "Choose planar slicing when the model, current process or configured printer limits do not qualify. "
                      "Supports and other settings are preserved; clearance limits are never raised. "
                      "The selected strategy and fallback reason appear in slicing messages and the G-code header. "
@@ -7721,10 +7722,11 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("curved_layer_blend", coBool);
-    def->label = L("Curved layer blend (experimental)");
+    def->label = L("Manual curved layers (experimental)");
     def->category = L("Others");
     def->mode = comAdvanced;
-    def->tooltip = L("Blend layer directions continuously through the selected nonintersecting, height-ordered planes, slicing the original closed mesh without separate cut sections. "
+    def->tooltip = L("Use curved layers without automatic planar fallback. Available only when Automatic layer mode is off; its saved value is ignored while automatic mode is on. "
+                     "Blend layer directions continuously through the selected nonintersecting, height-ordered planes, slicing the original closed mesh without separate cut sections. "
                      "With no planes, a rectangular ramp can blend from its flat foundation into its roof. "
                      "Experimental: Virtual printer only, one object and copy, no supports, modifiers or variable layer heights. "
                      "Requires classic walls, no scarf seam, ironing, wipe, arcs, bridge paths or custom layer motion. "

@@ -138,6 +138,18 @@ guarantee.
 
 ## Motion and Preview
 
+For fixed dual-carriage jobs, expanded startup selection tracks both BBL T/H
+and M1020 S/H commands. Parking/unloading or an unsupported selection invalidates
+an earlier selection; out-of-range IDs are rejected before numeric conversion.
+The final explicit selection must match the planned used filament and nozzle.
+This checks emitted commands, not the printer's actual firmware state.
+
+Expanded filament-start, layer and extrusion-role scripts in a curved job may
+only control the permitted cooling/progress commands or emit G92 E0. Raw axis,
+frame/tool commands and silent changes to position/extrusion writer-state output
+variables stop export before the writer accepts those changes. Stock start/end
+and calibration macros still need independent physical/firmware review.
+
 The writer emits physical XYZ, local bead-height and layer-normal tags. Preview
 processes those same paths and orients extrusion cross-sections. Virtual mode
 keeps the actual nozzle upright and emits no rotary B/C motions.

@@ -4151,11 +4151,20 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         GCodeReader reader;
         reader.parse_buffer(machine_start_gcode,[&](GCodeReader&,const GCodeReader::GCodeLine& line) {
             const std::string command(line.cmd());
-            if(command.size()<2 || command.front()!='T') return;
-            char* end=nullptr;const long id=std::strtol(command.c_str()+1,&end,10);
-            if(end!=command.c_str()+command.size() || id<0 || id>254) return;
-            selected_filament=int(id);float h=-1.f;
-            selected_nozzle=line.has_value('H',h) && std::isfinite(h) && h==std::floor(h)?int(h):-1;
+            if(command=="M1020") {
+                float s=-1.f;
+                selected_filament=line.has_value('S',s) && std::isfinite(s) &&
+                    s>=0.f && s<=254.f && s==std::floor(s)?int(s):-1;
+            } else if(command.size()>=2 && command.front()=='T') {
+                char* end=nullptr;const long id=std::strtol(command.c_str()+1,&end,10);
+                if(end==command.c_str()+command.size() && id==1000) return; // BBL calibration command
+                // Unloading/parking T255, malformed T commands and unsupported
+                // IDs invalidate an earlier selection until another valid one.
+                selected_filament=end==command.c_str()+command.size() && id>=0 && id<=254?int(id):-1;
+            } else return;
+            float h=-1.f;
+            selected_nozzle=line.has_value('H',h) && std::isfinite(h) &&
+                h>=0.f && h<2.f && h==std::floor(h)?int(h):-1;
         });
         if(selected_filament!=int(initial_extruder_id) || selected_nozzle!=extruder_id)
             throw SlicingError("Fixed-nozzle curved printing requires startup to explicitly select the planned filament and nozzle with T<filament> H<nozzle>; automatic H-1 selection is not accepted.");
@@ -5168,6 +5177,29 @@ PlaceholderParserIntegration &ppi = m_placeholder_parser_integration;
         ppi.update_from_gcodewriter(m_writer);
         std::string output = ppi.parser.process(templ, current_filament_id, config_override, &ppi.output_config, &ppi.context);
         ppi.validate_output_vector_variables();
+        const bool curved_custom_script=m_print &&
+            (name=="filament_start_gcode" || name=="change_extrusion_role_gcode" ||
+             name=="process_change_extrusion_role_gcode" || name=="filament_change_extrusion_role_gcode" ||
+             name=="layer_change_gcode" || name=="before_layer_change_gcode") &&
+            std::any_of(m_print->objects().begin(),m_print->objects().end(),[](const PrintObject* o){return bool(o->curved_field());});
+        if(curved_custom_script) {
+            bool state_changed=ppi.position!=ppi.opt_position->values;
+            for(const Extruder& e:m_writer.extruders()) {
+                const unsigned int id=e.id();
+                if(id<ppi.num_extruders)
+                    state_changed=state_changed || (!m_writer.config.use_relative_e_distances &&
+                        !is_approx(ppi.e_position[id],ppi.opt_e_position->values[id])) ||
+                        !is_approx(ppi.e_retracted[id],ppi.opt_e_retracted->values[id]) ||
+                        !is_approx(ppi.e_restart_extra[id],ppi.opt_e_restart_extra->values[id]);
+            }
+            // Validate before applying template output variables to the writer.
+            // Otherwise a silent {position[..]=...} can corrupt its frame even
+            // when the expanded text contains no explicit motion command.
+            if(state_changed || !CurvedTransition::layer_code_safe(output))
+                throw SlicingError(std::string(name=="layer_change_gcode" || name=="before_layer_change_gcode"?
+                    "Expanded layer code":"Expanded curved custom code")+
+                    " permits only cooling/progress and G92 E0, without axis, tool or writer-state changes.");
+        }
         const CustomGCodeMotionStateChanges motion_state_changes = custom_gcode_motion_state_changes(output);
         if (motion_state_changes.acceleration)
             m_writer.invalidate_acceleration();
@@ -5194,7 +5226,8 @@ PlaceholderParserIntegration &ppi = m_placeholder_parser_integration;
 
         return output;
     } 
-    catch (std::runtime_error &err) 
+    catch (const SlicingError&) { throw; }
+    catch (std::runtime_error &err)
     {
         // Collect the names of failed template substitutions for error reporting.
         auto it = ppi.failed_templates.find(name);

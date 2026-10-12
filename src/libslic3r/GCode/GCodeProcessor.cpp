@@ -6971,12 +6971,8 @@ void GCodeProcessor::ensure_nozzle_group_result(int min_filament_count)
         filament_map.resize(filament_count, filament_map.front());
     }
 
-    int min_value = *std::min_element(filament_map.begin(), filament_map.end());
-    if (min_value >= 1) {
-        for (int &value : filament_map) {
-            value -= 1;
-        }
-    }
+    // apply_config already converted this member to zero-based physical IDs.
+    // A job using only nozzle 1 (or above) must not be rebased to nozzle 0.
 
     for (int &value : filament_map) {
         value = std::max(0, value);

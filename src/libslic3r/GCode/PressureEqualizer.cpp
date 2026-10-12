@@ -254,6 +254,15 @@ static inline float parse_float(const char *&line, const size_t line_length)
 bool PressureEqualizer::process_line(const char *line, const char *line_end, GCodeLine &buf)
 {
     const size_t len = line_end - line;
+    static const std::string tool_tag=";"+std::string(GCodeProcessor::Physical_Tool_Filament_Tag);
+    if (len>=tool_tag.size() && strncmp(line,tool_tag.data(),tool_tag.size())==0) {
+        try {
+            const char* payload=line+tool_tag.size();
+            const int slot=parse_int(payload);
+            m_pending_tool_filament=slot>=0 && size_t(slot)<m_filament_crossections.size() ? slot : -1;
+        } catch (Slic3r::InvalidArgument&) { m_pending_tool_filament=-1; }
+        // Preserve the comment; imported Preview uses it again after filtering.
+    }
     if (strncmp(line, EXTRUSION_ROLE_TAG.data(), EXTRUSION_ROLE_TAG.length()) == 0) {
         line += EXTRUSION_ROLE_TAG.length();
         int role = atoi(line);
@@ -448,6 +457,8 @@ bool PressureEqualizer::process_line(const char *line, const char *line_end, GCo
             break;
         }
         assert(new_extruder != -1);
+        if (m_pending_tool_filament>=0) new_extruder=m_pending_tool_filament;
+        m_pending_tool_filament=-1;
 
         if (new_extruder != int(m_current_extruder)) {
             m_current_extruder = new_extruder;

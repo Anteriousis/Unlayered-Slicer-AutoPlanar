@@ -151,6 +151,12 @@ unexpected nozzle/material switch before mutating the active tool. Z speed uses
 the slowest configured normal-mode limit; unused silent-mode placeholders are
 ignored consistently with the existing writer.
 
+The cooling and pressure-smoothing filters retain and consume the same material
+metadata when processing generic physical tool commands. Imported nozzle grouping
+retains zero-based physical IDs; a job using only the second nozzle is not rebased
+to the first nozzle. A planar fallback regression uses opposite material/tool
+mapping and different fan settings to check this shared command path.
+
 These bounds cover deposition and the existing high-traverse plan, not raw
 machine start/end scripts, docking or mechanical switch sequences. Those scripts
 remain the stock physical-machine paths and require their own review. No stock

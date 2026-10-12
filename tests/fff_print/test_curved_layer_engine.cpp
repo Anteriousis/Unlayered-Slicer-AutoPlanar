@@ -191,8 +191,15 @@ TEST_CASE("Automatic slicing leaves multiple objects and sparse infill on their 
 TEST_CASE("Curved toolhead states use the selected physical nozzle and survive serialization", "[curved-engine][multi-nozzle]")
 {
     auto dynamic=shared_carriage_config();
-    DynamicPrintConfig reloaded;
-    for (const auto& key:dynamic.keys()) reloaded.set_deserialize_strict(key,dynamic.option(key)->serialize());
+    DynamicPrintConfig reloaded=dynamic;
+    // Exercise the added physical-state keys. Unrelated legacy enum-vector
+    // serializers (for example extruder_type) do not accept their own numeric
+    // output through this string-parser API and are outside this roundtrip.
+    for (const auto& key:dynamic.keys()) {
+        if (key.rfind("nonplanar_state_",0)!=0 && key!="nonplanar_shared_carriage" && key!="nonplanar_measured_nozzle_count") continue;
+        reloaded.erase(key);
+        reloaded.set_deserialize_strict(key,dynamic.option(key)->serialize());
+    }
     PrintConfig config;config.apply(reloaded,true);
     const auto first=CurvedTransition::ToolheadState::from_config(config,0);
     const auto second=CurvedTransition::ToolheadState::from_config(config,1);
@@ -313,6 +320,9 @@ TEST_CASE("Curved shared-carriage Preview maps physical tools back to their fila
     print.export_gcode(temp.string(),&preview,nullptr);
     const auto* object=print.objects().front();
     REQUIRE(object->curved_field());REQUIRE(preview.tool_axis_fixed);
+    REQUIRE(preview.nozzle_group_result);
+    const auto live_nozzles=preview.nozzle_group_result->get_nozzles_for_filament(0);
+    REQUIRE(live_nozzles.size()==1);REQUIRE(live_nozzles.front().extruder_id==active);
     const auto& domain=*object->curved_ramp();
     const Vec2d shift=unscale(object->instances().front().shift);
     size_t deposits=0;
@@ -332,6 +342,9 @@ TEST_CASE("Curved shared-carriage Preview maps physical tools back to their fila
     // Replaying the emitted metadata with a dynamic config (the imported-file
     // path) must retain the same bed-frame positions and material identity.
     GCodeProcessor replay;replay.process_file(temp.string());
+    REQUIRE(replay.get_result().nozzle_group_result);
+    const auto imported_nozzles=replay.get_result().nozzle_group_result->get_nozzles_for_filament(0);
+    REQUIRE(imported_nozzles.size()==1);REQUIRE(imported_nozzles.front().extruder_id==active);
     size_t replay_deposits=0;
     for (const auto& move:replay.get_result().moves) {
         if (move.type!=EMoveType::Extrude || move.extrusion_role==erCustom) continue;
@@ -341,6 +354,31 @@ TEST_CASE("Curved shared-carriage Preview maps physical tools back to their fila
         REQUIRE(local.y()>=domain.ymin-.1);REQUIRE(local.y()<=domain.ymax+.1);
     }
     REQUIRE(replay_deposits==deposits);
+}
+
+TEST_CASE("Shared-carriage planar fallback preserves mapped tools and material cooling through filters", "[curved-engine][multi-nozzle][fallback]")
+{
+    auto config=shared_carriage_config();config.set_num_filaments(2);
+    config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"curved_layer_blend","0"},
+        {"filament_map","2,1"},{"filament_colour","#FF0000;#00FF00"},
+        {"fan_min_speed","20,80"},{"fan_max_speed","20,80"},
+        {"close_fan_the_first_x_layers","0,0"},{"full_fan_speed_layer","0,0"},
+        {"slow_down_for_layer_cooling","0,0"},{"max_volumetric_extrusion_rate_slope","2"}});
+    config.set_key_value("flush_volumes_matrix",new ConfigOptionFloats({0.,0.,0.,0.}));
+    Print print;Model model;
+    Test::init_print({TriangleMesh(its_make_cube(10.,10.,3.)),TriangleMesh(its_make_cube(10.,10.,3.))},print,model,config);
+    REQUIRE(model.objects.size()==2);
+    for (size_t i=0;i<model.objects.size();++i) {
+        model.objects[i]->instances.front()->set_offset(Vec3d(100.+25.*i,100.,0.));
+        model.objects[i]->config.set_key_value("extruder",new ConfigOptionInt(int(i)+1));
+    }
+    print.apply(model,config);
+    const auto output=Test::gcode(print);
+    for (const auto* object:print.objects()) REQUIRE_FALSE(object->curved_field());
+    REQUIRE(output.find(";UNLAYERED_FILAMENT_SLOT:0\nT1")!=std::string::npos);
+    REQUIRE(output.find(";UNLAYERED_FILAMENT_SLOT:1\nT0")!=std::string::npos);
+    REQUIRE(output.find("M106 S51")!=std::string::npos);
+    REQUIRE(output.find("M106 S204")!=std::string::npos);
 }
 
 TEST_CASE("Curved plane project reload preserves world positions when the volume origin moves", "[curved-engine][planes][3mf]")

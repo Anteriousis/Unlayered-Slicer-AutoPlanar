@@ -102,6 +102,7 @@ struct CoolingLine
     size_t  line_start;
     // End of this line at the G-code snippet.
     size_t  line_end;
+    int tool_filament {-1};
     // XY Euclidian length of this segment.
     float   length;
     // Current feedrate, possibly adjusted.
@@ -372,6 +373,8 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
     }
 
     unsigned int      current_extruder  = m_current_extruder;
+    int pending_tool_filament = -1;
+    static const std::string physical_tool_tag=";"+std::string(GCodeProcessor::Physical_Tool_Filament_Tag);
     PerExtruderAdjustments *adjustment  = &per_extruder_adjustments[map_extruder_to_per_extruder_adjustment[current_extruder]];
     const char       *line_start = gcode.c_str();
     const char       *line_end   = line_start;
@@ -516,9 +519,18 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
         } else if (boost::starts_with(sline, ";_EXTRUDE_END")) {
             line.type = CoolingLine::TYPE_EXTRUDE_END;
             active_speed_modifier = size_t(-1);
+        } else if (boost::starts_with(sline, physical_tool_tag)) {
+            const size_t prefix=1+GCodeProcessor::Physical_Tool_Filament_Tag.size();
+            int slot=-1;
+            const auto parsed=std::from_chars(sline.data()+prefix,sline.data()+sline.size(),slot);
+            pending_tool_filament=parsed.ec==std::errc() && parsed.ptr==sline.data()+sline.size() && slot>=0 &&
+                std::find(m_extruder_ids.begin(),m_extruder_ids.end(),unsigned(slot))!=m_extruder_ids.end() ? slot : -1;
         } else if (boost::starts_with(sline, m_toolchange_prefix)) {
             unsigned int new_extruder = 0;
             auto ret = std::from_chars(sline.data() + m_toolchange_prefix.size(), sline.data() + sline.size(), new_extruder);
+            const bool annotated_tool=pending_tool_filament>=0;
+            if (pending_tool_filament>=0) new_extruder=unsigned(pending_tool_filament);
+            pending_tool_filament=-1;
             if (std::errc::invalid_argument != ret.ec) {
                 // Only change extruder in case the number is meaningful. User could provide an out-of-range index through custom gcodes -
                 // those shall be ignored.
@@ -526,6 +538,7 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
                     if (new_extruder != current_extruder) {
                         // Switch the tool.
                         line.type        = CoolingLine::TYPE_SET_TOOL;
+                        line.tool_filament = annotated_tool ? int(new_extruder) : -1;
                         current_extruder = new_extruder;
                         adjustment       = &per_extruder_adjustments[map_extruder_to_per_extruder_adjustment[current_extruder]];
                     }
@@ -991,9 +1004,12 @@ std::string CoolingBuffer::apply_layer_cooldown(
         if (line->type & CoolingLine::TYPE_SET_TOOL) {
             unsigned int new_extruder = 0;
             auto ret = std::from_chars(line_start + m_toolchange_prefix.size(), line_end, new_extruder);
+            if (line->tool_filament>=0) new_extruder=unsigned(line->tool_filament);
             if (std::errc::invalid_argument != ret.ec) {
                 if (new_extruder != m_current_extruder) {
                     m_current_extruder = new_extruder;
+                    if (line->tool_filament>=0)
+                        m_current_nozzle = unsigned(std::max(0,m_config.filament_map.get_at(new_extruder)-1));
                     change_extruder_set_fan(true);
                 }
             }

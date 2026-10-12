@@ -114,13 +114,16 @@ material/nozzle changes, independent carriages and docked/toolchanger heads rema
 unsupported for curved jobs. Automatic strategy selection retains the planar
 path when these requirements are not met; explicit curved mode reports an error.
 
-Printer presets store `nonplanar_shared_carriage` and per-physical-nozzle arrays:
+Printer presets store `nonplanar_shared_carriage`, `nonplanar_measured_nozzle_count`,
+and per-physical-nozzle arrays:
 `nonplanar_state_nozzle_id`, `nonplanar_state_complete`, `nonplanar_state_source`,
 `nonplanar_state_envelope_height`, `nonplanar_state_angle_xpos/xneg/ypos/yneg`,
 `nonplanar_state_gantry_height`, and `nonplanar_state_max_z`. They appear on each
 nozzle's settings page. State identity is 1-based and defaults to 0/unknown;
 completeness defaults false and geometry defaults zero. Resizing or copying a
-preset does not certify a new state. Only the selected state's measurements are
+preset does not certify a new state. Adding/removing physical nozzles makes the
+recorded carriage count mismatch, refusing the old envelopes until reviewed.
+Only the selected state's measurements are
 required. Its complete conservative pyramid must enclose all carriage hardware,
 including inactive nozzles at their actual parked heights, expressed about the
 active tip. The recorded source and flag reflect the user's assessment, not an

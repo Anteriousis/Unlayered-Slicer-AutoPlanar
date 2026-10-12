@@ -5715,6 +5715,7 @@ PageShp TabPrinter::build_kinematics_page()
     optgroup->append_single_option_line("nonplanar_virtual_max_angle", "printer_motion_ability#non-planar-printing");
     optgroup->append_single_option_line("nonplanar_virtual_max_z", "printer_motion_ability#non-planar-printing");
     optgroup->append_single_option_line("nonplanar_shared_carriage", "");
+    optgroup->append_single_option_line("nonplanar_measured_nozzle_count", "");
     // What the geometry above actually works out to, so the limit that stops a cut-plane drag is
     // legible here rather than only discoverable by hitting it. Refreshed in update_description_lines().
     {
@@ -6640,7 +6641,7 @@ void TabPrinter::toggle_options()
                          "nonplanar_hotend_angle_xpos", "nonplanar_hotend_angle_xneg",
                          "nonplanar_hotend_angle_ypos", "nonplanar_hotend_angle_yneg",
                          "nonplanar_gantry_height",
-                         "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z", "nonplanar_shared_carriage"})
+                         "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z", "nonplanar_shared_carriage", "nonplanar_measured_nozzle_count"})
             toggle_line(opt, enable_nonplanar);
 
         // Within the section, grey out the rotary axis that is NOT part of the selected
@@ -6652,7 +6653,7 @@ void TabPrinter::toggle_options()
             // Virtual drives no rotary axis at all, so axis_{a,b,c}_active are all false and the
             // whole per-axis block greys out on its own. Its two limits take their place.
             const bool is_virtual = sel == AxisSelection::Virtual;
-            for (auto opt : {"nonplanar_gantry_height", "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z", "nonplanar_shared_carriage"})
+            for (auto opt : {"nonplanar_gantry_height", "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z", "nonplanar_shared_carriage", "nonplanar_measured_nozzle_count"})
                 toggle_line(opt, is_virtual);
             // The derived-limit line follows them: it has nothing to say for a real 5-axis machine,
             // where the nozzle tilts with the plane and this whole model does not apply.

@@ -1713,6 +1713,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     // by physical nozzle, never by filament or flow variant. Zero/false means
     // unknown; an identity protects against a resized/copied measured state.
     ((ConfigOptionBool,                 nonplanar_shared_carriage))
+    ((ConfigOptionInt,                  nonplanar_measured_nozzle_count))
     ((ConfigOptionInts,                 nonplanar_state_nozzle_id))
     ((ConfigOptionBools,                nonplanar_state_complete))
     ((ConfigOptionStrings,              nonplanar_state_source))

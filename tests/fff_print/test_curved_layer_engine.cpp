@@ -50,7 +50,7 @@ DynamicPrintConfig shared_carriage_config(int active=0)
     c.set_num_extruders(2);
     c.set_deserialize_strict({{"nozzle_diameter","0.4,0.4"},{"extruder_offset","0x0,12x-3"},
         {"min_layer_height","0.08,0.1"},{"max_layer_height","0.32,0.3"},
-        {"extruder_printable_height","200,80"},{"nonplanar_shared_carriage","1"},
+        {"extruder_printable_height","200,80"},{"nonplanar_shared_carriage","1"},{"nonplanar_measured_nozzle_count","2"},
         {"nonplanar_state_nozzle_id","1,2"},{"nonplanar_state_complete","1,1"},
         {"nonplanar_state_source","synthetic state one;synthetic state two"},
         {"nonplanar_state_envelope_height","125,110"},{"nonplanar_state_gantry_height","14,13"},
@@ -202,7 +202,25 @@ TEST_CASE("Curved toolhead states use the selected physical nozzle and survive s
     REQUIRE(first.z_speed==5.);REQUIRE(second.z_speed==5.);
     // Arbitrarily many states: the mechanism is not special-cased to two.
     dynamic.set_num_extruders(3);PrintConfig cloned;cloned.apply(dynamic,true);
+    REQUIRE_THROWS_WITH(CurvedTransition::ToolheadState::from_config(cloned,0),Catch::Matchers::ContainsSubstring("nozzle count"));
+    cloned.nonplanar_measured_nozzle_count.value=3;
     REQUIRE_THROWS_WITH(CurvedTransition::ToolheadState::from_config(cloned,2),Catch::Matchers::ContainsSubstring("identified"));
+    // A deliberately remeasured third state is usable. Count changes alone
+    // never establish that its cloned geometry is actually measured.
+    cloned.nonplanar_state_nozzle_id.values[2]=3;
+    cloned.nonplanar_state_complete.values[2]=true;
+    cloned.nonplanar_state_source.values[2]="synthetic state three";
+    for (auto* option : {&cloned.nonplanar_state_envelope_height,&cloned.nonplanar_state_angle_xpos,
+                        &cloned.nonplanar_state_angle_xneg,&cloned.nonplanar_state_angle_ypos,
+                        &cloned.nonplanar_state_angle_yneg,&cloned.nonplanar_state_gantry_height,
+                        &cloned.nonplanar_state_max_z})
+        option->values[2]=option->values[0];
+    cloned.min_layer_height.values[2]=.08;cloned.max_layer_height.values[2]=.32;
+    cloned.extruder_printable_height.values[2]=200.;
+    cloned.extruder_printable_area.values.resize(3,cloned.extruder_printable_area.values[0]);
+    REQUIRE(CurvedTransition::ToolheadState::from_config(cloned,2).nozzle==2);
+    dynamic.set_num_extruders(1);PrintConfig reduced;reduced.apply(dynamic,true);
+    REQUIRE_THROWS_WITH(CurvedTransition::ToolheadState::from_config(reduced,0),Catch::Matchers::ContainsSubstring("nozzle count"));
     config.nonplanar_state_nozzle_id.values[1]=1;
     REQUIRE_THROWS(CurvedTransition::ToolheadState::from_config(config,1));
 }
@@ -211,6 +229,7 @@ TEST_CASE("Curved multi-nozzle printing requires recorded shared-carriage geomet
 {
     PrintConfig config;config.apply(shared_carriage_config(1),true);
     SECTION("unknown inactive hardware") {config.nonplanar_state_complete.values[1]=false;}
+    SECTION("changed carriage count") {config.nonplanar_measured_nozzle_count.value=3;}
     SECTION("missing source") {config.nonplanar_state_source.values[1].clear();}
     SECTION("independent carriage") {config.nonplanar_shared_carriage.value=false;}
     SECTION("automatic assignment") {config.filament_map_mode.value=fmmAutoForFlush;}
@@ -270,6 +289,7 @@ TEST_CASE("Curved writer keeps the active offset and refuses switching before mu
     REQUIRE(std::abs(writer.get_position().y()-3.-(placed.y()+10.))<1e-9);
     const auto position=writer.get_position();
     REQUIRE_THROWS(writer.toolchange(1,0));
+    REQUIRE_THROWS(writer.toolchange(0,0)); // same filament, unplanned firmware nozzle command
     REQUIRE(writer.filament()->extruder_id()==1);REQUIRE(writer.get_position()==position);
 }
 

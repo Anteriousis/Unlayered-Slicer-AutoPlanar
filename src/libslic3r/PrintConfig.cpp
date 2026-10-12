@@ -5602,6 +5602,12 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enable only when every nozzle moves on the same carriage. Curved printing currently uses one fixed active nozzle. Independent carriages, docked tools and nozzle switching require additional motion planning.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+    def = this->add("nonplanar_measured_nozzle_count", coInt);
+    def->label = L("Nozzle count in measured carriage");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Number of physical nozzles present in the measured assembly. 0 means unknown. Adding or removing a nozzle invalidates the old whole-carriage envelopes; review every state before recording the new count.");
+    def->min = 0; def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
     def = this->add("nonplanar_state_nozzle_id", coInts);
     def->label = L("Measured state nozzle number");
     def->tooltip = L("Physical nozzle number, starting at 1, for this measured state. 0 means unknown. Re-enter the correct number after copying a state; copied defaults do not establish clearance.");

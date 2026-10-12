@@ -1226,7 +1226,7 @@ void PrintObject::slice()
             const auto toolhead = curved_toolhead_state();
             // Check deposited coordinates in the active tip's build area. The
             // command XY offset is applied by the writer, not to this footprint.
-            if (m_print->config().nozzle_diameter.size() > 1) {
+            if (m_print->config().nozzle_diameter.size() > 1 || m_print->config().nonplanar_shared_carriage.value) {
                 const auto areas = m_print->get_extruder_printable_polygons();
                 if (areas.size() != m_print->config().nozzle_diameter.size() || areas[toolhead.nozzle].empty() ||
                     areas[toolhead.nozzle].front().points.size() < 3 || areas[toolhead.nozzle].front().area()==0.)

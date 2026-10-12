@@ -876,13 +876,13 @@ std::string GCodeWriter::toolchange_prefix() const
 
 std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
 {
+    // A firmware nozzle ID may differ from the physical extruder index. No
+    // switch command (even for the same filament) is permitted in a fixed state.
+    if (m_curved_field && m_curved_fixed_nozzle)
+        throw RuntimeError("Curved blend refuses nozzle or material switching without a checked transition path");
     // set the new extruder
     auto filament_extruder_iter = Slic3r::lower_bound_by_predicate(m_filament_extruders.begin(), m_filament_extruders.end(), [filament_id](const Extruder &e) { return e.id() < filament_id; });
     assert(filament_extruder_iter != m_filament_extruders.end() && filament_extruder_iter->id() == filament_id);
-    if (m_curved_field && m_curved_fixed_nozzle &&
-        (filament_extruder_iter->extruder_id()!=*m_curved_fixed_nozzle ||
-         (filament() && filament()->id()!=filament_id)))
-        throw RuntimeError("Curved blend refuses nozzle or material switching without a checked transition path");
     m_curr_extruder_id = filament_extruder_iter->extruder_id();
     m_curr_filament_extruder[m_curr_extruder_id] = &*filament_extruder_iter;
     m_cached_extruder_idx = get_extruder_index(this->config, filament_id);

@@ -26,10 +26,12 @@ struct ToolheadState {
         state.envelope = HotendEnvelope::from_config(config);
         state.gantry_height = config.nonplanar_gantry_height.value;
         state.max_z = config.nonplanar_virtual_max_z.value;
-        if (count > 1) {
+        if (count > 1 || config.nonplanar_shared_carriage.value) {
             if (!config.nonplanar_shared_carriage.value)
                 throw std::invalid_argument("Curved multi-nozzle printing currently requires a shared moving carriage; independent and docked heads need additional obstacle planning.");
-            if (dynamic_mapping || config.filament_map_mode.value < fmmManual)
+            if (config.nonplanar_measured_nozzle_count.value != int(count))
+                throw std::invalid_argument("The measured carriage nozzle count does not match this printer. Adding or removing a nozzle requires reviewing every whole-carriage envelope.");
+            if (count>1 && (dynamic_mapping || config.filament_map_mode.value < fmmManual))
                 throw std::invalid_argument("Curved multi-nozzle printing requires a fixed manual filament-to-nozzle mapping; automatic nozzle reassignment is not supported.");
             auto exact = [count](const auto& option) { return option.values.size() == count; };
             if (!exact(config.nonplanar_state_nozzle_id) || !exact(config.nonplanar_state_complete) ||

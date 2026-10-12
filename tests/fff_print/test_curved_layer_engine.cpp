@@ -10,6 +10,7 @@
 #include "libslic3r/CurvedFixedNozzle.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Format/STL.hpp"
 #include <sstream>
 #include <regex>
 #include <fstream>
@@ -369,6 +370,33 @@ TEST_CASE("Mixed curved plates refuse neighbour collisions instead of disabling 
     model.objects[0]->instances.front()->set_offset(Vec3d(100.,100.,0.));
     model.objects[1]->instances.front()->set_offset(Vec3d(122.,100.,0.));print.apply(model,config);
     REQUIRE_THROWS(Test::gcode(print));
+}
+
+TEST_CASE("Full Centauri MCT-1 retains curved roof regions alongside planar support paths", "[curved-engine][regions][totem]")
+{
+    Model input;
+    const std::string path=std::string(TEST_DATA_DIR)+"/curved/MCT-1_Centauri_5deg.stl";
+    REQUIRE(load_stl(path.c_str(),&input));REQUIRE(input.objects.size()==1);
+    const auto& mesh=input.objects.front()->volumes.front()->mesh();
+    REQUIRE(mesh.its.indices.size()==22146);
+    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"curved_layer_blend","0"},
+        {"sparse_infill_density","15%"},{"top_shell_thickness","1"},{"enable_support","1"},
+        {"support_type","normal(auto)"},{"support_style","grid"},{"support_on_build_plate_only","1"}});
+    Print print;Model model;Test::init_print({mesh},print,model,config);
+    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
+    const auto original=model.objects.front()->volumes.front()->mesh().its.vertices;
+    print.process();
+    INFO(print.objects().front()->layer_strategy_decision());
+    REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(print.objects().front()->curved_field()));
+    REQUIRE_FALSE(print.objects().front()->support_layers().empty());
+    ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;print.export_gcode(output.string(),&result,nullptr);
+    REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==original);
+    size_t curved=0,support=0;
+    for(const auto& move:result.moves) if(move.type==EMoveType::Extrude && move.extrusion_role!=erCustom) {
+        if(result.tool_axes[move.tool_axis_id].z()<.999999) ++curved;
+        if(is_support(move.extrusion_role)) ++support;
+    }
+    REQUIRE(curved>0);REQUIRE(support>0);
 }
 
 TEST_CASE("Curved plane project reload preserves world positions when the volume origin moves", "[curved-engine][planes][3mf]")

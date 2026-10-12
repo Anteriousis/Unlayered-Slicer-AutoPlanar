@@ -3369,6 +3369,17 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
 
 
+    // Support and bridge roles are only known after native fill/support planning.
+    // Remove conflicting local patches and re-slice the original solid. This is
+    // a bounded geometry retry, not a G-code patch or a changed user preset.
+    for(PrintObject* obj:m_objects) {
+        for(size_t retry=0;obj->refine_curved_regions_for_paths();++retry) {
+            if(retry>=64) throw SlicingError("Regional bridge/support planning did not converge");
+            this->throw_if_canceled();
+            obj->make_perimeters();obj->infill();obj->ironing();
+            obj->generate_support_material();obj->detect_overhangs_for_lift();obj->estimate_curled_extrusions();
+        }
+    }
     if (this->set_started(psWipeTower)) {
         {
             std::vector<std::set<int>> geometric_unprintables(m_config.nozzle_diameter.size());

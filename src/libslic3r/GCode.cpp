@@ -169,6 +169,73 @@ static Point chunk_local_xy_center(const PrintObject &object)
             bb.merge(get_extents(layer->support_islands));
     return bb.defined ? bb.center() : Point(0, 0);
 }
+
+static bool has_curved_objects(const Print& print) {
+    return std::any_of(print.objects().begin(),print.objects().end(),[](const PrintObject* o){return bool(o->curved_field());});
+}
+static double curved_plate_top(const Print& print) {
+    double top=0.;
+    for(const auto* o:print.objects()) {
+        top=std::max(top,o->curved_domain()?o->curved_domain()->top_max:o->layers().back()->print_z+.02);
+        if(!o->support_layers().empty()) top=std::max(top,o->support_layers().back()->print_z+.02);
+    }
+    return top;
+}
+
+// Across independently mapped objects the one-field clearance proof no longer
+// applies. Bound their height difference and test whole printed XY footprints.
+// Interleaved members have monotone logical heights; other groups may be fully
+// built before the next starts and therefore use their complete physical height.
+static void validate_curved_plate(const Print& print) {
+    if(!has_curved_objects(print)) return;
+    struct Member {const PrintObject* object;BoundingBox box;double amplitude,top;};
+    std::vector<Member> members;
+    const auto& pc=print.config();
+    const auto head=HotendEnvelope::from_config(pc);
+    const double sx=std::max(head.spread(HotendEnvelope::XPos),head.spread(HotendEnvelope::XNeg));
+    const double sy=std::max(head.spread(HotendEnvelope::YPos),head.spread(HotendEnvelope::YNeg));
+    for(const auto* o:print.objects()) {
+        const auto error=o->curved_blend_error(true);
+        if(!error.empty()) throw SlicingError("A model sharing a curved plate has incompatible settings: "+error);
+        BoundingBox footprint;
+        for(const auto* l:o->layers()) if(!l->lslices.empty()) footprint.merge(get_extents(l->lslices));
+        for(const auto* l:o->support_layers()) if(!l->support_islands.empty()) footprint.merge(get_extents(l->support_islands));
+        if(!footprint.defined) continue;
+        footprint.offset(scale_(1.)); // includes bead width, mapping and roundoff
+        const double amplitude=o->curved_field()?o->curved_field()->max_displacement_mm():0.;
+        const double top=o->curved_domain()?o->curved_domain()->top_max:o->layers().back()->print_z+.02;
+        for(const auto& inst:o->instances()) {
+            auto placed=footprint;placed.translate(inst.shift);
+            members.push_back({o,placed,amplitude,top});
+            // Check generated supports as well as the model, for every copy.
+            auto on_plate=placed;on_plate.translate(-Point::new_scale(print.get_plate_origin().head<2>()));
+            const auto fits=[&](const std::vector<Vec2d>& area) {
+                Points points;for(const auto& p:area) points.push_back(Point::new_scale(p));
+                return points.size()>=3 && diff(Polygons{on_plate.polygon()},Polygons{Polygon(points)}).empty();
+            };
+            if(!fits(pc.printable_area.values) || (pc.nozzle_diameter.size()==2 && !fits(pc.extruder_printable_area.values[o->curved_nozzle_index()])))
+                throw SlicingError("Curved plate model/support footprint exceeds the active printable area; move it away from the edge.");
+        }
+    }
+    for(size_t i=0;i<members.size();++i) for(size_t j=0;j<i;++j) {
+        const auto& a=members[i];const auto& b=members[j];
+        const bool interleaved=pc.print_sequence.value==PrintSequence::ByLayer ||
+            (pc.print_sequence.value==PrintSequence::ByGroup && a.object->config().print_group.value>0 &&
+             a.object->config().print_group.value==b.object->config().print_group.value);
+        const double height=interleaved?a.amplitude+b.amplitude+pc.max_layer_height.get_at(a.object->curved_nozzle_index())+.05:
+            std::max(a.top,b.top);
+        if(height>=pc.nonplanar_gantry_height.value)
+            throw SlicingError("Objects on this curved plate can exceed the gantry clearance. Use By layer or one shared print group, or print separately.");
+        const double dx=unscale<double>(std::max({a.box.min.x()-b.box.max.x(),b.box.min.x()-a.box.max.x(),coord_t(0)}));
+        const double dy=unscale<double>(std::max({a.box.min.y()-b.box.max.y(),b.box.min.y()-a.box.max.y(),coord_t(0)}));
+        if(dx<=height*sx && dy<=height*sy)
+            throw SlicingError("Models/supports are too close for the configured curved toolhead envelope. Increase their spacing or print separately.");
+    }
+    const double clearance=std::max(2.,std::max(pc.nonplanar_approach_distance.value,pc.nonplanar_departure_distance.value));
+    const double safe=curved_plate_top(print)+clearance;
+    for(const auto* o:print.objects()) if(safe>CurvedTransition::FixedNozzleLimits::from_config(pc,o->curved_nozzle_index()).max_z)
+        throw SlicingError("Plate-wide curved travel exceeds the configured machine/Virtual Z limit.");
+}
     //! macro used to mark string used at localization,
     //! return same string
 #define L(s) (s)
@@ -3317,6 +3384,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 
     m_enable_cooling_markers = true;
     this->apply_print_config(print.config());
+    validate_curved_plate(print);
+    if(has_curved_objects(print)) m_writer.set_curved_plate_bound(curved_plate_top(print)+
+        std::max(2.,std::max(print.config().nonplanar_approach_distance.value,print.config().nonplanar_departure_distance.value)));
     m_config.apply(print.default_object_config());
     m_config.apply(print.default_region_config());
 
@@ -6456,6 +6526,16 @@ LayerResult GCode::process_layer(
         auto_lift_type = LiftType::SpiralLift;
 
     // BBS: don't use lazy_raise when enable spiral vase
+    if(has_curved_objects(print)) {
+        // Skirts/brims are physical planar paths, not part of the previous
+        // object's field. Keep raised plate travel while resetting its mapping.
+        const auto* o=print.objects().front();
+        m_writer.set_curved_blend(std::make_shared<CurvedTransition::Identity>(),
+            {0.,0.,0.,0.,curved_plate_top(print),0.},Vec2d::Zero(),
+            std::max(2.,std::max(m_config.nonplanar_approach_distance.value,m_config.nonplanar_departure_distance.value)),
+            CurvedTransition::FixedNozzleLimits::from_config(print.config(),o->curved_nozzle_index()).z_speed,
+            print.config().nozzle_diameter.size()==2?int(o->curved_nozzle_index()):-1);
+    }
     gcode += this->change_layer(print_z);  // this will increase m_layer_index
     update_layer_related_config(m_layer_index);
     update_placeholder_parser_with_variant_params();
@@ -7328,6 +7408,14 @@ LayerResult GCode::process_layer(
                         std::max(2.,std::max(m_config.nonplanar_approach_distance.value,m_config.nonplanar_departure_distance.value)),
                         CurvedTransition::FixedNozzleLimits::from_config(print.config(),curved_object.curved_nozzle_index()).z_speed,
                         print.config().nozzle_diameter.size()==2?int(curved_object.curved_nozzle_index()):-1);
+                }
+                else if(has_curved_objects(print)) {
+                    const auto& planar=instance_to_print.print_object;
+                    m_writer.set_curved_blend(std::make_shared<CurvedTransition::Identity>(),
+                        {0.,0.,0.,0.,curved_plate_top(print),0.},Vec2d::Zero(),
+                        std::max(2.,std::max(m_config.nonplanar_approach_distance.value,m_config.nonplanar_departure_distance.value)),
+                        CurvedTransition::FixedNozzleLimits::from_config(print.config(),planar.curved_nozzle_index()).z_speed,
+                        print.config().nozzle_diameter.size()==2?int(planar.curved_nozzle_index()):-1);
                 }
                 if (m_config.reduce_crossing_wall)
                     m_avoid_crossing_perimeters.init_layer(*m_layer);
@@ -10088,15 +10176,22 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
         }
         
         if (m_writer.has_curved_blend()) {
-            if (is_bridge(path.role()) || path.z_contoured || sloped!=nullptr ||
-                std::abs(path.height-m_layer->height)>1e-4)
-                throw RuntimeError("Curved blend encountered an unsupported bridge, scarf or combined-height path");
+            if (path.z_contoured || sloped!=nullptr)
+                throw RuntimeError("Curved blend encountered an unsupported scarf or Z-contoured path");
+            const bool needs_planar=is_bridge(path.role()) || is_support(path.role());
+            if(needs_planar) {
+                const BoundingBox bounds=get_extents(path.polyline.to_polyline()).inflated(scale_(path.width*.5+.02));
+                const Vec2d lo=point_to_gcode(bounds.min),hi=point_to_gcode(bounds.max);
+                if(!m_writer.curved_path_is_planar(lo,hi,m_nominal_z,path.height))
+                    throw RuntimeError("A bridge or support bead crosses a curved region. Move the region or use planar mode for this object.");
+            } else if(std::abs(path.height-m_layer->height)>1e-4)
+                throw RuntimeError("Curved blend encountered a combined-height path");
             m_writer.set_curved_path(m_nominal_z,path.width,path.height);
             const double multiplier=m_writer.curved_max_flow_scale();
             if (filament_max_volumetric_speed>0.)
                 F=std::min(F,60.*filament_max_volumetric_speed/(_mm3_per_mm*multiplier));
             // Machine Z component is bounded by the certified roof angle.
-            const double slope=m_layer->object()->curved_domain()->slope();
+            const double slope=m_writer.curved_slope_bound();
             if (slope>EPSILON)
                 F=std::min(F,60.*m_print->config().machine_max_speed_z.get_at(0)*std::sqrt(1.+slope*slope)/slope);
         }

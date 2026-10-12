@@ -6,6 +6,7 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/CurvedPlaneProgram.hpp"
 #include "libslic3r/CurvedMesh.hpp"
+#include "libslic3r/CurvedRegions.hpp"
 #include "libslic3r/CurvedFixedNozzle.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -24,6 +25,7 @@ DynamicPrintConfig curved_config()
         {"nonplanar_hotend_angle_xpos","7"},{"nonplanar_hotend_angle_xneg","10"},
         {"nonplanar_hotend_angle_ypos","15"},{"nonplanar_hotend_angle_yneg","6"},
         {"nonplanar_gantry_height","14"},{"nonplanar_virtual_max_angle","5"},{"nonplanar_virtual_max_z","100"},
+        {"printable_area","-250x-250,250x-250,250x250,-250x250"}, // synthetic fixture permits InfiniteBed arrangement
         {"min_layer_height","0.08"},{"max_layer_height","0.32"},
         {"layer_height","0.2"},{"initial_layer_print_height","0.2"},
         {"sparse_infill_density","100%"},{"wall_generator","classic"},{"seam_slope_type","none"},
@@ -139,7 +141,7 @@ TEST_CASE("Fixed nozzle automatic slicing emits BBL selection and preserves live
     const auto deposits=[&](const GCodeProcessorResult& result) {
         size_t count=0;
         for(const auto& move:result.moves) {
-            if(move.type!=EMoveType::Extrude || move.extrusion_role==erCustom) continue;
+            if(move.type!=EMoveType::Extrude || move.extrusion_role==erCustom || move.extrusion_role==erSkirt || move.extrusion_role==erBrim) continue;
             ++count;REQUIRE(move.extruder_id==0);
             const Vec2d local=move.position.head<2>().cast<double>()-shift;
             REQUIRE(local.x()>=domain.xmin-.1);REQUIRE(local.x()<=domain.xmax+.1);
@@ -161,21 +163,25 @@ TEST_CASE("Fixed nozzle automatic slicing emits BBL selection and preserves live
 TEST_CASE("Fixed nozzle automatic mode keeps unsupported mappings and footprints planar", "[curved-engine][fixed-nozzle][fallback]")
 {
     auto config=fixed_nozzle_config(1);Print print;print.is_BBL_printer()=true;Model model;
-    SECTION("mapping to other nozzle") {config.set_deserialize_strict({{"filament_map","1"}});}
-    SECTION("unmeasured clearance") {config.set_deserialize_strict({{"nonplanar_fixed_clearance_recorded","0"}});}
-    SECTION("automatic reassignment") {config.set_key_value("filament_map_mode",new ConfigOptionEnum<FilamentMapMode>(fmmAutoForFlush));}
-    SECTION("manual tags") {config.set_deserialize_strict({{"manual_filament_change","1"}});}
+    std::string scenario;
+    SECTION("mapping to other nozzle") {scenario="mapping";config.set_deserialize_strict({{"filament_map","1"}});}
+    SECTION("unmeasured clearance") {scenario="clearance";config.set_deserialize_strict({{"nonplanar_fixed_clearance_recorded","0"}});}
+    SECTION("automatic reassignment") {scenario="automatic mapping";config.set_key_value("filament_map_mode",new ConfigOptionEnum<FilamentMapMode>(fmmAutoForFlush));}
+    SECTION("manual tags") {scenario="manual change";config.set_deserialize_strict({{"manual_filament_change","1"}});}
     SECTION("two used materials") {
+        scenario="two materials";
         config.set_num_filaments(2);
-        config.set_deserialize_strict({{"filament_map","2,1"},{"wall_filament","1"},{"solid_infill_filament","2"}});
+        config.set_deserialize_strict({{"filament_map","2,1"},{"outer_wall_filament_id","1"},{"internal_solid_filament_id","2"},{"top_surface_filament_id","2"}});
     }
-    SECTION("wrong machine protocol") {print.is_BBL_printer()=false;}
-    SECTION("out of reach") {config.set_key_value("extruder_printable_area",new ConfigOptionPointsGroups({
+    SECTION("wrong machine protocol") {scenario="machine protocol";print.is_BBL_printer()=false;}
+    SECTION("out of reach") {scenario="footprint";config.set_key_value("extruder_printable_area",new ConfigOptionPointsGroups({
         {Vec2d(0.,0.),Vec2d(200.,0.),Vec2d(200.,200.),Vec2d(0.,200.)},
         {Vec2d(150.,0.),Vec2d(190.,0.),Vec2d(190.,190.),Vec2d(150.,190.)}}));}
     Test::init_print({ramp(2.)},print,model,config);
     model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
+    if(scenario=="two materials") REQUIRE(print.extruders().size()==2);
     const_cast<PrintObject*>(print.objects().front())->slice();
+    INFO("scenario="<<scenario<<" decision="<<print.objects().front()->layer_strategy_decision());
     REQUIRE_FALSE(print.objects().front()->curved_field());
     REQUIRE(print.objects().front()->layer_strategy_decision().find("Automatic selection: planar.")!=std::string::npos);
 }
@@ -283,7 +289,7 @@ TEST_CASE("Automatic slicing keeps flat roofs planar and reselects after setting
     REQUIRE_FALSE(tilted.objects().front()->curved_field());
 }
 
-TEST_CASE("Automatic slicing preserves supports and ignores cut sections on planar fallback", "[curved-engine][automatic]")
+TEST_CASE("Automatic slicing preserves supports and ignores cut sections on a flat roof fallback", "[curved-engine][automatic]")
 {
     auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"enable_support","1"}});
     Print print;Model model;Test::init_print({TriangleMesh(its_make_cube(20.,20.,12.))},print,model,config);
@@ -294,7 +300,7 @@ TEST_CASE("Automatic slicing preserves supports and ignores cut sections on plan
     REQUIRE_FALSE(print.objects().front()->curved_field());
     REQUIRE(print.objects().front()->config().enable_support.value);
     REQUIRE(model.objects.front()->cut_planes.planes.size()==1);
-    REQUIRE(print.objects().front()->layer_strategy_decision().find("supports")!=std::string::npos);
+    REQUIRE(print.objects().front()->layer_strategy_decision().find("no useful regional roof")!=std::string::npos);
 }
 
 TEST_CASE("Automatic slicing checks explicit plane transitions and rejects ambiguous manual rotation", "[curved-engine][automatic]")
@@ -310,21 +316,59 @@ TEST_CASE("Automatic slicing checks explicit plane transitions and rejects ambig
     REQUIRE_FALSE(print.validate().string.empty());
 }
 
-TEST_CASE("Automatic slicing leaves multiple objects and sparse infill on their planar path", "[curved-engine][automatic]")
+TEST_CASE("Automatic slicing selects independent fields for different models and sparse infill", "[curved-engine][automatic][multi-model]")
 {
     auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"}});
     SECTION("several objects") {
-        Print print;Model model;Test::init_print({ramp(2.),ramp(2.)},print,model,config);
+        config.set_deserialize_strict({{"print_sequence","by layer"}});
+        Print print;Model model;Test::init_print({ramp(2.),TriangleMesh(AutoPlanesFixtures::curved_top_block()),ramp(0.)},print,model,config);
+        for(size_t i=0;i<model.objects.size();++i) model.objects[i]->instances.front()->set_offset(Vec3d(45.+60.*i,100.,0.));
+        print.apply(model,config);
         REQUIRE_FALSE(Test::gcode(print).empty());
-        for (const auto* object:print.objects()) REQUIRE_FALSE(object->curved_field());
+        REQUIRE(print.objects()[0]->curved_field());REQUIRE(print.objects()[1]->curved_field());
+        REQUIRE_FALSE(print.objects()[2]->curved_field());
     }
     SECTION("sparse infill") {
         config.set_deserialize_strict({{"sparse_infill_density","15%"}});
         Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
-        REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE_FALSE(print.objects().front()->curved_field());
-        REQUIRE(print.objects().front()->layer_strategy_decision().find("100% infill")!=std::string::npos);
+        REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE(print.objects().front()->curved_field());
+        REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(print.objects().front()->curved_field()));
         REQUIRE(print.objects().front()->printing_region(0).config().sparse_infill_density.value==15.);
     }
+}
+
+TEST_CASE("Regional native slicing retains planar bridges and normal supports below a curved roof", "[curved-engine][regions][supports]")
+{
+    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"curved_layer_blend","0"},
+        {"support_type","normal(auto)"},{"support_style","grid"}});
+    const auto mesh=TriangleMesh(AutoPlanesFixtures::heightfield_block(20.,20.,10,
+        [](double x){return 10.+.04*x;},[](double x){return x<2. || x>18.?0.:4.;}));
+    SECTION("bridge without supports") {}
+    SECTION("normal support") {config.set_deserialize_strict({{"enable_support","1"},{"support_on_build_plate_only","1"}});}
+    Print print;Model model;Test::init_print({mesh},print,model,config);
+    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
+    print.process();const auto* o=print.objects().front();
+    REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(o->curved_field()));
+    const auto original=model.objects.front()->volumes.front()->mesh().its.vertices;
+    ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;print.export_gcode(output.string(),&result,nullptr);
+    REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==original);
+    size_t tilted=0,bridge=0,support=0;
+    for(const auto& move:result.moves) if(move.type==EMoveType::Extrude && move.extrusion_role!=erCustom) {
+        if(is_bridge(move.extrusion_role)) {++bridge;REQUIRE(result.tool_axes[move.tool_axis_id].z()==Catch::Approx(1.).margin(1e-6));}
+        if(is_support(move.extrusion_role)) {++support;REQUIRE(result.tool_axes[move.tool_axis_id].z()==Catch::Approx(1.).margin(1e-6));}
+        if(result.tool_axes[move.tool_axis_id].z()<.999999) ++tilted;
+    }
+    REQUIRE(tilted>0);REQUIRE(bridge+support>0);
+    if(config.opt_bool("enable_support")) REQUIRE(support>0);
+}
+
+TEST_CASE("Mixed curved plates refuse neighbour collisions instead of disabling clearance", "[curved-engine][multi-model][clearance]")
+{
+    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"print_sequence","by layer"}});
+    Print print;Model model;Test::init_print({ramp(2.),ramp(2.)},print,model,config);
+    model.objects[0]->instances.front()->set_offset(Vec3d(100.,100.,0.));
+    model.objects[1]->instances.front()->set_offset(Vec3d(122.,100.,0.));print.apply(model,config);
+    REQUIRE_THROWS(Test::gcode(print));
 }
 
 TEST_CASE("Curved plane project reload preserves world positions when the volume origin moves", "[curved-engine][planes][3mf]")

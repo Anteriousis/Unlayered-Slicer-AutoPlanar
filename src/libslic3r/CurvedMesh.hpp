@@ -21,22 +21,36 @@ inline indexed_triangle_set map_mesh(indexed_triangle_set mesh,const Field& fiel
         for (int iteration=0;iteration<24;++iteration) {
             cancel();
             std::map<std::pair<int,int>,int> midpoints;
-            auto split=[&](int a,int b) {
-                if ((mesh.vertices[a]-mesh.vertices[b]).cast<double>().squaredNorm()<=max_edge2) return -1;
+            auto split=[&](int a,int b,double edge_limit2) {
                 auto key=std::minmax(a,b);
                 const std::pair<int,int> edge{key.first,key.second};
                 const auto found=midpoints.find(edge);
                 if (found!=midpoints.end()) return found->second;
+                if ((mesh.vertices[a]-mesh.vertices[b]).cast<double>().squaredNorm()<=edge_limit2) return -1;
                 if (mesh.vertices.size()>=2000000) throw SlicingError("Curved blend mesh refinement exceeds two million vertices");
                 const int id=int(mesh.vertices.size());
                 const Vec3f midpoint=(mesh.vertices[a]+mesh.vertices[b])*.5f;
                 mesh.vertices.push_back(midpoint);
                 midpoints.emplace(edge,id); return id;
             };
+            // Mark every edge before emitting faces. A neighbouring identity
+            // facet must use an edge split requested by a curved facet too.
+            for(const auto& f:mesh.indices) {
+                const auto lo=mesh.vertices[f[0]].cwiseMin(mesh.vertices[f[1]]).cwiseMin(mesh.vertices[f[2]]);
+                const auto hi=mesh.vertices[f[0]].cwiseMax(mesh.vertices[f[1]]).cwiseMax(mesh.vertices[f[2]]);
+                const double local=field.inverse_hessian_bound_box(lo.x(),hi.x(),lo.y(),hi.y(),lo.z(),hi.z());
+                if(local<=0.) continue;
+                const double limit=2.*physical_tolerance*field.jacobian_min()/local;
+                split(f[0],f[1],limit);split(f[1],f[2],limit);split(f[2],f[0],limit);
+            }
+            auto midpoint=[&](int a,int b) {
+                const auto key=std::minmax(a,b);const auto it=midpoints.find({key.first,key.second});
+                return it==midpoints.end()?-1:it->second;
+            };
             decltype(mesh.indices) faces; faces.reserve(mesh.indices.size());
             for (const auto& f:mesh.indices) {
                 const int a=f[0],b=f[1],c=f[2];
-                const int ab=split(a,b),bc=split(b,c),ca=split(c,a);
+                const int ab=midpoint(a,b),bc=midpoint(b,c),ca=midpoint(c,a);
                 const int mask=(ab>=0?1:0)+(bc>=0?2:0)+(ca>=0?4:0);
                 auto add=[&](int x,int y,int z){faces.emplace_back(x,y,z);};
                 switch(mask) {

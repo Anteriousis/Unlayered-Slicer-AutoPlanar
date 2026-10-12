@@ -23,10 +23,13 @@ The roof direction and regional planner scores are mesh-based finish heuristics.
 The regional scores describe piecewise-planar estimates and only rank proposals;
 they do not predict curved print time, support savings or surface quality. The
 selector does not yet optimize strength or independently directed branches.
-Symmetric curved surfaces need not have a beneficial global direction. Supports,
-unsupported undersides, less than 100% infill, incompatible process options and
-infeasible transitions keep the job planar without changing those settings or
-raising any printer limit. Explicit B/C rotations or directed parts conflict with
+Symmetric curved surfaces, unsupported undersides, supports and sparse infill use
+independent compact roof fields instead of requiring a single global direction.
+Downward-face contacts have protected planar zones. Native bridge/support bead
+boxes are inspected after path generation; intersecting local patches are removed
+and the original solid is re-sliced, up to 64 bounded retries. An object with no
+remaining useful region stays planar. No process setting or printer limit is
+changed. Explicit B/C rotations or directed parts conflict with
 automatic selection and require the user to choose manual mode instead.
 
 The decision and reason are displayed as a slicing notification and recorded in
@@ -52,17 +55,20 @@ Suggest planes still estimates piecewise-planar results; its cost estimates and
 section warnings do not predict curved-blend output.
 
 The mesh may have a curved roof, curved outline, through holes and other contours.
-The current integration supports one closed mesh, one object/copy/volume. Supports,
-modifiers, painting, variable heights, independently directed branches and
-intersecting branch planes are not integrated. Bridge extrusion is refused during
-path generation. These are planning limits, not a ramp-only mesh restriction.
+Each object requires one closed mesh volume. Multiple different models and copies
+can share a plate and have independent fields, including planar objects. Modifiers,
+painting, variable heights and intersecting authored branch planes remain outside
+this integration. Automatic mode preserves planar bridges and support/contact
+regions and uses native support generation; it does not make curved unsupported
+bridges printable or remove support solely because a roof can curve.
 With no planes, a certified rectangular ramp remains a calibration mode blending
 from its flat foundation into its exact roof.
 
-The full MCT-1 totem is a broad geometry and piecewise-planar planner benchmark,
-not a supported whole-object curved calibration model. Its shelves and arch have
-downward surfaces that need bridge or support planning. Automatic curved mode
-keeps such a job planar; forcing manual curved mode does not supply that planning.
+The full MCT-1 totem is a broad geometry benchmark. Its shelves and arch retain
+planar bridge/support planning while eligible roof regions can use curved layers.
+Check the actual slicing decision and Preview: finite patch budgets, competing
+contact zones and process/clearance checks can leave features or the whole object
+planar. Manual global plane blending still has no general support planner.
 An STL contains no authored cut planes. **Suggest planes** proposes saved
 piecewise-planar cuts, whereas automatic curved mode's candidates remain internal
 to the slice. Check the slicing decision before using a completed totem print as
@@ -139,6 +145,17 @@ float rounding and normal slicer simplification. Resource limits fail explicitly
 rather than silently coarsening the mesh. The ramp boundary maps exactly. The
 user's model and Prepare geometry are unchanged.
 
+Regional mode uses `w=z-S(z)*g.(x-c)*phi(|x-c|/r)` with
+`phi(t)=(1-t)^4*(1+4t)` inside disjoint disks and zero outside. Both the spatial
+taper and temporal blend are C2. The spatial gradient operator has eigenvalues
+`phi` in [0,1] and `phi+t*phi'` in [-7/16,1]; displacement is bounded by
+`0.17*|g|*r`. Temporal derivative and Hessian bounds establish monotonicity, slope,
+normal spacing, conforming mesh error and emitted path subdivision. Local Hessian
+boxes avoid refining identity facets unnecessarily, with shared edge splits still
+propagated to neighbours. Patch selection is a roof-normal heuristic, not a surface
+finish or support-saving measurement. A patch tapers to horizontal at its edges;
+it need not flatten an entire curved roof.
+
 An integer schedule respects explicit printer minimum normal spacing and maximum
 vertical layer height. Requested nominal layer step is an upper bound; the engine
 may choose a smaller logical step. Paths are subdivided using a Lipschitz bound
@@ -172,8 +189,14 @@ The represented asymmetric hotend pyramid and gantry bounds apply to the whole
 layer field. The legacy checker for independent cut-plane episodes does not
 partition a continuous curved pass correctly and is bypassed only for this bounded
 mode. This does not claim a general CAD mesh collision checker or cover missing
-hardware. With one mesh and no supports, earlier material lies beneath earlier
-field isosurfaces, allowing the global slope bound to bound the represented head.
+hardware. Within one object, earlier material lies beneath earlier field
+isosurfaces; supports and bridge beads must remain entirely in identity zones.
+Different objects additionally receive whole-footprint checks including generated
+supports and every instance. By-layer printing (or one shared nonzero print group)
+uses each field's displacement bound plus the layer allowance to bound relative
+height. Sequential groups use full part heights. Insufficient head/gantry spacing
+is refused with a message; the engine does not silently raise clearance limits.
+All members of a curved plate must use compatible frame/process settings.
 
 For general roofs, contour midpoint sampling can deposit up to a fraction of a
 layer above the CAD top. The travel envelope reserves a whole maximum physical
@@ -181,7 +204,7 @@ layer plus 0.02 mm for mapping/path/rounding error; output outside that envelope
 is refused. That inflated height is also checked against machine and Virtual Z
 limits. This is a toolpath bound, not a measured allowance for material swelling.
 
-Travel leaves vertically, traverses above the bounded printed paths by at least 2 mm and
+Travel leaves vertically, traverses above the whole plate's bounded printed paths by at least 2 mm and
 descends vertically. Every such travel requests ordinary retraction, including
 short nominal XY gaps. XY and Z speed are separate; Z velocity and volumetric flow
 respect configured limits. This may be slow and does not establish string-free
@@ -201,7 +224,10 @@ slicing, original-model preservation, curved roofs, a through hole, conforming
 refinement, output, Preview, flow, travel and disabling/reslicing. Record actual
 results and exact commit before distributing a build.
 
-Intersecting branch fields, multiple object scheduling, support/contact planning,
-physical bridge classification, seam optimization across changing topology and
-full measured toolhead meshes need further integration and regression cases.
+Intersecting authored branch fields, general curved bridge deposition, seam
+optimization across changing topology and full measured toolhead meshes need
+further integration. Supports currently stay planar; tree paths crossing a local
+field remove that patch during automatic planning. Rafts remain excluded. The
+selector does not promise that every model has a useful curved region, nor that
+its limited local adjustment improves the printed finish.
 Software tests and physical prints are separate evidence.

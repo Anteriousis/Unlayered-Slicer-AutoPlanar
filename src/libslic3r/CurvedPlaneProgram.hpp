@@ -26,6 +26,8 @@ public:
         m_cx=(domain.xmin+domain.xmax)*.5; m_cy=(domain.ymin+domain.ymax)*.5;
         std::sort(targets.begin(),targets.end(),[](const Target& a,const Target& b){return a.height<b.height;});
         for(const auto& t:targets) m_target_slope=std::max(m_target_slope,std::hypot(t.gx,t.gy));
+        for(const auto& t:targets) m_amplitude=std::max(m_amplitude,
+            std::abs(t.gx)*(domain.xmax-domain.xmin)*.5+std::abs(t.gy)*(domain.ymax-domain.ymin)*.5);
         if (!std::isfinite(allowed_slope) || allowed_slope<=m_target_slope)
             throw std::invalid_argument("Curved blend needs clearance margin above its target directions for intermediate curved slopes");
         const double derivative_budget=std::min(.25,.95*(1.-m_target_slope/allowed_slope));
@@ -67,6 +69,10 @@ public:
         m_reference=height;
     }
     double slope_bound() const override { return m_slope; }
+    double max_displacement_mm() const override {return m_amplitude;}
+    bool identity_on_box(double,double,double,double,double,double zmax) const override {
+        return zmax<=m_blends.front().lo;
+    }
     double jacobian_min() const override { return m_world_jmin; }
     double jacobian_max() const override { return m_world_jmax; }
     double inverse_hessian_bound() const override {
@@ -130,7 +136,7 @@ private:
     }
     ModelDomain m_domain;
     double m_first,m_cx=0.,m_cy=0.,m_reference=0.,m_slope=0.,m_target_slope=0.;
-    double m_terminal_x=0.,m_terminal_y=0.;
+    double m_terminal_x=0.,m_terminal_y=0.,m_amplitude=0.;
     double m_world_jmin=1.,m_world_jmax=1.,m_grad_derivative=0.,m_second_projection=0.;
     std::vector<Blend> m_blends;
 };

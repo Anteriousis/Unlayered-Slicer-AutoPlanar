@@ -7799,11 +7799,11 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Others");
     def->mode = comAdvanced;
     def->tooltip = L("Automatically choose curved or planar layers when Slice plate runs. The manual curved layers option is inactive while this is enabled. "
-                     "Try continuous curved transitions through existing planes or infer directions from shallow roofs and local surface regions. "
+                     "Try continuous curved transitions through existing planes or infer independent local roof regions. Bridge and support contacts remain planar. "
                      "Choose planar slicing when the model, current process or configured printer limits do not qualify. "
                      "Supports and other settings are preserved; clearance limits are never raised. "
                      "The selected strategy and fallback reason appear in slicing messages and the G-code header. "
-                     "Automatic selection currently requires a Virtual printer, zero layer rotations, one closed object and copy. "
+                     "Multiple models and copies may share a plate with separate layer fields and plate-wide clearance checks. Each object needs one closed mesh volume, a Virtual printer and zero layer rotations. "
                      "Later path-generation safety failures stop slicing; review Preview before exporting. "
                      "When enabled this takes precedence over the manual curved blend switch and ignores cut sections on planar fallback.");
     def->set_default_value(new ConfigOptionBool(false));
@@ -7815,7 +7815,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Use curved layers without automatic planar fallback. Available only when Automatic layer mode is off; its saved value is ignored while automatic mode is on. "
                      "Blend layer directions continuously through the selected nonintersecting, height-ordered planes, slicing the original closed mesh without separate cut sections. "
                      "With no planes, a rectangular ramp can blend from its flat foundation into its roof. "
-                     "Experimental: Virtual printer only, one object and copy, no supports, modifiers or variable layer heights. "
+                     "Experimental: Virtual printer only, one closed volume per object, no supports, modifiers or variable layer heights. Multiple objects/copies require plate-wide clearance. "
                      "Requires classic walls, no scarf seam, ironing, wipe, arcs, bridge paths or custom layer motion. "
                      "The engine checks the printer layer-height and clearance limits and may reduce the layer step. "
                      "Review the physical paths in Preview before printing.");

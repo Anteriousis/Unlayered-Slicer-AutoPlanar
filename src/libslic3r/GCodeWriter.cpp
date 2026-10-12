@@ -51,7 +51,7 @@ void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field
         throw RuntimeError("The writer active nozzle differs from the planned fixed nozzle.");
     m_curved_fixed_nozzle=fixed_nozzle;
     m_curved_field=std::move(field); m_curved_domain=domain; m_curved_origin=origin;
-    m_curved_safe_z=domain.top_max+travel_clearance; m_curved_z_speed=z_speed;
+    m_curved_safe_z=std::max(m_curved_plate_safe_z,domain.top_max+travel_clearance); m_curved_z_speed=z_speed;
 }
 
 void GCodeWriter::set_curved_path(double w, double width, double height)
@@ -212,6 +212,7 @@ bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 {
     m_curved_field.reset(); m_curved_domain.reset();
+    m_curved_plate_safe_z=0.;
     m_curved_fixed_nozzle=-1;
     m_fixed_dual_enabled=print_config.nozzle_diameter.size()==2 && print_config.nonplanar_fixed_nozzle.value>0;
     this->config.apply(print_config, true);

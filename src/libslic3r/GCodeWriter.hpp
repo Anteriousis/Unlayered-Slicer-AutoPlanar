@@ -126,6 +126,12 @@ public:
                           const CurvedTransition::ModelDomain& domain, const Vec2d& origin,
                           double travel_clearance, double z_speed, int fixed_nozzle = -1);
     bool has_curved_blend() const { return bool(m_curved_field); }
+    void set_curved_plate_bound(double safe_z) {m_curved_plate_safe_z=safe_z;}
+    double curved_slope_bound() const {return m_curved_field?m_curved_field->slope_bound():0.;}
+    bool curved_path_is_planar(const Vec2d& lo,const Vec2d& hi,double z,double height) const {
+        return m_curved_field && m_curved_field->identity_on_box(lo.x()-m_curved_origin.x(),hi.x()-m_curved_origin.x(),
+            lo.y()-m_curved_origin.y(),hi.y()-m_curved_origin.y(),z-height,z);
+    }
     void set_curved_path(double w, double width, double height);
     double curved_max_flow_scale() const;
     Vec2f get_xy_offset() { return Vec2f{m_x_offset, m_y_offset}; };
@@ -241,7 +247,7 @@ public:
     bool m_fixed_dual_enabled=false;
     std::optional<CurvedTransition::ModelDomain> m_curved_domain;
     Vec2d m_curved_origin = Vec2d::Zero(); // same placed frame as point_to_gcode, BEFORE plate offset
-    double m_curved_safe_z=0., m_curved_z_speed=0., m_curved_w=0., m_curved_width=0., m_curved_height=0.;
+    double m_curved_safe_z=0., m_curved_plate_safe_z=0., m_curved_z_speed=0., m_curved_w=0., m_curved_width=0., m_curved_height=0.;
 	// Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_filament_extruders;
     bool            m_single_extruder_multi_material;

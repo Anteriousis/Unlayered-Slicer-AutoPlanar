@@ -74,6 +74,18 @@ public:
     virtual bool enabled() const { return m_options.enabled; }
     virtual double reference_top_mm() const { return m_options.reference_top_mm; }
     virtual double slope_bound() const { return m_slope_max; }
+    // Physical/logical height difference bounds used across independent objects.
+    virtual double max_displacement_mm() const {
+        return std::max(std::abs(m_options.top_min_mm-m_options.reference_top_mm),
+                        std::abs(m_options.top_max_mm-m_options.reference_top_mm));
+    }
+    // True only when the ENTIRE box is identity mapped, not a sample of points.
+    virtual bool identity_on_box(double,double,double,double,double,double zmax) const {
+        return zmax<=m_options.flat_height_mm;
+    }
+    virtual double inverse_hessian_bound_box(double,double,double,double,double,double) const {
+        return inverse_hessian_bound();
+    }
     // Hessian norm of the inverse map over the physical model. Zero is reserved
     // for a boundary known to map exactly (the certified ramp).
     virtual double inverse_hessian_bound() const { return 0.; }
@@ -187,6 +199,22 @@ private:
     Options m_options;
     TopFunction m_top;
     double m_jacobian_min = 1., m_jacobian_max = 1., m_slope_max = 0.;
+};
+
+// Used while a planar object, skirt or brim shares a plate with curved objects.
+// The writer still uses the plate-wide raised travel path, but no deformation.
+class Identity final : public Field {
+public:
+    Identity():Field(Options{}, {}) {}
+    bool enabled() const override {return true;}
+    double slope_bound() const override {return 0.;}
+    double max_displacement_mm() const override {return 0.;}
+    double jacobian_min() const override {return 1.;}
+    double jacobian_max() const override {return 1.;}
+    double world_z(double,double,double w) const override {return w;}
+    double slice_z(double,double,double z) const override {return z;}
+    Gradient gradient(double,double,double) const override {return {0.,0.};}
+    bool identity_on_box(double,double,double,double,double,double) const override {return true;}
 };
 
 } // namespace Slic3r::CurvedTransition

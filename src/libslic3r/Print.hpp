@@ -505,6 +505,7 @@ public:
     const std::optional<CurvedTransition::ModelDomain>& curved_domain() const { return m_curved_domain; }
     std::string curved_blend_error(bool automatic = false) const;
     size_t curved_nozzle_index() const;
+    bool refine_curved_regions_for_paths();
     const std::string& layer_strategy_decision() const { return m_layer_strategy_decision; }
     // Centering offset of the sliced mesh from the scaled and rotated mesh of the model.
     const Point& 			     center_offset() const  { return m_center_offset; }
@@ -739,6 +740,8 @@ private:
     std::optional<CurvedTransition::ModelDomain> m_curved_domain;
     std::shared_ptr<const indexed_triangle_set> m_curved_mesh;
     std::string m_layer_strategy_decision;
+    std::vector<Vec2d> m_curved_rejected_centres;
+    bool m_curved_planning_retry=false;
 
     // Declarative cut planes: segment descriptor, set by Print::apply right after construction.
     std::optional<CutSegmentDescriptor> m_segment;

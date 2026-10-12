@@ -97,5 +97,11 @@ TEST_CASE("Curved ramp subdivision has an analytical chord bound", "[curved-blen
         }
     }
     REQUIRE(std::abs(Ramp::bead_area(.45,.2)-(.45*.2-.2*.2*(1.-3.14159265358979323846/4.)))<1e-12);
-    REQUIRE_THROWS(Ramp::bead_area(.2,.3));
+    REQUIRE(Ramp::bead_area(.2,.3)>0.); // upstream narrow-gap convention
+    REQUIRE_THROWS(Ramp::bead_area(.02,.3));
+    REQUIRE_THROWS(Ramp::bead_area(INFINITY,.2));
+    const double bound=Ramp::max_bead_area(.09,.35);
+    REQUIRE(bound>Ramp::bead_area(.09,.35)); // the maximum is inside the interval
+    for (int i=1;i<=3500;++i)
+        REQUIRE(Ramp::bead_area(.09,i*.0001)<=bound+1e-12);
 }

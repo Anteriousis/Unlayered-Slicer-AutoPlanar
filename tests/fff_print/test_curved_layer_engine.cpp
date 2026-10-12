@@ -421,6 +421,14 @@ TEST_CASE("Curved writer subdivides paths, compensates flow and avoids diagonal 
     REQUIRE_THROWS(writer.extrude_arc_to_xy(Vec2d(120.,100.),Vec2d(0.,5.),1.,true));
     REQUIRE_THROWS(writer.extrude_to_xyz(Vec3d(120.,100.,3.),1.));
     REQUIRE_THROWS(writer.extrude_to_xy(Vec2d(120.,100.),0.,"surface wipe",true));
+    // Classic walls can generate narrow gap-fill paths. Keep upstream's area
+    // convention and bound the maximum flow even when its height maximum is
+    // not where the concave area expression reaches its maximum.
+    writer.set_curved_path(2.,.09,.2);
+    REQUIRE(writer.curved_max_flow_scale()>1.);
+    writer.travel_to_xyz(Vec3d(100.,90.,2.));
+    REQUIRE_FALSE(writer.extrude_to_xy(Vec2d(120.,90.),1.).empty());
+    REQUIRE_THROWS(writer.set_curved_path(2.,.02,.2));
     const auto layer_change=writer.travel_to_z(2.2);
     REQUIRE(layer_change.find("F300")!=std::string::npos);
 }

@@ -1,0 +1,19 @@
+{
+	"from": "system",
+	"inherits": "0.10mm Standard @Elegoo CC 0.2 nozzle",
+	"name": "0.10mm @Elegoo CC 0.2 - Experimental nonplanar",
+	"print_extruder_id": [
+		"1"
+	],
+	"print_extruder_variant": [
+		"Direct Drive Standard"
+	],
+	"print_sequence": "by group",
+	"type": "process",
+	"instantiation": "true",
+	"setting_id": "1W6Zk2dTyasjA2jI",
+	"compatible_printers": [
+		"Elegoo Centauri Carbon 0.2 - Experimental nonplanar 5deg"
+	],
+	"notes": "Experimental CAD-based fixed-nozzle nonplanar trial. No measured running-clearance guarantee. The 100 mm setting is a total software Z cap, including stock end parking, not verified object height. Keep commissioning objects below 10 mm. See resources/profiles/Elegoo/NONPLANAR_CENTAURI.md. No filament calibration or support-free performance claim."
+}

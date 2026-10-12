@@ -1,0 +1,32 @@
+{
+	"axis_selection": "virtual",
+	"enable_nonplanar": "1",
+	"from": "system",
+	"inherits": "Elegoo Centauri Carbon 0.2 nozzle",
+	"name": "Elegoo Centauri Carbon 0.2 - Experimental nonplanar 5deg",
+	"nonplanar_approach_distance": "2",
+	"nonplanar_departure_distance": "2",
+	"nonplanar_gantry_height": "14",
+	"nonplanar_hotend_angle_xneg": "10",
+	"nonplanar_hotend_angle_xpos": "7",
+	"nonplanar_hotend_angle_yneg": "6",
+	"nonplanar_hotend_angle_ypos": "15",
+	"nonplanar_hotend_cone_height": "125",
+	"nonplanar_virtual_max_angle": "5",
+	"nonplanar_virtual_max_z": "100",
+	"printer_extruder_id": [
+		"1"
+	],
+	"printer_extruder_variant": [
+		"Direct Drive Standard"
+	],
+	"type": "machine",
+	"nozzle_diameter": [
+		"0.2"
+	],
+	"belt_printer": "0",
+	"instantiation": "true",
+	"setting_id": "U6zo68DQU3g1Xlt1",
+	"default_print_profile": "0.10mm @Elegoo CC 0.2 - Experimental nonplanar",
+	"printer_notes": "Experimental CAD-based fixed-nozzle nonplanar trial. No measured running-clearance guarantee. The 100 mm setting is a total software Z cap, including stock end parking, not verified object height. Keep commissioning objects below 10 mm. See resources/profiles/Elegoo/NONPLANAR_CENTAURI.md. 0.2 mm external geometry and installed tip position are unverified."
+}

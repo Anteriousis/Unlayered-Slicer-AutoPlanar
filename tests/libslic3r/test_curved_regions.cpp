@@ -1,6 +1,7 @@
 #ifdef CURVED_TRANSITION_STANDALONE
 #include "../catch2/extras/catch_amalgamated.hpp"
 #else
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #endif
 #include "libslic3r/CurvedRegions.hpp"

@@ -1896,7 +1896,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         for (ModelObject *model_object : m_model.objects) {
             ModelObjectStatus &model_object_status = const_cast<ModelObjectStatus&>(model_object_status_db.reuse(*model_object));
             const auto* curved_option=static_cast<const ConfigOptionBool*>(model_object->config.option("curved_layer_blend"));
-            const bool curved=curved_option?curved_option->value:m_default_object_config.curved_layer_blend.value;
+            const auto* automatic_option=static_cast<const ConfigOptionBool*>(model_object->config.option("automatic_layer_strategy"));
+            const bool automatic=automatic_option?automatic_option->value:m_default_object_config.automatic_layer_strategy.value;
+            const bool curved=automatic || (curved_option?curved_option->value:m_default_object_config.curved_layer_blend.value);
             // Declarative cut planes: derive the segment partition. Gated on the canonical
             // non-planar switch and an active stack; ordinary objects derive nothing and follow
             // the legacy path bit-for-bit. Derivation is deterministic, so an unchanged stack

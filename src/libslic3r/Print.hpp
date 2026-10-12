@@ -503,7 +503,8 @@ public:
     const std::shared_ptr<const CurvedTransition::Field>& curved_field() const { return m_curved_field; }
     const std::optional<CurvedTransition::Ramp>& curved_ramp() const { return m_curved_ramp; }
     const std::optional<CurvedTransition::ModelDomain>& curved_domain() const { return m_curved_domain; }
-    std::string curved_blend_error() const;
+    std::string curved_blend_error(bool automatic = false) const;
+    const std::string& layer_strategy_decision() const { return m_layer_strategy_decision; }
     // Centering offset of the sliced mesh from the scaled and rotated mesh of the model.
     const Point& 			     center_offset() const  { return m_center_offset; }
 
@@ -736,6 +737,7 @@ private:
     std::optional<CurvedTransition::Ramp> m_curved_ramp;
     std::optional<CurvedTransition::ModelDomain> m_curved_domain;
     std::shared_ptr<const indexed_triangle_set> m_curved_mesh;
+    std::string m_layer_strategy_decision;
 
     // Declarative cut planes: segment descriptor, set by Print::apply right after construction.
     std::optional<CutSegmentDescriptor> m_segment;

@@ -4,7 +4,7 @@ on:
     branches: [codex/curved-layer-engine]
   workflow_dispatch:
 concurrency:
-  group: curved-blend-${{ github.ref }}
+  group: curved-blend-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 jobs:
   build_windows:

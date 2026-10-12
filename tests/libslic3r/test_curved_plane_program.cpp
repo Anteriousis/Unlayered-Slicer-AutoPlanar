@@ -5,8 +5,34 @@
 #endif
 #include "libslic3r/CurvedPlaneProgram.hpp"
 #include "libslic3r/CurvedRamp.hpp"
+#include "libslic3r/AutomaticCurvedSelection.hpp"
 
 using namespace Slic3r::CurvedTransition;
+
+TEST_CASE("Automatic curved direction requires a useful bounded finish estimate", "[curved-blend][automatic]")
+{
+    const std::vector<Ramp::Triangle> roof{{{{0.,0.,3.},{20.,0.,4.},{0.,20.,3.}}}};
+    const auto target=automatic_target(roof,.08);
+    REQUIRE(target.useful);REQUIRE(target.estimated_reduction>.99);
+    REQUIRE(std::abs(target.gx-.05)<1e-12);REQUIRE(std::abs(target.gy)<1e-12);
+    REQUIRE_FALSE(automatic_target(roof,0.).useful);
+    const auto capped=automatic_target(roof,.04);
+    REQUIRE(capped.useful);REQUIRE(std::hypot(capped.gx,capped.gy)<=.030000001);
+    auto flat=roof;flat[0][1][2]=3.;
+    REQUIRE_FALSE(automatic_target(flat,.08).useful);
+    auto symmetric=roof;symmetric.push_back({{{0.,0.,3.},{20.,0.,2.},{0.,20.,3.}}});
+    REQUIRE_FALSE(automatic_target(symmetric,.08).useful);
+}
+
+TEST_CASE("Automatic direction does not mistake an unsupported underside for finish benefit", "[curved-blend][automatic]")
+{
+    std::vector<Ramp::Triangle> surfaces{{{{0.,0.,3.},{20.,0.,4.},{0.,20.,3.}}},
+                                       {{{0.,0.,1.},{0.,20.,1.},{20.,0.,1.}}}};
+    const auto unsupported=automatic_target(surfaces,.08);
+    REQUIRE_FALSE(unsupported.useful);REQUIRE(unsupported.needs_support_planning);
+    for (auto& p:surfaces[1]) p[2]=0.;
+    REQUIRE(automatic_target(surfaces,.08).useful);
+}
 
 TEST_CASE("Plane field blends successive directions without crossing layers", "[curved-blend][planes]")
 {

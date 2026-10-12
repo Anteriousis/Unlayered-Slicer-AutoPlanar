@@ -7681,6 +7681,19 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<SkirtType>(stCombined));
 
+    def = this->add("automatic_layer_strategy", coBool);
+    def->label = L("Automatic curved or planar selection (experimental)");
+    def->category = L("Others");
+    def->mode = comAdvanced;
+    def->tooltip = L("When Slice plate runs, try continuous curved transitions through existing planes or infer directions from shallow roofs and local surface regions. "
+                     "Choose planar slicing when the model, current process or configured printer limits do not qualify. "
+                     "Supports and other settings are preserved; clearance limits are never raised. "
+                     "The selected strategy and fallback reason appear in slicing messages and the G-code header. "
+                     "Automatic selection currently requires a Virtual printer, zero layer rotations, one closed object and copy. "
+                     "Later path-generation safety failures stop slicing; review Preview before exporting. "
+                     "When enabled this takes precedence over the manual curved blend switch and ignores cut sections on planar fallback.");
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("curved_layer_blend", coBool);
     def->label = L("Curved layer blend (experimental)");
     def->category = L("Others");

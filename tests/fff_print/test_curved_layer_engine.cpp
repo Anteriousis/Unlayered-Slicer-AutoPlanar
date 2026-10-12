@@ -89,6 +89,82 @@ TEST_CASE("Curved planes slice a curved roof without independent sections", "[cu
     REQUIRE(program->blends().size()==1);
 }
 
+TEST_CASE("Automatic slicing infers a bounded roof direction without changing the model", "[curved-engine][automatic]")
+{
+    auto config=curved_config();
+    config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"curved_layer_blend","0"}});
+    Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
+    const auto vertices=model.objects.front()->volumes.front()->mesh().its.vertices;
+    REQUIRE(print.validate().string.empty());
+    const auto output=Test::gcode(print);
+    const auto* object=print.objects().front();
+    REQUIRE(object->curved_field());REQUIRE_FALSE(object->curved_ramp());
+    REQUIRE_FALSE(model.objects.front()->has_cut_planes());
+    REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==vertices);
+    REQUIRE(output.find("; layer_strategy: Automatic selection: curved.")!=std::string::npos);
+    REQUIRE(output.find("curved blend: traverse above solid")!=std::string::npos);
+}
+
+TEST_CASE("Automatic slicing keeps flat roofs planar and reselects after settings change", "[curved-engine][automatic]")
+{
+    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"}});
+    Print print;Model model;Test::init_print({TriangleMesh(its_make_cube(20.,20.,3.))},print,model,config);
+    auto output=Test::gcode(print);
+    REQUIRE_FALSE(print.objects().front()->curved_field());
+    REQUIRE(output.find("Automatic selection: planar.")!=std::string::npos);
+    REQUIRE(output.find("curved blend: traverse above solid")==std::string::npos);
+    Print tilted;Model tilted_model;Test::init_print({ramp(2.)},tilted,tilted_model,config);
+    REQUIRE_FALSE(Test::gcode(tilted).empty());REQUIRE(tilted.objects().front()->curved_field());
+    config.set_deserialize_strict({{"nonplanar_virtual_max_angle","0.1"}});
+    tilted.apply(tilted_model,config);
+    REQUIRE_FALSE(Test::gcode(tilted).empty());
+    REQUIRE_FALSE(tilted.objects().front()->curved_field());
+}
+
+TEST_CASE("Automatic slicing preserves supports and ignores cut sections on planar fallback", "[curved-engine][automatic]")
+{
+    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"enable_support","1"}});
+    Print print;Model model;Test::init_print({TriangleMesh(its_make_cube(20.,20.,12.))},print,model,config);
+    add_plane(*model.objects.front(),6.,.07);print.apply(model,config);
+    REQUIRE(print.validate().string.empty());
+    REQUIRE_FALSE(Test::gcode(print).empty());
+    REQUIRE(print.objects().size()==1);REQUIRE_FALSE(print.objects().front()->is_segment());
+    REQUIRE_FALSE(print.objects().front()->curved_field());
+    REQUIRE(print.objects().front()->config().enable_support.value);
+    REQUIRE(model.objects.front()->cut_planes.planes.size()==1);
+    REQUIRE(print.objects().front()->layer_strategy_decision().find("supports")!=std::string::npos);
+}
+
+TEST_CASE("Automatic slicing checks explicit plane transitions and rejects ambiguous manual rotation", "[curved-engine][automatic]")
+{
+    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"}});
+    Print print;Model model;Test::init_print({TriangleMesh(its_make_cube(20.,20.,18.))},print,model,config);
+    add_plane(*model.objects.front(),4.,.035);add_plane(*model.objects.front(),11.,-.035);print.apply(model,config);
+    REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE(print.objects().front()->curved_field());
+    model.objects.front()->cut_planes.planes.back().point.z()=4.1;print.apply(model,config);
+    REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE_FALSE(print.objects().front()->curved_field());
+    REQUIRE(print.objects().front()->layer_strategy_decision().find("intersecting")!=std::string::npos);
+    config.set_deserialize_strict({{"layer_rotation_b","2"}});print.apply(model,config);
+    REQUIRE_FALSE(print.validate().string.empty());
+}
+
+TEST_CASE("Automatic slicing leaves multiple objects and sparse infill on their planar path", "[curved-engine][automatic]")
+{
+    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"}});
+    SECTION("several objects") {
+        Print print;Model model;Test::init_print({ramp(2.),ramp(2.)},print,model,config);
+        REQUIRE_FALSE(Test::gcode(print).empty());
+        for (const auto* object:print.objects()) REQUIRE_FALSE(object->curved_field());
+    }
+    SECTION("sparse infill") {
+        config.set_deserialize_strict({{"sparse_infill_density","15%"}});
+        Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
+        REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE_FALSE(print.objects().front()->curved_field());
+        REQUIRE(print.objects().front()->layer_strategy_decision().find("100% infill")!=std::string::npos);
+        REQUIRE(print.objects().front()->printing_region(0).config().sparse_infill_density.value==15.);
+    }
+}
+
 TEST_CASE("Curved plane project reload preserves world positions when the volume origin moves", "[curved-engine][planes][3mf]")
 {
     Model model;

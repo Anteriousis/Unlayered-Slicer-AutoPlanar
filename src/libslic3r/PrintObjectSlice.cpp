@@ -1186,7 +1186,7 @@ std::string PrintObject::curved_blend_error(bool automatic) const
             rc.ironing_type.value!=IroningType::NoIroning ||
             (rc.fuzzy_skin.value!=FuzzySkinType::None && rc.fuzzy_skin.value!=FuzzySkinType::Disabled_fuzzy) ||
             rc.zaa_enabled.value || rc.wave_overhangs.value || rc.make_overhang_printable.value)
-            return "Curved blend currently requires classic walls, no combined infill, surface wipe, scarf, ironing, fuzzy skin, Z anti-aliasing or wave overhangs. Bridge paths are refused during path generation.";
+            return "Curved blend currently requires classic walls, no combined infill, surface wipe, scarf, ironing, fuzzy skin, Z anti-aliasing or wave overhangs. Bridge/support beads must stay in planar zones.";
     }
     return {};
 }

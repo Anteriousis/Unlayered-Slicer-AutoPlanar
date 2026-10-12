@@ -336,6 +336,15 @@ TEST_CASE("Automatic slicing selects independent fields for different models and
         REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(print.objects().front()->curved_field()));
         REQUIRE(print.objects().front()->printing_region(0).config().sparse_infill_density.value==15.);
     }
+    SECTION("copies of one model") {
+        config.set_deserialize_strict({{"print_sequence","by layer"}});
+        Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
+        auto* object=model.objects.front();object->instances.front()->set_offset(Vec3d(60.,100.,0.));
+        object->add_instance(*object->instances.front())->set_offset(Vec3d(120.,100.,0.));print.apply(model,config);
+        REQUIRE_FALSE(Test::gcode(print).empty());
+        REQUIRE(print.num_object_instances()==2);
+        for(const auto* o:print.objects()) REQUIRE(o->curved_field());
+    }
 }
 
 TEST_CASE("Regional native slicing retains planar bridges and normal supports below a curved roof", "[curved-engine][regions][supports]")
@@ -370,6 +379,20 @@ TEST_CASE("Mixed curved plates refuse neighbour collisions instead of disabling 
     model.objects[0]->instances.front()->set_offset(Vec3d(100.,100.,0.));
     model.objects[1]->instances.front()->set_offset(Vec3d(122.,100.,0.));print.apply(model,config);
     REQUIRE_THROWS(Test::gcode(print));
+}
+
+TEST_CASE("Curved plate validates generated brim and skirt reach", "[curved-engine][clearance]")
+{
+    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},
+        {"printable_area","0x0,100x0,100x100,0x100"},{"brim_type","outer_only"},{"brim_width","6"}});
+    SECTION("brim") {}
+    SECTION("skirt") {config.set_deserialize_strict({{"brim_type","no_brim"},{"skirt_loops","1"},{"skirt_distance","6"}});}
+    Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
+    model.objects.front()->instances.front()->set_offset(Vec3d(12.,50.,0.));print.apply(model,config);
+    print.process();REQUIRE(print.objects().front()->curved_field());
+    ScopedTemporaryFile output(".gcode");
+    REQUIRE_THROWS_WITH(print.export_gcode(output.string(),nullptr,nullptr),
+        Catch::Matchers::ContainsSubstring("brim/skirt exceeds"));
 }
 
 TEST_CASE("Full Centauri MCT-1 retains curved roof regions alongside planar support paths", "[curved-engine][regions][totem]")
@@ -611,10 +634,14 @@ TEST_CASE("Curved blend rejects unsupported inputs and excessive tilt", "[curved
         REQUIRE_FALSE(p.validate().string.empty());
         REQUIRE_THROWS(Test::gcode(p));
     }
-    SECTION("several parts") {
-        Print p; Model m; Test::init_print({ramp(),ramp()},p,m,curved_config());
-        REQUIRE_FALSE(p.validate().string.empty());
-        REQUIRE_THROWS(Test::gcode(p));
+    SECTION("several manual curved models") {
+        auto config=curved_config();config.set_deserialize_strict({{"print_sequence","by layer"}});
+        Print p;Model m;Test::init_print({ramp(2.),ramp(3.)},p,m,config);
+        m.objects[0]->instances.front()->set_offset(Vec3d(60.,100.,0.));
+        m.objects[1]->instances.front()->set_offset(Vec3d(120.,100.,0.));p.apply(m,config);
+        REQUIRE(p.validate().string.empty());
+        REQUIRE_FALSE(Test::gcode(p).empty());
+        REQUIRE(p.objects()[0]->curved_field());REQUIRE(p.objects()[1]->curved_field());
     }
     SECTION("draft shield outside the curved domain") {
         auto config=curved_config(); config.set_deserialize_strict({{"draft_shield","enabled"}});

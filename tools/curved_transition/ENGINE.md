@@ -192,11 +192,15 @@ mode. This does not claim a general CAD mesh collision checker or cover missing
 hardware. Within one object, earlier material lies beneath earlier field
 isosurfaces; supports and bridge beads must remain entirely in identity zones.
 Different objects additionally receive whole-footprint checks including generated
-supports and every instance. By-layer printing (or one shared nonzero print group)
-uses each field's displacement bound plus the layer allowance to bound relative
+supports and every instance. The generated first-layer hull, including brim and
+skirt bead margins, is checked against the common and active-nozzle printable areas.
+By-layer printing (or one shared nonzero print group)
+uses each field's displacement bound plus the larger actual layer allowance to bound relative
 height. Sequential groups use full part heights. Insufficient head/gantry spacing
 is refused with a message; the engine does not silently raise clearance limits.
-All members of a curved plate must use compatible frame/process settings.
+All members of a curved plate must use compatible frame/process settings. Protected
+planar paths retain ordinary overhang speed and fan splitting; curved paths use the
+physical subdivision and flow branch.
 
 For general roofs, contour midpoint sampling can deposit up to a fraction of a
 layer above the CAD top. The travel envelope reserves a whole maximum physical

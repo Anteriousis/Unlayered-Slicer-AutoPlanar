@@ -176,7 +176,7 @@ static bool has_curved_objects(const Print& print) {
 static double curved_plate_top(const Print& print) {
     double top=0.;
     for(const auto* o:print.objects()) {
-        top=std::max(top,o->curved_domain()?o->curved_domain()->top_max:o->layers().back()->print_z+.02);
+        if(!o->layers().empty()) top=std::max(top,o->curved_domain()?o->curved_domain()->top_max:o->layers().back()->print_z+.02);
         if(!o->support_layers().empty()) top=std::max(top,o->support_layers().back()->print_z+.02);
     }
     return top;
@@ -188,12 +188,27 @@ static double curved_plate_top(const Print& print) {
 // built before the next starts and therefore use their complete physical height.
 static void validate_curved_plate(const Print& print) {
     if(!has_curved_objects(print)) return;
-    struct Member {const PrintObject* object;BoundingBox box;double amplitude,top;};
+    struct Member {const PrintObject* object;BoundingBox box;double amplitude,top,logical_step;};
     std::vector<Member> members;
     const auto& pc=print.config();
     const auto head=HotendEnvelope::from_config(pc);
     const double sx=std::max(head.spread(HotendEnvelope::XPos),head.spread(HotendEnvelope::XNeg));
     const double sy=std::max(head.spread(HotendEnvelope::YPos),head.spread(HotendEnvelope::YNeg));
+    const auto fits=[&](Polygon polygon,const std::vector<Vec2d>& area) {
+        polygon.translate(-Point::new_scale(print.get_plate_origin().head<2>()));
+        Points points;for(const auto& p:area) points.push_back(Point::new_scale(p));
+        return points.size()>=3 && diff(Polygons{polygon},Polygons{Polygon(points)}).empty();
+    };
+    // The generated first-layer hull includes the real brim and skirt loops.
+    // Their reach may exceed the model/support bounds even on a single-model plate.
+    if(!print.first_layer_convex_hull().empty()) {
+        const double margin=std::max(print.brim_flow().width(),print.skirt_flow().width())*.5+.02;
+        const auto hulls=offset(Polygons{print.first_layer_convex_hull()},scale_(margin));
+        for(const auto& hull:hulls) for(const auto* o:print.objects())
+            if(!fits(hull,pc.printable_area.values) || (pc.nozzle_diameter.size()==2 &&
+               !fits(hull,pc.extruder_printable_area.values[o->curved_nozzle_index()])))
+                throw SlicingError("Curved plate brim/skirt exceeds the active printable area; move the models away from the edge or reduce adhesion paths.");
+    }
     for(const auto* o:print.objects()) {
         const auto error=o->curved_blend_error(true);
         if(!error.empty()) throw SlicingError("A model sharing a curved plate has incompatible settings: "+error);
@@ -204,16 +219,14 @@ static void validate_curved_plate(const Print& print) {
         footprint.offset(scale_(1.)); // includes bead width, mapping and roundoff
         const double amplitude=o->curved_field()?o->curved_field()->max_displacement_mm():0.;
         const double top=o->curved_domain()?o->curved_domain()->top_max:o->layers().back()->print_z+.02;
+        double logical_step=pc.max_layer_height.get_at(o->curved_nozzle_index());
+        for(const auto* layer:o->layers()) logical_step=std::max(logical_step,layer->height);
+        for(const auto* layer:o->support_layers()) logical_step=std::max(logical_step,layer->height);
         for(const auto& inst:o->instances()) {
             auto placed=footprint;placed.translate(inst.shift);
-            members.push_back({o,placed,amplitude,top});
+            members.push_back({o,placed,amplitude,top,logical_step});
             // Check generated supports as well as the model, for every copy.
-            auto on_plate=placed;on_plate.translate(-Point::new_scale(print.get_plate_origin().head<2>()));
-            const auto fits=[&](const std::vector<Vec2d>& area) {
-                Points points;for(const auto& p:area) points.push_back(Point::new_scale(p));
-                return points.size()>=3 && diff(Polygons{on_plate.polygon()},Polygons{Polygon(points)}).empty();
-            };
-            if(!fits(pc.printable_area.values) || (pc.nozzle_diameter.size()==2 && !fits(pc.extruder_printable_area.values[o->curved_nozzle_index()])))
+            if(!fits(placed.polygon(),pc.printable_area.values) || (pc.nozzle_diameter.size()==2 && !fits(placed.polygon(),pc.extruder_printable_area.values[o->curved_nozzle_index()])))
                 throw SlicingError("Curved plate model/support footprint exceeds the active printable area; move it away from the edge.");
         }
     }
@@ -222,7 +235,7 @@ static void validate_curved_plate(const Print& print) {
         const bool interleaved=pc.print_sequence.value==PrintSequence::ByLayer ||
             (pc.print_sequence.value==PrintSequence::ByGroup && a.object->config().print_group.value>0 &&
              a.object->config().print_group.value==b.object->config().print_group.value);
-        const double height=interleaved?a.amplitude+b.amplitude+pc.max_layer_height.get_at(a.object->curved_nozzle_index())+.05:
+        const double height=interleaved?a.amplitude+b.amplitude+std::max(a.logical_step,b.logical_step)+.05:
             std::max(a.top,b.top);
         if(height>=pc.nonplanar_gantry_height.value)
             throw SlicingError("Objects on this curved plate can exceed the gantry clearance. Use By layer or one shared print group, or print separately.");
@@ -9884,10 +9897,13 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
 
     double F = speed * 60;  // convert mm/sec to mm/min
     if (m_writer.has_curved_blend()) {
-        // The certified prism has no geometric overhangs. Do not route its
-        // physical paths through the ordinary XY-only overhang speed splitter.
-        variable_speed=false;
-        new_points.clear();
+        const auto bb=get_extents(path.polyline.to_polyline()).inflated(scale_(path.width*.5+.02));
+        const Vec2d lo=point_to_gcode(bb.min),hi=point_to_gcode(bb.max);
+        const bool planar=m_writer.curved_path_is_planar(lo,hi,m_nominal_z,path.height);
+        // Keep ordinary overhang speed/fan splitting on protected planar paths.
+        // A genuinely curved bead requires the physical subdivision/flow branch.
+        if(!planar) {variable_speed=false;new_points.clear();}
+        else m_writer.set_curved_path(m_nominal_z,path.width,path.height);
     }
     
     // Orca: Dynamic PA

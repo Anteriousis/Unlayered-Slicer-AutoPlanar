@@ -7,8 +7,12 @@ physically validated printer profile or a guarantee that every plane can be blen
 
 ## User flow
 
-**Automatic curved or planar selection (experimental)** runs inside Slice plate.
-It takes precedence over the manual curved-blend switch. Existing enabled planes
+**Automatic layer mode (experimental)** runs inside Slice plate.
+It takes precedence over **Manual curved layers (experimental)**. The manual
+control is disabled and labeled inactive while automatic mode is on, including
+when an older preset has both saved switches on. Switching automatic mode off
+restores access to the saved manual choice; the UI does not rewrite either value.
+Existing enabled planes
 are tested as a continuous stack. Otherwise the selector tries a bounded global
 roof direction and local surface-region proposals, including two successive
 directions. Up to eight proposals run through the actual field, conforming mesh
@@ -31,7 +35,8 @@ still stops slicing: automatic mode does not conceal such errors or export a
 partially failed curved job. It is off in existing presets by default. An optional
 automatic trial process is provided alongside the explicit curved trial.
 
-Use **Advanced → Process → Others → Multiplanar → Curved layer blend (experimental)**.
+For manual mode, turn automatic mode off and use
+**Advanced → Process → Others → Multiplanar → Manual curved layers (experimental)**.
 Enable nonplanar printing, choose a Virtual printer and keep belt printing off.
 Keep process layer rotations B/C at zero. Add or accept planes whose centres are
 ordered by height and whose surfaces do not intersect within the model bounds.
@@ -53,6 +58,15 @@ intersecting branch planes are not integrated. Bridge extrusion is refused durin
 path generation. These are planning limits, not a ramp-only mesh restriction.
 With no planes, a certified rectangular ramp remains a calibration mode blending
 from its flat foundation into its exact roof.
+
+The full MCT-1 totem is a broad geometry and piecewise-planar planner benchmark,
+not a supported whole-object curved calibration model. Its shelves and arch have
+downward surfaces that need bridge or support planning. Automatic curved mode
+keeps such a job planar; forcing manual curved mode does not supply that planning.
+An STL contains no authored cut planes. **Suggest planes** proposes saved
+piecewise-planar cuts, whereas automatic curved mode's candidates remain internal
+to the slice. Check the slicing decision before using a completed totem print as
+evidence that any curved layers were printed.
 
 Classic walls are required. Combined infill, scarf seams, ironing, fuzzy skin,
 Z anti-aliasing, wave overhangs, wipe and circular arcs are off. Ordinary retraction

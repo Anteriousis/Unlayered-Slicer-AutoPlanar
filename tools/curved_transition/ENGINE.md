@@ -38,6 +38,11 @@ Layer-change code may be empty or G92 E0. External slicing/G-code scripts,
 timelapse motion and height-change code are outside this integration. Start/end
 code remain in the physical machine frame.
 
+Project reload keeps saved planes at their world positions when a single-volume
+object's local origin is normalized. The G-code height header uses the physical
+deposition bound in curved mode; its logical layer coordinate is not a height
+above the bed. End-code height placeholders continue to use actual deposited Z.
+
 ## Field and geometry bounds
 
 For selected planes the physical-to-logical mapping is

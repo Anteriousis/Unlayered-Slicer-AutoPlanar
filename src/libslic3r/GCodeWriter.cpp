@@ -43,11 +43,14 @@ bool GCodeWriter::full_gcode_comment = true;
 
 void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field> field,
                                   const CurvedTransition::ModelDomain& domain, const Vec2d& origin,
-                                  double travel_clearance, double z_speed)
+                                  double travel_clearance, double z_speed, std::optional<size_t> fixed_nozzle)
 {
     if (!field || travel_clearance<=0. || z_speed<=0.)
         throw RuntimeError("Curved blend needs positive travel clearance and Z speed");
+    if (fixed_nozzle && (!filament() || filament()->extruder_id() != *fixed_nozzle))
+        throw RuntimeError("Curved blend writer nozzle does not match the planned toolhead state");
     m_curved_field=std::move(field); m_curved_domain=domain; m_curved_origin=origin;
+    m_curved_fixed_nozzle=fixed_nozzle;
     m_curved_safe_z=domain.top_max+travel_clearance; m_curved_z_speed=z_speed;
 }
 
@@ -104,6 +107,8 @@ std::string GCodeWriter::curved_travel(const Vec3d& target, const std::string& c
 
 std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const std::string& comment, bool no_extrusion)
 {
+    if (m_curved_fixed_nozzle && (!filament() || filament()->extruder_id()!=*m_curved_fixed_nozzle))
+        throw RuntimeError("Curved blend active nozzle changed after planning");
     if (no_extrusion)
         throw RuntimeError("Curved blend refuses a surface wipe; use the ordinary retracted travel planner");
     if (!is_current_position_clear()) throw RuntimeError("Curved blend extrusion has no known start position");
@@ -208,7 +213,7 @@ bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 
 void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 {
-    m_curved_field.reset(); m_curved_domain.reset();
+    m_curved_field.reset(); m_curved_domain.reset(); m_curved_fixed_nozzle.reset();
     this->config.apply(print_config, true);
 
     // UNLAYERED_MOD — see extruder_offset_xy(). GCodeConfig does not carry extruder_offset, so the
@@ -874,6 +879,10 @@ std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
     // set the new extruder
     auto filament_extruder_iter = Slic3r::lower_bound_by_predicate(m_filament_extruders.begin(), m_filament_extruders.end(), [filament_id](const Extruder &e) { return e.id() < filament_id; });
     assert(filament_extruder_iter != m_filament_extruders.end() && filament_extruder_iter->id() == filament_id);
+    if (m_curved_field && m_curved_fixed_nozzle &&
+        (filament_extruder_iter->extruder_id()!=*m_curved_fixed_nozzle ||
+         (filament() && filament()->id()!=filament_id)))
+        throw RuntimeError("Curved blend refuses nozzle or material switching without a checked transition path");
     m_curr_extruder_id = filament_extruder_iter->extruder_id();
     m_curr_filament_extruder[m_curr_extruder_id] = &*filament_extruder_iter;
     m_cached_extruder_idx = get_extruder_index(this->config, filament_id);

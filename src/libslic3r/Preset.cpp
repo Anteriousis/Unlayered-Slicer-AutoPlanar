@@ -1520,7 +1520,11 @@ static std::vector<std::string> s_Preset_printer_options {
     "belt_printer", "belt_printer_infinite_y", "belt_slice_rotation",
     "belt_frame_tilt_angle", "belt_slice_angle_tolerance", "gcode_remap_x", "gcode_remap_y", "gcode_remap_z",
     "first_layer_plane", "first_layer_plane_offset", "first_layer_plane_thickness", "belt_initial_temperature_length",
-    "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"
+    "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z",
+    "nonplanar_shared_carriage", "nonplanar_state_nozzle_id", "nonplanar_state_complete",
+    "nonplanar_state_source", "nonplanar_state_envelope_height", "nonplanar_state_angle_xpos",
+    "nonplanar_state_angle_xneg", "nonplanar_state_angle_ypos", "nonplanar_state_angle_yneg",
+    "nonplanar_state_gantry_height", "nonplanar_state_max_z"
     };
 
 static std::vector<std::string> s_Preset_sla_print_options {

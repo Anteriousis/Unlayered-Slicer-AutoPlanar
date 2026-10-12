@@ -7250,11 +7250,12 @@ LayerResult GCode::process_layer(
                 m_object_layer_over_raft = object_layer_over_raft;
                 if (instance_to_print.print_object.curved_field()) {
                     const PrintObject& curved_object=instance_to_print.print_object;
+                    const auto toolhead=curved_object.curved_toolhead_state();
                     const Vec2d curved_origin=unscale(curved_object.instances()[instance_to_print.instance_id].shift) -
                         Vec2d(m_writer.extruder_offset_xy().x(),m_writer.extruder_offset_xy().y());
                     m_writer.set_curved_blend(curved_object.curved_field(),*curved_object.curved_domain(),curved_origin,
                         std::max(2.,std::max(m_config.nonplanar_approach_distance.value,m_config.nonplanar_departure_distance.value)),
-                        print.config().machine_max_speed_z.get_at(0));
+                        toolhead.z_speed,toolhead.nozzle);
                 }
                 if (m_config.reduce_crossing_wall)
                     m_avoid_crossing_perimeters.init_layer(*m_layer);

@@ -1709,6 +1709,20 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                nonplanar_gantry_height))
     ((ConfigOptionFloat,                nonplanar_virtual_max_angle))
     ((ConfigOptionFloat,                nonplanar_virtual_max_z))
+    // Fixed active-nozzle states on a shared moving carriage. Arrays are keyed
+    // by physical nozzle, never by filament or flow variant. Zero/false means
+    // unknown; an identity protects against a resized/copied measured state.
+    ((ConfigOptionBool,                 nonplanar_shared_carriage))
+    ((ConfigOptionInts,                 nonplanar_state_nozzle_id))
+    ((ConfigOptionBools,                nonplanar_state_complete))
+    ((ConfigOptionStrings,              nonplanar_state_source))
+    ((ConfigOptionFloats,               nonplanar_state_envelope_height))
+    ((ConfigOptionFloats,               nonplanar_state_angle_xpos))
+    ((ConfigOptionFloats,               nonplanar_state_angle_xneg))
+    ((ConfigOptionFloats,               nonplanar_state_angle_ypos))
+    ((ConfigOptionFloats,               nonplanar_state_angle_yneg))
+    ((ConfigOptionFloats,               nonplanar_state_gantry_height))
+    ((ConfigOptionFloats,               nonplanar_state_max_z))
     // BELT_MOD -- belt printer machine description. The tilt (axis + angle) is the machine's build
     // direction: un-cut objects slice rotated by it and the emitted G-code is mapped into the
     // tilted-gantry machine frame by gcode_remap_* + MachineFrameTransform (GCode/BeltKinematics).

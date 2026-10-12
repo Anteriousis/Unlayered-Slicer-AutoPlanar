@@ -1083,6 +1083,19 @@ void PrintObject::update_slice_frame()
     assert((m_object_to_slice * m_slice_to_object).isApprox(Transform3d::Identity(), 1e-9));
 }
 
+CurvedTransition::ToolheadState PrintObject::curved_toolhead_state() const
+{
+    const auto used = m_print->extruders();
+    if (used.size() != 1)
+        throw std::invalid_argument("Curved blend currently requires one fixed filament and active nozzle; material or nozzle switching needs a checked transition path.");
+    const auto& pc = m_print->config();
+    if (pc.nozzle_diameter.size() > 1 &&
+        (used.front() >= pc.filament_map.values.size() || pc.filament_map.values[used.front()] <= 0))
+        throw std::invalid_argument("Curved multi-nozzle printing requires an explicit filament-to-physical-nozzle mapping.");
+    const auto* dynamic = m_print->full_print_config().option<ConfigOptionBool>("enable_filament_dynamic_map");
+    return CurvedTransition::ToolheadState::from_config(pc, m_print->get_extruder_id(used.front()),dynamic && dynamic->value);
+}
+
 std::string PrintObject::curved_blend_error(bool automatic) const
 {
     if (!automatic && !m_config.curved_layer_blend.value) return {};
@@ -1093,8 +1106,8 @@ std::string PrintObject::curved_blend_error(bool automatic) const
         m_model_object->volumes.size()!=1 || !m_model_object->volumes.front()->is_model_part() ||
         m_model_object->has_custom_layering() || m_model_object->volumes.front()->is_mm_painted() || object_has_directed_parts(*m_model_object))
         return "Curved blend currently supports one closed mesh and one copy, without modifiers, painting, per-part build directions or variable layer heights.";
-    if (pc.nozzle_diameter.size()!=1 || m_print->extruders().size()!=1)
-        return "Curved blend currently supports one nozzle and one filament.";
+    try { (void)curved_toolhead_state(); }
+    catch (const std::invalid_argument& e) { return e.what(); }
     if (has_support_material() || m_config.enforce_support_layers.value>0 ||
         std::abs(m_config.layer_rotation_b.value)>EPSILON || std::abs(m_config.layer_rotation_c.value)>EPSILON ||
         m_config.slicing_mode.value!=SlicingMode::Regular)
@@ -1127,8 +1140,8 @@ std::string PrintObject::curved_blend_error(bool automatic) const
         return "Curved blend supports empty layer-change code or G92 E0 only; custom layer motion is not transformed.";
     if (!pc.time_lapse_gcode.value.empty() || pc.farthest_point_timelapse.value || !m_print->model().get_curr_plate_custom_gcodes().gcodes.empty())
         return "Curved blend currently requires timelapse and model height-change custom G-code off.";
-    if (std::any_of(pc.extruder_offset.values.begin(),pc.extruder_offset.values.end(),[](const Vec2d& p){return !p.isZero(1e-8);}))
-        return "Curved blend currently requires zero nozzle XY offset.";
+    if (std::any_of(pc.extruder_offset.values.begin(),pc.extruder_offset.values.end(),[](const Vec2d& p){return !p.allFinite();}))
+        return "Curved blend requires finite nozzle XY offsets.";
     if (std::any_of(pc.slicing_pipeline_plugin.values.begin(),pc.slicing_pipeline_plugin.values.end(),[](const std::string& s){return !s.empty();}) ||
         std::any_of(pc.post_process.values.begin(),pc.post_process.values.end(),[](const std::string& s){return !s.empty();}))
         return "Curved blend currently requires slicing-pipeline and external G-code post-processing scripts off.";
@@ -1210,6 +1223,25 @@ void PrintObject::slice()
             triangles.push_back(t);
         }
         try {
+            const auto toolhead = curved_toolhead_state();
+            // Check deposited coordinates in the active tip's build area. The
+            // command XY offset is applied by the writer, not to this footprint.
+            if (m_print->config().nozzle_diameter.size() > 1) {
+                const auto areas = m_print->get_extruder_printable_polygons();
+                if (areas.size() != m_print->config().nozzle_diameter.size() || areas[toolhead.nozzle].empty() ||
+                    areas[toolhead.nozzle].front().points.size() < 3 || areas[toolhead.nozzle].front().area()==0.)
+                    throw std::invalid_argument("Curved multi-nozzle printing requires the active nozzle's printable XY area.");
+                Vec2d lo(INFINITY,INFINITY), hi(-INFINITY,-INFINITY);
+                const Vec2d shift = unscale(m_instances.front().shift);
+                for (const auto& t : triangles) for (const auto& p : t) {
+                    const Vec2d xy(p[0]+shift.x(),p[1]+shift.y());
+                    lo = lo.cwiseMin(xy); hi = hi.cwiseMax(xy);
+                }
+                const Polygon box = Polygon::new_scale({lo,Vec2d(hi.x(),lo.y()),hi,Vec2d(lo.x(),hi.y())});
+                if (!diff(box,areas[toolhead.nozzle].front()).empty() ||
+                    !diff(box,Polygon::new_scale(m_print->config().printable_area.values)).empty())
+                    throw std::invalid_argument("Curved model footprint exceeds the active nozzle's configured printable XY area.");
+            }
             if (its_num_open_edges(volume.mesh().its) != 0)
                 throw std::invalid_argument("Curved blend requires a closed mesh; repair the model first.");
             std::vector<CutPlane> selected_planes;
@@ -1219,13 +1251,13 @@ void PrintObject::slice()
                 for (const auto& plane:m_model_object->cut_planes.planes) if (plane.enabled) selected_planes.push_back(plane);
             if (automatic) {
                 const auto& pc=m_print->config();
-                const HotendEnvelope envelope=HotendEnvelope::from_config(pc);
+                const HotendEnvelope envelope=toolhead.envelope;
                 double xmin=INFINITY,xmax=-INFINITY,ymin=INFINITY,ymax=-INFINITY,top=-INFINITY;
                 for (const auto& t:triangles) for (const auto& p:t) {
                     xmin=std::min(xmin,p[0]);xmax=std::max(xmax,p[0]);
                     ymin=std::min(ymin,p[1]);ymax=std::max(ymax,p[1]);top=std::max(top,p[2]);
                 }
-                const double limit=virtual_tilt_limit_enforced_deg(envelope,pc.nonplanar_gantry_height.value,
+                const double limit=virtual_tilt_limit_enforced_deg(envelope,toolhead.gantry_height,
                     pc.nonplanar_virtual_max_angle.value,std::hypot(xmax-xmin,ymax-ymin));
                 const double allowed=std::tan(limit*PI/180.);
                 const auto target=CurvedTransition::automatic_target(triangles,allowed);
@@ -1255,8 +1287,13 @@ void PrintObject::slice()
                     options.skeleton=AutoPlanes::Options::Skeleton::Off;
                     AutoPlanes::Progress progress;
                     progress.canceled=[this]{return m_print->canceled();};
+                    auto proposal_config=m_print->full_print_config();
+                    proposal_config.set_key_value("nonplanar_hotend_cone_height",new ConfigOptionFloat(toolhead.envelope.height));
+                    for (size_t side=0;side<4;++side)
+                        proposal_config.set_key_value(HotendEnvelope::option_key(static_cast<HotendEnvelope::Side>(side)),new ConfigOptionFloat(toolhead.envelope.angle[side]));
+                    proposal_config.set_key_value("nonplanar_gantry_height",new ConfigOptionFloat(toolhead.gantry_height));
                     const auto regional=AutoPlanes::plan(*m_model_object,
-                        m_model_object->instances.front()->get_matrix(),m_print->full_print_config(),options,&progress);
+                        m_model_object->instances.front()->get_matrix(),proposal_config,options,&progress);
                     m_print->throw_if_canceled();
                     for (const auto& candidate:regional.candidates) {
                         if (!candidate.feasible || candidate.is_planar() || candidate.net_benefit<options.min_net_benefit) continue;
@@ -1284,8 +1321,8 @@ void PrintObject::slice()
                 }
                 if (std::abs(bottom)>2e-5) throw std::invalid_argument("Curved blend model must rest on the bed; floating or sunk geometry is not supported");
                 const auto& pc=m_print->config();
-                const HotendEnvelope envelope=HotendEnvelope::from_config(pc);
-                if (!envelope.enabled() || pc.nonplanar_gantry_height.value<=0.)
+                const HotendEnvelope envelope=toolhead.envelope;
+                if (!envelope.enabled() || toolhead.gantry_height<=0.)
                     throw std::invalid_argument("Curved blend needs a measured configured hotend and gantry envelope");
                 struct PlacedPlane { PlaneProgram::Target target; double gx,gy; };
                 std::vector<PlacedPlane> planes;
@@ -1300,7 +1337,7 @@ void PrintObject::slice()
                         throw std::invalid_argument("Curved blend requires upward nonvertical plane and build normals");
                     const double gx=-build.x()/build.z(),gy=-build.y()/build.z();
                     const double slope=std::hypot(gx,gy),angle=std::atan(slope)*180./PI;
-                    const double limit=virtual_tilt_limit_enforced_deg(envelope,pc.nonplanar_gantry_height.value,
+                    const double limit=virtual_tilt_limit_enforced_deg(envelope,toolhead.gantry_height,
                         pc.nonplanar_virtual_max_angle.value,std::hypot(domain.xmax-domain.xmin,domain.ymax-domain.ymin),std::atan2(-gy,-gx));
                     if (angle>limit+1e-5) throw std::invalid_argument("Curved blend plane exceeds the configured directional toolhead/gantry tilt limit");
                     domain.slope_max=std::max(domain.slope_max,slope);
@@ -1316,11 +1353,10 @@ void PrintObject::slice()
                 std::vector<PlaneProgram::Target> targets;
                 for (const auto& p:planes) targets.push_back(p.target);
                 const double approach=std::max(2.,std::max(pc.nonplanar_approach_distance.value,pc.nonplanar_departure_distance.value));
-                if (pc.nonplanar_virtual_max_z.value<=0. || domain.top_max+approach>pc.nonplanar_virtual_max_z.value ||
-                    domain.top_max+approach>pc.printable_height.value)
+                if (domain.top_max+approach>toolhead.max_z)
                     throw std::invalid_argument("Curved blend model and travel exceed the configured machine/Virtual Z limit");
                 const double first=m_slicing_params.first_object_layer_height;
-                const double all_direction_limit=virtual_tilt_limit_enforced_deg(envelope,pc.nonplanar_gantry_height.value,
+                const double all_direction_limit=virtual_tilt_limit_enforced_deg(envelope,toolhead.gantry_height,
                     pc.nonplanar_virtual_max_angle.value,std::hypot(domain.xmax-domain.xmin,domain.ymax-domain.ymin));
                 auto program=std::make_shared<PlaneProgram>(domain,first,m_config.layer_height.value,std::move(targets),std::tan(all_direction_limit*PI/180.));
                 domain.slope_max=program->slope_bound();
@@ -1333,7 +1369,7 @@ void PrintObject::slice()
                     throw std::invalid_argument("Curved blend cannot finish the selected direction transition before the model ends; move the plane or use a gentler change");
                 program->set_reference_top(top);
                 Ramp schedule_bounds{};
-                object_layers=schedule_bounds.schedule(*program,first,m_config.layer_height.value,pc.min_layer_height.get_at(0),pc.max_layer_height.get_at(0));
+                object_layers=schedule_bounds.schedule(*program,first,m_config.layer_height.value,toolhead.min_layer,toolhead.max_layer);
                 // Contours are sampled at the layer midpoint and deposited at
                 // its top. A roof not aligned with this field can therefore
                 // print above its CAD height. Reserve a whole maximum physical
@@ -1343,8 +1379,7 @@ void PrintObject::slice()
                 for (size_t i=0;i+1<object_layers.size();i+=2)
                     largest_step=std::max(largest_step,object_layers[i+1]-object_layers[i]);
                 domain.top_max+=program->spacing_bounds(largest_step).max_vertical_mm+.02;
-                if (domain.top_max+approach>pc.nonplanar_virtual_max_z.value ||
-                    domain.top_max+approach>pc.printable_height.value)
+                if (domain.top_max+approach>toolhead.max_z)
                     throw std::invalid_argument("Curved blend printed layers and travel exceed the configured machine/Virtual Z limit");
                 m_curved_field=program; m_curved_domain=domain;
                 m_curved_mesh=std::make_shared<const indexed_triangle_set>(std::move(mapped));
@@ -1353,17 +1388,16 @@ void PrintObject::slice()
             const auto& r = *m_curved_ramp;
             const auto& pc = m_print->config();
             const double reach = std::hypot(r.xmax-r.xmin,r.ymax-r.ymin);
-            const HotendEnvelope envelope = HotendEnvelope::from_config(pc);
+            const HotendEnvelope envelope = toolhead.envelope;
             // Build-normal azimuth, opposite to the uphill roof gradient.
-            const double limit = virtual_tilt_limit_enforced_deg(envelope, pc.nonplanar_gantry_height.value,
+            const double limit = virtual_tilt_limit_enforced_deg(envelope, toolhead.gantry_height,
                 pc.nonplanar_virtual_max_angle.value, reach, std::atan2(-r.gy,-r.gx));
-            if (!envelope.enabled() || pc.nonplanar_gantry_height.value<=0. || limit<=0. || r.angle_deg()>limit+1e-5)
+            if (!envelope.enabled() || toolhead.gantry_height<=0. || limit<=0. || r.angle_deg()>limit+1e-5)
                 throw std::invalid_argument("Curved blend roof exceeds the configured hotend/gantry/maximum-angle clearance; a measured envelope is required");
             // Deliberately bounded first release. 10 mm is a scope restriction,
             // NOT a measured safe nonplanar printing height.
             const double approach = std::max(2.,std::max(pc.nonplanar_approach_distance.value,pc.nonplanar_departure_distance.value));
-            if (r.top_max>10. || r.top_max+approach>pc.printable_height.value ||
-                pc.nonplanar_virtual_max_z.value<=0. || r.top_max+approach>pc.nonplanar_virtual_max_z.value)
+            if (r.top_max>10. || r.top_max+approach>toolhead.max_z)
                 throw std::invalid_argument("Curved blend ramp/travel exceeds the experimental 10 mm part limit or configured machine Z limit");
             const double first = m_slicing_params.first_object_layer_height;
             // Search a bounded set of reference heights. Each candidate is
@@ -1373,7 +1407,7 @@ void PrintObject::slice()
                 try {
                     const auto field=r.field(first,reference);
                     object_layers=r.schedule(*field,first,m_config.layer_height.value,
-                        pc.min_layer_height.get_at(0),pc.max_layer_height.get_at(0));
+                        toolhead.min_layer,toolhead.max_layer);
                     m_curved_field=field; break;
                 } catch (const std::invalid_argument&) { }
             }

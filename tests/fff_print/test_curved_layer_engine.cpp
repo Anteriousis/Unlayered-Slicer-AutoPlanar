@@ -42,6 +42,29 @@ TriangleMesh ramp(double angle=5.)
     return TriangleMesh(AutoPlanesFixtures::heightfield_block(20.,20.,4,[angle](double x){return 3.+x*std::tan(angle*PI/180.);}));
 }
 
+// Synthetic measured carriage, NOT a profile for any real printer. The second
+// active tip has a different envelope, height, layer limits and XY offset.
+DynamicPrintConfig shared_carriage_config(int active=0)
+{
+    auto c=curved_config();
+    c.set_num_extruders(2);
+    c.set_deserialize_strict({{"nozzle_diameter","0.4,0.4"},{"extruder_offset","0x0,12x-3"},
+        {"min_layer_height","0.08,0.1"},{"max_layer_height","0.32,0.3"},
+        {"extruder_printable_height","200,80"},{"nonplanar_shared_carriage","1"},
+        {"nonplanar_state_nozzle_id","1,2"},{"nonplanar_state_complete","1,1"},
+        {"nonplanar_state_source","synthetic state one;synthetic state two"},
+        {"nonplanar_state_envelope_height","125,110"},{"nonplanar_state_gantry_height","14,13"},
+        {"nonplanar_state_max_z","90,70"},{"nonplanar_state_angle_xpos","7,8"},
+        {"nonplanar_state_angle_xneg","10,9"},{"nonplanar_state_angle_ypos","15,12"},
+        {"nonplanar_state_angle_yneg","6,7"},{"machine_max_speed_z","10,0,5,0"},
+        {"filament_map",active==0?"1":"2"},{"enable_filament_dynamic_map","0"}});
+    c.set_key_value("filament_map_mode",new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+    c.set_key_value("extruder_printable_area",new ConfigOptionPointsGroups({
+        {Vec2d(0.,0.),Vec2d(200.,0.),Vec2d(200.,200.),Vec2d(0.,200.)},
+        {Vec2d(20.,0.),Vec2d(190.,0.),Vec2d(190.,190.),Vec2d(20.,190.)}}));
+    return c;
+}
+
 TriangleMesh holed_part()
 {
     indexed_triangle_set mesh;
@@ -163,6 +186,91 @@ TEST_CASE("Automatic slicing leaves multiple objects and sparse infill on their 
         REQUIRE(print.objects().front()->layer_strategy_decision().find("100% infill")!=std::string::npos);
         REQUIRE(print.objects().front()->printing_region(0).config().sparse_infill_density.value==15.);
     }
+}
+
+TEST_CASE("Curved toolhead states use the selected physical nozzle and survive serialization", "[curved-engine][multi-nozzle]")
+{
+    auto dynamic=shared_carriage_config();
+    DynamicPrintConfig reloaded;
+    for (const auto& key:dynamic.keys()) reloaded.set_deserialize_strict(key,dynamic.option(key)->serialize());
+    PrintConfig config;config.apply(reloaded,true);
+    const auto first=CurvedTransition::ToolheadState::from_config(config,0);
+    const auto second=CurvedTransition::ToolheadState::from_config(config,1);
+    REQUIRE(first.max_z==90.);REQUIRE(second.max_z==70.);
+    REQUIRE(second.envelope.height==110.);REQUIRE(second.envelope.angle[0]==8.);
+    REQUIRE(second.min_layer==.1);REQUIRE(second.max_layer==.3);
+    REQUIRE(first.z_speed==5.);REQUIRE(second.z_speed==5.);
+    // Arbitrarily many states: the mechanism is not special-cased to two.
+    dynamic.set_num_extruders(3);PrintConfig cloned;cloned.apply(dynamic,true);
+    REQUIRE_THROWS_WITH(CurvedTransition::ToolheadState::from_config(cloned,2),Catch::Matchers::ContainsSubstring("identified"));
+    config.nonplanar_state_nozzle_id.values[1]=1;
+    REQUIRE_THROWS(CurvedTransition::ToolheadState::from_config(config,1));
+}
+
+TEST_CASE("Curved multi-nozzle printing requires recorded shared-carriage geometry and fixed mapping", "[curved-engine][multi-nozzle]")
+{
+    PrintConfig config;config.apply(shared_carriage_config(1),true);
+    SECTION("unknown inactive hardware") {config.nonplanar_state_complete.values[1]=false;}
+    SECTION("missing source") {config.nonplanar_state_source.values[1].clear();}
+    SECTION("independent carriage") {config.nonplanar_shared_carriage.value=false;}
+    SECTION("automatic assignment") {config.filament_map_mode.value=fmmAutoForFlush;}
+    SECTION("dynamic mapping") {REQUIRE_THROWS(CurvedTransition::ToolheadState::from_config(config,1,true));return;}
+    SECTION("missing active offset") {config.extruder_offset.values.resize(1);}
+    SECTION("unknown side angle") {config.nonplanar_state_angle_xneg.values[1]=0.;}
+    SECTION("unknown active layer limit") {config.min_layer_height.values.resize(1);}
+    SECTION("unknown Z bound") {config.nonplanar_state_max_z.values[1]=0.;}
+    REQUIRE_THROWS(CurvedTransition::ToolheadState::from_config(config,1));
+}
+
+TEST_CASE("Automatic slicing supports either fixed nozzle on a synthetic shared carriage", "[curved-engine][multi-nozzle][automatic]")
+{
+    const int active=GENERATE(0,1);
+    auto config=shared_carriage_config(active);
+    config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"curved_layer_blend","0"}});
+    Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
+    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
+    REQUIRE(print.validate().string.empty());
+    const auto output=Test::gcode(print);
+    REQUIRE(print.objects().front()->curved_field());
+    REQUIRE(print.objects().front()->curved_toolhead_state().nozzle==size_t(active));
+    REQUIRE(output.find("Automatic selection: curved.")!=std::string::npos);
+    // Changing the active state's Z bound must trigger slicing again.
+    config.set_deserialize_strict({{"nonplanar_state_max_z",active==0?"4,70":"90,4"}});print.apply(model,config);
+    REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE_FALSE(print.objects().front()->curved_field());
+}
+
+TEST_CASE("Automatic slicing rejects unmeasured states and out of range active footprints", "[curved-engine][multi-nozzle][automatic]")
+{
+    auto config=shared_carriage_config(1);config.set_deserialize_strict({{"automatic_layer_strategy","1"}});
+    SECTION("unmeasured") {config.set_deserialize_strict({{"nonplanar_state_complete","1,0"}});}
+    SECTION("narrow active area") {config.set_key_value("extruder_printable_area",new ConfigOptionPointsGroups({
+        {Vec2d(0.,0.),Vec2d(200.,0.),Vec2d(200.,200.),Vec2d(0.,200.)},
+        {Vec2d(150.,0.),Vec2d(190.,0.),Vec2d(190.,190.),Vec2d(150.,190.)}}));}
+    Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
+    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
+    const_cast<PrintObject*>(print.objects().front())->slice();REQUIRE_FALSE(print.objects().front()->curved_field());
+    REQUIRE(print.objects().front()->layer_strategy_decision().find("Automatic selection: planar.")!=std::string::npos);
+}
+
+TEST_CASE("Curved writer keeps the active offset and refuses switching before mutating the nozzle", "[curved-engine][multi-nozzle]")
+{
+    PrintConfig config;config.apply(shared_carriage_config(1),true);
+    config.filament_map.values={2,1};config.filament_diameter.values={1.75,1.75};
+    GCodeWriter writer;writer.apply_print_config(config);writer.set_extruders({0,1});writer.set_extruder(0);
+    REQUIRE(writer.filament()->extruder_id()==1);
+    CurvedTransition::Ramp ramp{0.,20.,0.,20.,3.,.08,0.,3.,4.6};auto field=ramp.field(.2);
+    const Vec2d placed(100.,80.);
+    const Vec2d origin=placed-writer.extruder_offset_xy().head<2>();
+    REQUIRE_THROWS(writer.set_curved_blend(field,ramp.domain(),origin,2.,5.,0));
+    writer.set_curved_blend(field,ramp.domain(),origin,2.,5.,1);writer.set_curved_path(2.,.45,.2);
+    writer.travel_to_xyz(Vec3d(origin.x(),origin.y()+10.,2.));
+    REQUIRE_FALSE(writer.extrude_to_xy(Vec2d(origin.x()+20.,origin.y()+10.),1.).empty());
+    REQUIRE(std::abs(writer.get_position().z()-field->world_z(20.,10.,2.))<1e-9);
+    REQUIRE(std::abs(writer.get_position().x()+12.-(placed.x()+20.))<1e-9);
+    REQUIRE(std::abs(writer.get_position().y()-3.-(placed.y()+10.))<1e-9);
+    const auto position=writer.get_position();
+    REQUIRE_THROWS(writer.toolchange(1,0));
+    REQUIRE(writer.filament()->extruder_id()==1);REQUIRE(writer.get_position()==position);
 }
 
 TEST_CASE("Curved plane project reload preserves world positions when the volume origin moves", "[curved-engine][planes][3mf]")

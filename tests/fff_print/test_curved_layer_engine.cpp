@@ -7,6 +7,7 @@
 #include "libslic3r/CurvedPlaneProgram.hpp"
 #include "libslic3r/CurvedMesh.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include <sstream>
 #include <regex>
 
@@ -86,6 +87,43 @@ TEST_CASE("Curved planes slice a curved roof without independent sections", "[cu
     const auto* program=dynamic_cast<const CurvedTransition::PlaneProgram*>(print.objects().front()->curved_field().get());
     REQUIRE(program);
     REQUIRE(program->blends().size()==1);
+}
+
+TEST_CASE("Curved plane project reload preserves world positions when the volume origin moves", "[curved-engine][planes][3mf]")
+{
+    Model model;
+    auto* object=model.add_object();
+    auto* volume=object->add_volume(TriangleMesh(its_make_cube(20.,20.,12.)));
+    auto* instance=object->add_instance();
+    instance->set_offset(Vec3d(128.,128.,0.));
+    REQUIRE(volume->get_offset().norm()>1.);
+    add_plane(*object,6.,.035);
+    const Vec3d world_point=instance->get_matrix()*object->cut_planes.planes.front().point;
+    ScopedTemporaryDir backup("curved_3mf");model.set_backup_path(backup.string());
+    ScopedTemporaryFile temp(".3mf");const std::string path=temp.string();
+    auto config=curved_config();
+    PlateData plate;plate.plate_index=0;
+    StoreParams params;
+    params.path=path.c_str();params.model=&model;params.config=&config;
+    params.plate_data_list.push_back(&plate);
+    params.strategy=SaveStrategy::Zip64|SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+    Model loaded;DynamicPrintConfig loaded_config;
+    ConfigSubstitutionContext context{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs plates;std::vector<Preset*> presets;
+    bool is_bbl=false,is_orca=false;Semver version;
+    REQUIRE(load_bbs_3mf(path.c_str(),&loaded_config,&context,&loaded,&plates,&presets,
+                        &is_bbl,&is_orca,&version,nullptr,LoadStrategy::LoadModel|LoadStrategy::LoadConfig));
+    release_PlateData_list(plates);
+    REQUIRE(loaded.objects.size()==1);
+    const auto* restored=loaded.objects.front();
+    REQUIRE(restored->cut_planes.planes.size()==1);
+    const Vec3d restored_world=restored->instances.front()->get_matrix()*restored->cut_planes.planes.front().point;
+    REQUIRE((restored_world-world_point).norm()<1e-6);
+    REQUIRE((restored->cut_planes.planes.front().normal-object->cut_planes.planes.front().normal).norm()<1e-6);
+    Print print;print.apply(loaded,config);
+    REQUIRE(print.validate().string.empty());
+    REQUIRE_FALSE(Test::gcode(print).empty());
 }
 
 TEST_CASE("Curved plane mesh mapping keeps a through hole and bounded facet error", "[curved-engine][planes][mesh]")
@@ -199,6 +237,9 @@ TEST_CASE("Curved blend slices the flattened solid and writes physical paths", "
     REQUIRE(minz>=.199);
     REQUIRE(maxz<=object->curved_ramp()->top_max+.001);
     REQUIRE(maxz>object->curved_field()->reference_top_mm()+.1);
+    const std::regex header(R"(; max_z_height: (-?\d*\.?\d+))");
+    std::smatch reported;REQUIRE(std::regex_search(gcode,reported,header));
+    REQUIRE(std::stod(reported[1])>=maxz-.005);
 }
 
 TEST_CASE("Curved blend Preview receives the same physical deposition and bounded travel", "[curved-engine][preview]")

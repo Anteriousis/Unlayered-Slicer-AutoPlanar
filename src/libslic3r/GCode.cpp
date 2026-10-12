@@ -3498,8 +3498,12 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         file.writeln(filament_diameter_list);
 
         coordf_t max_height_z = -1;
-        for (const auto& object : print.objects())
-            max_height_z = std::max(object->layers().back()->print_z, max_height_z);
+        for (const auto& object : print.objects()) {
+            // Curved print_z is a reference-field coordinate. Report the
+            // physical deposition bound instead of that logical layer height.
+            const double top = object->curved_domain() ? object->curved_domain()->top_max : object->layers().back()->print_z;
+            max_height_z = std::max(top, max_height_z);
+        }
 
         std::ostringstream max_height_z_tip;
         max_height_z_tip<<"; max_z_height: " << std::fixed << std::setprecision(2) << max_height_z << '\n';

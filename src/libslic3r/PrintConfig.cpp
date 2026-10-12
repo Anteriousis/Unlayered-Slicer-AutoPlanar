@@ -5594,50 +5594,6 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.0));
 
-    // Measured states belong to physical nozzles, not filament/flow variants.
-    // Zero/false defaults deliberately cannot enable a multi-nozzle curved job.
-    def = this->add("nonplanar_shared_carriage", coBool);
-    def->label = L("Nozzles share one moving carriage");
-    def->category = L("Non-planar Printing");
-    def->tooltip = L("Enable only when every nozzle moves on the same carriage. Curved printing currently uses one fixed active nozzle. Independent carriages, docked tools and nozzle switching require additional motion planning.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-    def = this->add("nonplanar_measured_nozzle_count", coInt);
-    def->label = L("Nozzle count in measured carriage");
-    def->category = L("Non-planar Printing");
-    def->tooltip = L("Number of physical nozzles present in the measured assembly. 0 means unknown. Adding or removing a nozzle invalidates the old whole-carriage envelopes; review every state before recording the new count.");
-    def->min = 0; def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(0));
-    def = this->add("nonplanar_state_nozzle_id", coInts);
-    def->label = L("Measured state nozzle number");
-    def->tooltip = L("Physical nozzle number, starting at 1, for this measured state. 0 means unknown. Re-enter the correct number after copying a state; copied defaults do not establish clearance.");
-    def->min = 0; def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInts{0});
-    def = this->add("nonplanar_state_complete", coBools);
-    def->label = L("Whole carriage envelope recorded");
-    def->tooltip = L("Confirm only after recording a conservative envelope about this active nozzle tip, including all inactive nozzles in their parked positions, ducts, socks and other moving parts. This records your measurement assessment; the software cannot verify the hardware.");
-    def->mode = comAdvanced; def->set_default_value(new ConfigOptionBools{false});
-    def = this->add("nonplanar_state_source", coStrings);
-    def->label = L("Clearance measurement source");
-    def->tooltip = L("Record the measured assembly, active nozzle, inactive nozzle positions, date and allowance used for this state. A source is required for multi-nozzle curved printing.");
-    def->mode = comAdvanced; def->set_default_value(new ConfigOptionStrings{""});
-    for (const auto& item : std::vector<std::pair<const char*, const char*>>{
-        {"nonplanar_state_envelope_height", L("Envelope height above active tip")},
-        {"nonplanar_state_angle_xpos", L("State side angle +X")},
-        {"nonplanar_state_angle_xneg", L("State side angle -X")},
-        {"nonplanar_state_angle_ypos", L("State side angle +Y")},
-        {"nonplanar_state_angle_yneg", L("State side angle -Y")},
-        {"nonplanar_state_gantry_height", L("State gantry height")},
-        {"nonplanar_state_max_z", L("State maximum toolpath Z")}}) {
-        def = this->add(item.first, coFloats);
-        def->label = item.second; def->category = L("Non-planar Printing");
-        def->tooltip = L("Conservative bound for the complete shared carriage in this active-nozzle state, expressed about its tip. Include inactive hardware and measurement allowance. 0 means unknown and prevents curved printing. This is not an automatically measured value.");
-        const bool angle = std::string(item.first).find("angle") != std::string::npos;
-        def->sidetext = angle ? u8"\u00B0" : L("mm");
-        def->min = 0.; if (angle) def->max = 90.;
-        def->mode = comAdvanced; def->set_default_value(new ConfigOptionFloats{0.});
-    }
-
     // ---- BELT_MOD: belt printer ----
     // Key names, enum values and defaults are OrcaSlicer's so its belt printer profiles import.
     def = this->add("belt_printer", coBool);
@@ -9751,16 +9707,6 @@ void PrintConfigDef::init_extruder_option_keys()
         "nozzle_flush_dataset",
         "nozzle_type",
         "nozzle_volume",
-        "nonplanar_state_nozzle_id",
-        "nonplanar_state_complete",
-        "nonplanar_state_source",
-        "nonplanar_state_envelope_height",
-        "nonplanar_state_angle_xpos",
-        "nonplanar_state_angle_xneg",
-        "nonplanar_state_angle_ypos",
-        "nonplanar_state_angle_yneg",
-        "nonplanar_state_gantry_height",
-        "nonplanar_state_max_z",
         "retract_after_wipe",
         "retract_before_wipe",
         "retract_length_toolchange",
@@ -10940,10 +10886,6 @@ std::set<std::string> filament_options_with_variant = {
 
 // Parameters that are the same as the number of extruders
 std::set<std::string> printer_extruder_options = {
-    "nonplanar_state_nozzle_id", "nonplanar_state_complete", "nonplanar_state_source",
-    "nonplanar_state_envelope_height", "nonplanar_state_angle_xpos", "nonplanar_state_angle_xneg",
-    "nonplanar_state_angle_ypos", "nonplanar_state_angle_yneg",
-    "nonplanar_state_gantry_height", "nonplanar_state_max_z",
     "extruder_type",
     "nozzle_diameter",
     "default_nozzle_volume_type",

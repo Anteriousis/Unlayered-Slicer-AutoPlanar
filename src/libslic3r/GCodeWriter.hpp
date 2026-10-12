@@ -124,8 +124,7 @@ public:
     void set_xy_offset(double x, double y) { m_x_offset = x; m_y_offset = y; }
     void set_curved_blend(std::shared_ptr<const CurvedTransition::Field> field,
                           const CurvedTransition::ModelDomain& domain, const Vec2d& origin,
-                          double travel_clearance, double z_speed,
-                          std::optional<size_t> fixed_nozzle = std::nullopt);
+                          double travel_clearance, double z_speed);
     bool has_curved_blend() const { return bool(m_curved_field); }
     void set_curved_path(double w, double width, double height);
     double curved_max_flow_scale() const;
@@ -239,13 +238,11 @@ public:
     std::string curved_extrude(const Vec3d& slice_target, double dE, const std::string& comment, bool no_extrusion);
     std::shared_ptr<const CurvedTransition::Field> m_curved_field;
     std::optional<CurvedTransition::ModelDomain> m_curved_domain;
-    std::optional<size_t> m_curved_fixed_nozzle;
     Vec2d m_curved_origin = Vec2d::Zero(); // same placed frame as point_to_gcode, BEFORE plate offset
     double m_curved_safe_z=0., m_curved_z_speed=0., m_curved_w=0., m_curved_width=0., m_curved_height=0.;
 	// Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_filament_extruders;
     bool            m_single_extruder_multi_material;
-    bool            m_shared_carriage_tools = false;
     std::vector<Extruder*> m_curr_filament_extruder;
     int        m_curr_extruder_id;
     // Motion uses the global/base process variant until a filament becomes active.

@@ -522,9 +522,6 @@ class Print;
         static const std::string VFlush_End_Tag;
         static const std::string External_Purge_Tag;
     public:
-        // Generic physical T commands do not identify a material slot. Keep
-        // that slot in a mandatory comment for streaming and imported Preview.
-        static constexpr std::string_view Physical_Tool_Filament_Tag = "UNLAYERED_FILAMENT_SLOT:";
         // Orca: SKIPPABLE region tags, stored as static strings (the FLUSH idiom above) rather than
         // a CustomETags/CustomTags array. Public so the emission sites (WipeTower / change_filament
         // path) can reference them single-sourced.
@@ -1254,8 +1251,6 @@ class Print;
         bool m_single_extruder_multi_material;
         // UNLAYERED_MOD: from apply_config, stamped into the result at finalize().
         bool m_virtual_5axis {false};
-        bool m_shared_carriage_tools {false};
-        int m_pending_physical_tool_filament {-1};
         float m_preheat_time;
         int m_preheat_steps;
         bool m_disable_m73;
@@ -1527,7 +1522,6 @@ class Print;
         void process_T(const std::string_view command);
         // T variant carrying the H<nozzle> logical-nozzle id parsed off the command line. -1 = absent.
         void process_T(const std::string_view command, int nozzle_id);
-        int filament_for_physical_tool(int tool) const;
         void process_M1020(const GCodeReader::GCodeLine &line);
 
         void process_M622(const GCodeReader::GCodeLine &line);

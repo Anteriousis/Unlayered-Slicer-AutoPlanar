@@ -2959,9 +2959,6 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
 
     m_flavor = config.gcode_flavor;
     m_printer_model = config.printer_model.value;
-    m_shared_carriage_tools = config.nonplanar_shared_carriage.value && config.nozzle_diameter.size()>1 &&
-        !s_IsBBLPrinter && !config.manual_filament_change.value;
-    m_pending_physical_tool_filament = -1;
 
     // UNLAYERED_MOD -- stamped into the result at finalize(): the preview's hotend marker must
     // stay vertical for virtual-5-axis (3-axis) output. See GCodeProcessorResult::virtual_5axis.
@@ -3166,12 +3163,6 @@ Transform3d GCodeProcessor::belt_to_bed_transform() const
 void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
 {
     m_parser.apply_config(config);
-    const auto* shared_carriage = config.option<ConfigOptionBool>("nonplanar_shared_carriage");
-    const auto* diameters = config.option<ConfigOptionFloats>("nozzle_diameter");
-    const auto* manual_change = config.option<ConfigOptionBool>("manual_filament_change");
-    m_shared_carriage_tools = shared_carriage && shared_carriage->value && diameters && diameters->size()>1 &&
-        !s_IsBBLPrinter && !(manual_change && manual_change->value);
-    m_pending_physical_tool_filament = -1;
 
     // UNLAYERED_MOD -- see the PrintConfig overload; this path serves externally loaded G-code,
     // whose embedded config block carries the same options.
@@ -3387,17 +3378,8 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     const ConfigOptionPoints* extruder_offset = config.option<ConfigOptionPoints>("extruder_offset");
     const ConfigOptionBool* single_extruder_multi_material = config.option<ConfigOptionBool>("single_extruder_multi_material");
     if (extruder_offset != nullptr) {
-        if (m_shared_carriage_tools) {
-            m_extruder_offsets.resize(m_result.filaments_count);
-            for (size_t i=0;i<m_result.filaments_count;++i) {
-                const int physical=i<m_filament_maps.size() ? m_filament_maps[i] : -1;
-                const Vec2f offset=physical>=0 && size_t(physical)<extruder_offset->values.size() ?
-                    extruder_offset->values[physical].cast<float>().eval() : Vec2f::Zero();
-                m_extruder_offsets[i]={offset.x(),offset.y(),0.f};
-            }
-        }
         //BBS: for single extruder multi material, only use the offset of first extruder
-        else if (single_extruder_multi_material != nullptr && single_extruder_multi_material->getBool()) {
+        if (single_extruder_multi_material != nullptr && single_extruder_multi_material->getBool()) {
             Vec2f offset = extruder_offset->values[0].cast<float>();
             m_extruder_offsets.resize(m_result.filaments_count);
             for (size_t i = 0; i < m_result.filaments_count; ++i) {
@@ -3645,8 +3627,6 @@ void GCodeProcessor::reset()
     // UNLAYERED_MOD: likewise a stale virtual-5-axis flag. apply_config() runs right after this
     // in init_gcode_processor and sets the real value.
     m_virtual_5axis = false;
-    m_shared_carriage_tools = false;
-    m_pending_physical_tool_filament = -1;
     m_feedrate = 0.0f;
     m_width = 0.0f;
     m_height = 0.0f;
@@ -4336,14 +4316,6 @@ bool GCodeProcessor::tool_axis_is_vertical() const
 
 void GCodeProcessor::process_tags(const std::string_view comment, bool producers_enabled)
 {
-    if (m_shared_carriage_tools && boost::starts_with(comment, Physical_Tool_Filament_Tag)) {
-        int slot=-1;
-        const auto payload=comment.substr(Physical_Tool_Filament_Tag.size());
-        const auto parsed=std::from_chars(payload.data(),payload.data()+payload.size(),slot);
-        m_pending_physical_tool_filament = parsed.ec==std::errc() && parsed.ptr==payload.data()+payload.size() &&
-            slot>=0 && size_t(slot)<m_result.filaments_count ? slot : -1;
-        return;
-    }
     // producers tags
     if (producers_enabled && process_producers_tags(comment))
         return;
@@ -6366,11 +6338,6 @@ void GCodeProcessor::process_M83(const GCodeReader::GCodeLine& line)
 void GCodeProcessor::process_M104(const GCodeReader::GCodeLine& line)
 {
     int filament_id = get_filament_id();
-    float tool;
-    if (m_shared_carriage_tools && line.has_value('T',tool)) {
-        filament_id=filament_for_physical_tool(int(tool));
-        if (filament_id<0) return;
-    }
     float new_temp;
     if (line.has_value('S', new_temp))
         m_extruder_temps[filament_id] = new_temp;
@@ -6452,9 +6419,7 @@ void GCodeProcessor::process_M109(const GCodeReader::GCodeLine& line)
     if (line.has_value('R', new_temp)) {
         float val;
         if (line.has_value('T', val)) {
-            const int mapped=m_shared_carriage_tools ? filament_for_physical_tool(int(val)) : int(val);
-            if (mapped<0) return;
-            size_t eid = static_cast<size_t>(mapped);
+            size_t eid = static_cast<size_t>(val);
             if (eid < m_extruder_temps.size())
                 m_extruder_temps[eid] = new_temp;
         }
@@ -6462,7 +6427,7 @@ void GCodeProcessor::process_M109(const GCodeReader::GCodeLine& line)
             m_extruder_temps[filament_id] = new_temp;
     }
     else if (line.has_value('S', new_temp))
-        process_M104(line);
+        m_extruder_temps[filament_id] = new_temp;
 }
 
 void GCodeProcessor::process_VM109(const GCodeReader::GCodeLine& line)
@@ -6897,15 +6862,6 @@ void GCodeProcessor::process_T(const std::string_view command, int nozzle_id)
                 BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
         }
         else {
-            if (m_shared_carriage_tools) {
-                const int slot=filament_for_physical_tool(int(eid));
-                m_pending_physical_tool_filament=-1;
-                if (slot<0) {
-                    BOOST_LOG_TRIVIAL(error) << "Physical T command has no unambiguous filament mapping (" << command << ").";
-                    return;
-                }
-                eid=static_cast<unsigned int>(slot);
-            }
             if (eid >= m_result.filaments_count) {
                 BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
                 return;
@@ -6915,24 +6871,6 @@ void GCodeProcessor::process_T(const std::string_view command, int nozzle_id)
             process_filament_change(eid, nozzle_id);
         }
     }
-}
-
-int GCodeProcessor::filament_for_physical_tool(int tool) const
-{
-    const auto matches=[&](int slot) {
-        return slot>=0 && size_t(slot)<m_result.filaments_count && size_t(slot)<m_filament_maps.size() &&
-            m_filament_maps[slot]==tool;
-    };
-    if (matches(m_pending_physical_tool_filament)) return m_pending_physical_tool_filament;
-    const int current=get_filament_id(false);
-    if (matches(current)) return current;
-    int found=-1;
-    for (size_t slot=0; slot<m_result.filaments_count && slot<m_filament_maps.size(); ++slot) {
-        if (m_filament_maps[slot]!=tool) continue;
-        if (found>=0) return -1; // a bare physical command cannot resolve material ambiguity
-        found=int(slot);
-    }
-    return found;
 }
 
 
@@ -6971,8 +6909,12 @@ void GCodeProcessor::ensure_nozzle_group_result(int min_filament_count)
         filament_map.resize(filament_count, filament_map.front());
     }
 
-    // apply_config already converted this member to zero-based physical IDs.
-    // A job using only nozzle 1 (or above) must not be rebased to nozzle 0.
+    int min_value = *std::min_element(filament_map.begin(), filament_map.end());
+    if (min_value >= 1) {
+        for (int &value : filament_map) {
+            value -= 1;
+        }
+    }
 
     for (int &value : filament_map) {
         value = std::max(0, value);
@@ -7312,7 +7254,7 @@ void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type, 
                                                                     get_acceleration(normal_mode));
     const float junction_deviation = get_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, normal_mode_id);
     const bool use_jd_jerk = (m_flavor == gcfMarlinFirmware && junction_deviation > 0.0f);
-    const auto axis_jerk_for_preview = [this, normal_mode, use_jd_jerk, move_acceleration](Axis axis) {
+    const auto axis_jerk_for_preview = [this, use_jd_jerk, move_acceleration](Axis axis) {
         return use_jd_jerk ? get_axis_max_jerk_with_jd(normal_mode, axis, move_acceleration) : get_axis_max_jerk(normal_mode, axis);
     };
     const float jerk_x = axis_jerk_for_preview(X);

@@ -5714,8 +5714,6 @@ PageShp TabPrinter::build_kinematics_page()
     optgroup->append_single_option_line("nonplanar_gantry_height", "printer_motion_ability#non-planar-printing");
     optgroup->append_single_option_line("nonplanar_virtual_max_angle", "printer_motion_ability#non-planar-printing");
     optgroup->append_single_option_line("nonplanar_virtual_max_z", "printer_motion_ability#non-planar-printing");
-    optgroup->append_single_option_line("nonplanar_shared_carriage", "");
-    optgroup->append_single_option_line("nonplanar_measured_nozzle_count", "");
     // What the geometry above actually works out to, so the limit that stops a cut-plane drag is
     // legible here rather than only discoverable by hitting it. Refreshed in update_description_lines().
     {
@@ -6034,13 +6032,6 @@ if (is_marlin_flavor)
             optgroup = page->new_optgroup(L("Position"), L"param_position");
             optgroup->append_single_option_line("extruder_offset", "printer_extruder_basic_information#extruder-offset-position", extruder_idx);
 
-            optgroup = page->new_optgroup(L("Nonplanar toolhead state"), L"param_position");
-            for (auto key : {"nonplanar_state_nozzle_id", "nonplanar_state_complete", "nonplanar_state_source",
-                            "nonplanar_state_envelope_height", "nonplanar_state_angle_xpos", "nonplanar_state_angle_xneg",
-                            "nonplanar_state_angle_ypos", "nonplanar_state_angle_yneg",
-                            "nonplanar_state_gantry_height", "nonplanar_state_max_z"})
-                optgroup->append_single_option_line(key, "", extruder_idx);
-
             //BBS: don't show retract related config menu in machine page
             // These optgroups are built from publishable_printer_retraction/z_hop_options() so the
             // published-3MF printer allowlist (their union in libslic3r/PublishSettings.hpp) can
@@ -6303,8 +6294,6 @@ void TabPrinter::update_description_lines()
         m_virtual_tilt_limit_description_line == nullptr)
         return;
     m_virtual_tilt_limit_description_line->SetText(
-        m_config->option<ConfigOptionFloats>("nozzle_diameter")->size()>1 ?
-        _L("For curved printing on a shared carriage, configure a measured toolhead state on each nozzle's page. The active nozzle's state includes parked hardware. Legacy hotend values here do not establish multi-nozzle clearance.") :
         from_u8(PresetHints::virtual_tilt_limit_explanation(*m_config)));
 }
 
@@ -6641,7 +6630,7 @@ void TabPrinter::toggle_options()
                          "nonplanar_hotend_angle_xpos", "nonplanar_hotend_angle_xneg",
                          "nonplanar_hotend_angle_ypos", "nonplanar_hotend_angle_yneg",
                          "nonplanar_gantry_height",
-                         "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z", "nonplanar_shared_carriage", "nonplanar_measured_nozzle_count"})
+                         "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"})
             toggle_line(opt, enable_nonplanar);
 
         // Within the section, grey out the rotary axis that is NOT part of the selected
@@ -6653,7 +6642,7 @@ void TabPrinter::toggle_options()
             // Virtual drives no rotary axis at all, so axis_{a,b,c}_active are all false and the
             // whole per-axis block greys out on its own. Its two limits take their place.
             const bool is_virtual = sel == AxisSelection::Virtual;
-            for (auto opt : {"nonplanar_gantry_height", "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z", "nonplanar_shared_carriage", "nonplanar_measured_nozzle_count"})
+            for (auto opt : {"nonplanar_gantry_height", "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"})
                 toggle_line(opt, is_virtual);
             // The derived-limit line follows them: it has nothing to say for a real 5-axis machine,
             // where the nozzle tilts with the plane and this whole model does not apply.

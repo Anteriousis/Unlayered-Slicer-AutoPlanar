@@ -104,65 +104,6 @@ guarantee.
 
 ## Motion and Preview
 
-### Multiple physical nozzles
-
-The curved integration is printer-independent. A shared moving carriage may have
-any number of physical nozzles, but each curved job currently uses one fixed
-filament mapped manually to one fixed active nozzle. Filament slots and high-flow
-variants are not separate clearance states. Automatic/dynamic nozzle assignment,
-material/nozzle changes, independent carriages and docked/toolchanger heads remain
-unsupported for curved jobs. Automatic strategy selection retains the planar
-path when these requirements are not met; explicit curved mode reports an error.
-
-Printer presets store `nonplanar_shared_carriage`, `nonplanar_measured_nozzle_count`,
-and per-physical-nozzle arrays:
-`nonplanar_state_nozzle_id`, `nonplanar_state_complete`, `nonplanar_state_source`,
-`nonplanar_state_envelope_height`, `nonplanar_state_angle_xpos/xneg/ypos/yneg`,
-`nonplanar_state_gantry_height`, and `nonplanar_state_max_z`. They appear on each
-nozzle's settings page. State identity is 1-based and defaults to 0/unknown;
-completeness defaults false and geometry defaults zero. Resizing or copying a
-preset does not certify a new state. Adding/removing physical nozzles makes the
-recorded carriage count mismatch, refusing the old envelopes until reviewed.
-Only the selected state's measurements are
-required. Its complete conservative pyramid must enclose all carriage hardware,
-including inactive nozzles at their actual parked heights, expressed about the
-active tip. The recorded source and flag reflect the user's assessment, not an
-automatic verification of physical geometry. The envelope height is the vertical
-extent of this existing pyramid representation, not a measured circular radius.
-
-The planner uses the selected state for directional and all-azimuth limits,
-gantry bound, toolpath Z and layer spacing. It also requires explicit tip offsets,
-per-nozzle XY areas and printable heights. The model's deposited-coordinate
-rectangle must fit both active and common build areas; command offsets are
-applied separately. The writer subtracts the active offset exactly once and
-checks that its physical nozzle still matches the planned state. It refuses an
-unplanned switch command even if the filament ID stays the same. On declared
-shared-carriage profiles, a single used filament still performs startup tool
-selection; generic T commands use the mapped physical tool number. The BBL S/H
-protocol and manual material tags retain their existing slot semantics. Standard
-heater T/P parameters also use the mapped physical tool, including heating before
-selection. Generic tool commands carry a mandatory filament-slot comment so
-streaming and imported Preview can map the physical command back to the correct
-material and bed-frame offset. Unannotated physical commands require an
-unambiguous or already-active material mapping. Manual material-change tags do
-not select a physical tool and are rejected for multi-nozzle curved jobs.
-The writer refuses an
-unexpected nozzle/material switch before mutating the active tool. Z speed uses
-the slowest configured normal-mode limit; unused silent-mode placeholders are
-ignored consistently with the existing writer.
-
-The cooling and pressure-smoothing filters retain and consume the same material
-metadata when processing generic physical tool commands. Imported nozzle grouping
-retains zero-based physical IDs; a job using only the second nozzle is not rebased
-to the first nozzle. A planar fallback regression uses opposite material/tool
-mapping and different fan settings to check this shared command path.
-
-These bounds cover deposition and the existing high-traverse plan, not raw
-machine start/end scripts, docking or mechanical switch sequences. Those scripts
-remain the stock physical-machine paths and require their own review. No stock
-H2S, X2D or other printer's clearance values are inferred by this feature. Native
-multi-nozzle tests use synthetic geometry and are not printer calibrations.
-
 The writer emits physical XYZ, local bead-height and layer-normal tags. Preview
 processes those same paths and orients extrusion cross-sections. Virtual mode
 keeps the actual nozzle upright and emits no rotary B/C motions.

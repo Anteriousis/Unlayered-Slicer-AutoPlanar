@@ -43,14 +43,11 @@ bool GCodeWriter::full_gcode_comment = true;
 
 void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field> field,
                                   const CurvedTransition::ModelDomain& domain, const Vec2d& origin,
-                                  double travel_clearance, double z_speed, std::optional<size_t> fixed_nozzle)
+                                  double travel_clearance, double z_speed)
 {
     if (!field || travel_clearance<=0. || z_speed<=0.)
         throw RuntimeError("Curved blend needs positive travel clearance and Z speed");
-    if (fixed_nozzle && (!filament() || filament()->extruder_id() != *fixed_nozzle))
-        throw RuntimeError("Curved blend writer nozzle does not match the planned toolhead state");
     m_curved_field=std::move(field); m_curved_domain=domain; m_curved_origin=origin;
-    m_curved_fixed_nozzle=fixed_nozzle;
     m_curved_safe_z=domain.top_max+travel_clearance; m_curved_z_speed=z_speed;
 }
 
@@ -107,8 +104,6 @@ std::string GCodeWriter::curved_travel(const Vec3d& target, const std::string& c
 
 std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const std::string& comment, bool no_extrusion)
 {
-    if (m_curved_fixed_nozzle && (!filament() || filament()->extruder_id()!=*m_curved_fixed_nozzle))
-        throw RuntimeError("Curved blend active nozzle changed after planning");
     if (no_extrusion)
         throw RuntimeError("Curved blend refuses a surface wipe; use the ordinary retracted travel planner");
     if (!is_current_position_clear()) throw RuntimeError("Curved blend extrusion has no known start position");
@@ -213,15 +208,12 @@ bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 
 void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 {
-    m_curved_field.reset(); m_curved_domain.reset(); m_curved_fixed_nozzle.reset();
+    m_curved_field.reset(); m_curved_domain.reset();
     this->config.apply(print_config, true);
 
     // UNLAYERED_MOD — see extruder_offset_xy(). GCodeConfig does not carry extruder_offset, so the
     // per-extruder XY offsets are cached here, where the full PrintConfig is in hand.
     m_extruder_offsets = print_config.extruder_offset.values;
-    // This explicit physical-carriage declaration disambiguates physical tools
-    // from legacy virtual material slots. Select the tool before curved output.
-    m_shared_carriage_tools = print_config.nonplanar_shared_carriage.value && print_config.nozzle_diameter.size()>1;
     // UNLAYERED_MOD — see the clamp in lazy_lift()/eager_lift().
     m_nonplanar = print_config.enable_nonplanar.value;
 
@@ -394,8 +386,7 @@ void GCodeWriter::set_extruders(std::vector<unsigned int> extruder_ids)
         (even if prints only uses that one) since we need to output Tx commands
         first extruder has index 0 */
     //ORCA: Fix undefined behavior by checking if the vector is empty before taking max_element.
-    this->multiple_extruders = m_shared_carriage_tools ||
-        (!extruder_ids.empty() && (*std::max_element(extruder_ids.begin(), extruder_ids.end())) > 0);
+    this->multiple_extruders = !extruder_ids.empty() && (*std::max_element(extruder_ids.begin(), extruder_ids.end())) > 0;
 }
 
 std::string GCodeWriter::preamble()
@@ -478,12 +469,6 @@ std::string GCodeWriter::set_temperature(unsigned int temperature, GCodeFlavor f
 
 std::string GCodeWriter::set_temperature(unsigned int temperature, bool wait, int tool) const
 {
-    if (m_shared_carriage_tools && !m_is_bbl_printers) {
-        // Callers pass a filament slot. Standard M104/M109 T (RRF G10 P)
-        // addresses its mapped physical tool, including pre-selection heating.
-        if (tool>=0) tool=std::max(0,config.filament_map.get_at(size_t(tool))-1);
-        return set_temperature(temperature,this->config.gcode_flavor,wait,tool);
-    }
     // set tool to -1 to make sure we won't emit T parameter for single extruder or SEMM
     if (!this->multiple_extruders || m_single_extruder_multi_material)
         tool = -1;
@@ -886,10 +871,6 @@ std::string GCodeWriter::toolchange_prefix() const
 
 std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
 {
-    // A firmware nozzle ID may differ from the physical extruder index. No
-    // switch command (even for the same filament) is permitted in a fixed state.
-    if (m_curved_field && m_curved_fixed_nozzle)
-        throw RuntimeError("Curved blend refuses nozzle or material switching without a checked transition path");
     // set the new extruder
     auto filament_extruder_iter = Slic3r::lower_bound_by_predicate(m_filament_extruders.begin(), m_filament_extruders.end(), [filament_id](const Extruder &e) { return e.id() < filament_id; });
     assert(filament_extruder_iter != m_filament_extruders.end() && filament_extruder_iter->id() == filament_id);
@@ -908,15 +889,8 @@ std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
         // H-1 the stock change templates emit; an unsigned would wrap.
         if (m_is_bbl_printers && !config.manual_filament_change)
             gcode << "M1020 S" << filament_id << " H" << nozzle_id;
-        else {
-            // Standard T commands address a PHYSICAL tool. BBL's S/H protocol
-            // and manual material tags retain their existing slot identities.
-            const unsigned int command_tool = m_shared_carriage_tools && !m_is_bbl_printers && !config.manual_filament_change ?
-                m_curr_extruder_id : filament_id;
-            if (m_shared_carriage_tools && !m_is_bbl_printers && !config.manual_filament_change)
-                gcode << ";" << GCodeProcessor::Physical_Tool_Filament_Tag << filament_id << "\n";
-            gcode << this->toolchange_prefix() << command_tool;
-        }
+        else
+            gcode << this->toolchange_prefix() << filament_id;
         if (GCodeWriter::full_gcode_comment)
             gcode << " ; change extruder";
         gcode << "\n";

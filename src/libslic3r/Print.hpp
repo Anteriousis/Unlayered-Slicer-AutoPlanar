@@ -9,7 +9,6 @@
 #include "BoundingBox.hpp"
 #include "CutPlaneSegmentation.hpp"
 #include "CurvedRamp.hpp"
-#include "CurvedToolhead.hpp"
 #include "Support/SupportDirection.hpp"
 #include "BeltBrim.hpp"   // BELT_MOD
 #include "ExtrusionEntityCollection.hpp"
@@ -505,7 +504,6 @@ public:
     const std::optional<CurvedTransition::Ramp>& curved_ramp() const { return m_curved_ramp; }
     const std::optional<CurvedTransition::ModelDomain>& curved_domain() const { return m_curved_domain; }
     std::string curved_blend_error(bool automatic = false) const;
-    CurvedTransition::ToolheadState curved_toolhead_state() const;
     const std::string& layer_strategy_decision() const { return m_layer_strategy_decision; }
     // Centering offset of the sliced mesh from the scaled and rotated mesh of the model.
     const Point& 			     center_offset() const  { return m_center_offset; }

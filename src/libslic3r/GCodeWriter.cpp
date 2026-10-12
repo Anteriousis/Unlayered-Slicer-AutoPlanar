@@ -123,6 +123,8 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
     for (int i=1;i<=count;++i) {
         const Vec3d logical=start+(target-start)*(double(i)/count);
         const Vec3d physical=curved_physical_point(logical);
+        if (physical.z()>m_curved_domain->top_max+.001)
+            throw RuntimeError("Curved blend deposition exceeds its printed-height travel bound");
         const Vec3d midpoint=start+(target-start)*((double(i)-.5)/count);
         const double mx=midpoint.x()-m_curved_origin.x(), my=midpoint.y()-m_curved_origin.y();
         const double dz=m_curved_field->world_z(mx,my,target.z())-

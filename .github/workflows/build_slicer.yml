@@ -176,7 +176,7 @@ jobs:
         shell: bash
         # The bundle was already packed from resources/, so the caches have to be
         # installed into it here; the source tree keeps its JSONs for later jobs.
-        run: ./scripts/build_preset_cache.sh -b build/${{ inputs.arch }} build/${{ inputs.arch }}/UnlayeredSlicer/UnlayeredSlicer.app/Contents/Resources/profiles
+        run: ./scripts/build_preset_cache.sh --keep-json -b build/${{ inputs.arch }} build/${{ inputs.arch }}/UnlayeredSlicer/UnlayeredSlicer.app/Contents/Resources/profiles
 
       - name: Pack macOS app bundle ${{ inputs.arch }}
         if: runner.os == 'macOS' && !inputs.macos-combine-only
@@ -402,7 +402,18 @@ jobs:
         shell: cmd
         # Shipped into both the already-installed tree (portable zip, MSIX) and
         # the checkout cpack re-installs from when it builds the NSIS installer.
-        run: scripts\build_preset_cache.bat "%BUILD_DIR%" "resources\profiles" "%BUILD_DIR%\UnlayeredSlicer\resources\profiles"
+        run: scripts\build_preset_cache.bat --keep-json "%BUILD_DIR%" "resources\profiles" "%BUILD_DIR%\UnlayeredSlicer\resources\profiles"
+
+      - name: Verify portable CLI preset inheritance Win
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $profileRoot = Join-Path $env:BUILD_DIR 'UnlayeredSlicer/resources/profiles'
+          foreach ($relative in @('Elegoo.json', 'Elegoo/machine/ECC/Elegoo Centauri Carbon 0.4 nozzle.json', 'Elegoo/process/ECC/0.20mm Standard @Elegoo CC 0.4 nozzle.json')) {
+            $presetPath = Join-Path $profileRoot $relative
+            if (!(Test-Path -LiteralPath $presetPath -PathType Leaf)) { throw "Missing stock profile required by CLI inheritance: $relative" }
+            Get-Content -LiteralPath $presetPath -Raw | ConvertFrom-Json | Out-Null
+          }
 
       - name: Pack unit tests Win
         if: runner.os == 'Windows'

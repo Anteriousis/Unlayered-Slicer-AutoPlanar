@@ -82,7 +82,13 @@ mode. This does not claim a general CAD mesh collision checker or cover missing
 hardware. With one mesh and no supports, earlier material lies beneath earlier
 field isosurfaces, allowing the global slope bound to bound the represented head.
 
-Travel leaves vertically, traverses above the whole solid by at least 2 mm and
+For general roofs, contour midpoint sampling can deposit up to a fraction of a
+layer above the CAD top. The travel envelope reserves a whole maximum physical
+layer plus 0.02 mm for mapping/path/rounding error; output outside that envelope
+is refused. That inflated height is also checked against machine and Virtual Z
+limits. This is a toolpath bound, not a measured allowance for material swelling.
+
+Travel leaves vertically, traverses above the bounded printed paths by at least 2 mm and
 descends vertically. Every such travel requests ordinary retraction, including
 short nominal XY gaps. XY and Z speed are separate; Z velocity and volumetric flow
 respect configured limits. This may be slow and does not establish string-free

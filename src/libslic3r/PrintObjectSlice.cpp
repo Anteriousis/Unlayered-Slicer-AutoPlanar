@@ -1157,7 +1157,8 @@ std::string PrintObject::curved_blend_error() const
         if (rc.infill_combination.value ||
             m_config.wall_generator.value!=PerimeterGeneratorType::Classic || rc.seam_slope_type.value!=SeamScarfType::None ||
             rc.wipe_on_loops.value || rc.wipe_before_external_loop.value ||
-            rc.ironing_type.value!=IroningType::NoIroning || rc.fuzzy_skin.value!=FuzzySkinType::None ||
+            rc.ironing_type.value!=IroningType::NoIroning ||
+            (rc.fuzzy_skin.value!=FuzzySkinType::None && rc.fuzzy_skin.value!=FuzzySkinType::Disabled_fuzzy) ||
             rc.zaa_enabled.value || rc.wave_overhangs.value || rc.make_overhang_printable.value)
             return "Curved blend currently requires classic walls, no combined infill, surface wipe, scarf, ironing, fuzzy skin, Z anti-aliasing or wave overhangs. Bridge paths are refused during path generation.";
     }
@@ -1279,6 +1280,18 @@ void PrintObject::slice()
                 program->set_reference_top(top);
                 Ramp schedule_bounds{};
                 object_layers=schedule_bounds.schedule(*program,first,m_config.layer_height.value,pc.min_layer_height.get_at(0),pc.max_layer_height.get_at(0));
+                // Contours are sampled at the layer midpoint and deposited at
+                // its top. A roof not aligned with this field can therefore
+                // print above its CAD height. Reserve a whole maximum physical
+                // layer (conservative versus the half-layer centre offset),
+                // plus mesh/chord/rounding error, for all travel and Z checks.
+                double largest_step=0.;
+                for (size_t i=0;i+1<object_layers.size();i+=2)
+                    largest_step=std::max(largest_step,object_layers[i+1]-object_layers[i]);
+                domain.top_max+=program->spacing_bounds(largest_step).max_vertical_mm+.02;
+                if (domain.top_max+approach>pc.nonplanar_virtual_max_z.value ||
+                    domain.top_max+approach>pc.printable_height.value)
+                    throw std::invalid_argument("Curved blend printed layers and travel exceed the configured machine/Virtual Z limit");
                 m_curved_field=program; m_curved_domain=domain;
                 m_curved_mesh=std::make_shared<const indexed_triangle_set>(std::move(mapped));
             } else {

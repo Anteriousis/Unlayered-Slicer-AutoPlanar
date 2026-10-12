@@ -26,6 +26,9 @@ DynamicPrintConfig curved_config()
         {"sparse_infill_density","100%"},{"wall_generator","classic"},{"seam_slope_type","none"},
         {"enable_support","0"},{"raft_layers","0"},{"enable_prime_tower","0"},{"enable_arc_fitting","0"},
         {"wipe","0"},{"infill_combination","0"},{"skirt_loops","0"},
+        {"wipe_on_loops","0"},{"wipe_before_external_loop","0"},
+        {"ironing_type","no ironing"},{"fuzzy_skin","disabled_fuzzy"},{"zaa_enabled","0"},
+        {"wave_overhangs","0"},{"make_overhang_printable","0"},
         {"layer_change_gcode","G92 E0"},{"before_layer_change_gcode",""},
         {"machine_start_gcode","G28"},{"machine_end_gcode","M104 S0"},{"thumbnails",""},
         {"use_relative_e_distances","1"},{"gcode_comments","1"},
@@ -116,7 +119,33 @@ TEST_CASE("Curved plane mesh mapping keeps a through hole and bounded facet erro
     size_t holes=0;
     for(const auto* layer:object->layers()) for(const auto& poly:layer->lslices) holes+=poly.holes.size();
     REQUIRE(holes>object->layers().size()/2);
-    REQUIRE_FALSE(Test::gcode(print).empty());
+    ScopedTemporaryFile temp(".gcode");
+    GCodeProcessorResult result;
+    print.export_gcode(temp.string(),&result,nullptr);
+    const double bound=object->curved_domain()->top_max;
+    REQUIRE(bound>12.);
+    double actual_top=0.;size_t traverses=0;
+    for (size_t i=1;i<result.moves.size();++i) {
+        const auto& move=result.moves[i];const auto& prior=result.moves[i-1];
+        if (move.type==EMoveType::Extrude && move.extrusion_role!=erCustom) {
+            actual_top=std::max(actual_top,double(move.position.z()));
+            REQUIRE(move.position.z()<=bound+.002);
+        }
+        if (move.type==EMoveType::Travel && actual_top>0. &&
+            (move.position.head<2>()-prior.position.head<2>()).norm()>.001f) {
+            ++traverses;
+            REQUIRE(move.position.z()>=bound+1.999);
+            REQUIRE(prior.position.z()>=bound+1.999);
+        }
+    }
+    // This flat CAD roof crosses tilted layer contours: midpoint sampling
+    // actually deposits a fraction of a layer above its nominal 12 mm top.
+    REQUIRE(actual_top>12.01);
+    REQUIRE(traverses>0);
+    auto restricted=config;
+    restricted.set_deserialize_strict({{"nonplanar_virtual_max_z","14.01"}});
+    print.apply(model,restricted);
+    REQUIRE_THROWS(Test::gcode(print));
 }
 
 TEST_CASE("Curved engine blends two plane changes and refuses intersecting branches", "[curved-engine][planes]")

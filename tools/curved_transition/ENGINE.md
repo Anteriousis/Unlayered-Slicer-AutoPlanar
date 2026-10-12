@@ -58,9 +58,43 @@ Classic walls are required. Combined infill, scarf seams, ironing, fuzzy skin,
 Z anti-aliasing, wave overhangs, wipe and circular arcs are off. Ordinary retraction
 is available. Draft shields and adaptive pressure advance are refused. XY and
 elephant-foot compensation and Z offset are zero; shrinkage compensation is 100%.
-Layer-change code may be empty or G92 E0. External slicing/G-code scripts,
+Layer-change code may contain the checked cooling/progress commands or G92 E0. External slicing/G-code scripts,
 timelapse motion and height-change code are outside this integration. Start/end
 code remain in the physical machine frame.
+
+## Fixed-nozzle dual-carriage mode
+
+The dual-carriage integration uses the existing BBL filament/nozzle protocol,
+with one used filament manually mapped to one nozzle throughout deposition.
+The physical printer profile remains two-nozzle. Independent carriages, nozzle
+clusters, toolchangers, automatic reassignment and in-print tool/material changes
+are excluded. This mode is intended for fixed-nozzle X2D commissioning; it does
+not establish its physical clearances or support simultaneous printing.
+
+Printer settings provide a fixed active nozzle number (1 or 2), the active nozzle
+used as the clearance origin, a whole-toolhead-recorded declaration and a source.
+The existing common envelope/angles, gantry and Virtual Z bounds then describe
+the whole head in that one state, including the parked nozzle. Both nozzle
+identities must match. Changing the active nozzle requires reviewing these common
+bounds and recording their new origin. No X2D geometry values are supplied.
+
+The engine checks the active printable footprint/height, layer range, finite
+offset and normal-mode Z speed. The writer pins the planned nozzle and refuses
+tool commands during curved deposition before altering its state. Startup still
+uses the existing stock physical-tool mapping and BBL protocol. Fixed mode
+resolves X2D's initial hotend placeholder explicitly and checks the expanded
+startup's last ordinary T command selects the planned filament/nozzle with H;
+automatic H-1 selection is refused. This is a command check, not observation of
+the firmware's physical response. Raw start/end
+and filament scripts, firmware compensation and mechanical startup actions need
+separate review; the field does not certify those actions.
+
+Expanded layer scripts may contain cooling/progress commands M106, M142, M73,
+M991 and G92 E0. Axis motion, coordinate resets, tool changes and other commands
+are refused before emission. This preserves stock Bambu layer cooling/progress
+without permitting raw XYZ movement through the curved layer path. Imported
+Preview maps physical-nozzle offsets to filament slots once and retains the
+already zero-based identity of a job using only nozzle 2.
 
 Project reload keeps saved planes at their world positions when a single-volume
 object's local origin is normalized. The G-code height header uses the physical

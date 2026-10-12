@@ -6,10 +6,12 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/CurvedPlaneProgram.hpp"
 #include "libslic3r/CurvedMesh.hpp"
+#include "libslic3r/CurvedFixedNozzle.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include <sstream>
 #include <regex>
+#include <fstream>
 
 using namespace Slic3r;
 namespace {
@@ -42,6 +44,29 @@ TriangleMesh ramp(double angle=5.)
     return TriangleMesh(AutoPlanesFixtures::heightfield_block(20.,20.,4,[angle](double x){return 3.+x*std::tan(angle*PI/180.);}));
 }
 
+// Synthetic fixed dual-carriage fixture, never a measured Bambu profile.
+DynamicPrintConfig fixed_nozzle_config(int active=0)
+{
+    auto c=curved_config();c.set_num_extruders(2);
+    c.set_deserialize_strict({{"nozzle_diameter","0.4,0.4"},{"extruder_offset","0x0,12x-3"},
+        {"min_layer_height","0.08,0.1"},{"max_layer_height","0.32,0.3"},
+        {"extruder_printable_height","200,80"},{"physical_extruder_map","1,0"},
+        {"nonplanar_fixed_nozzle",active==0?"1":"2"},{"nonplanar_clearance_nozzle",active==0?"1":"2"},
+        {"nonplanar_fixed_clearance_recorded","1"},{"nonplanar_fixed_clearance_source","SYNTHETIC full carriage with parked tip"},
+        {"machine_max_speed_z","10,0,5,0"},{"filament_map",active==0?"1":"2"},
+        {"enable_filament_dynamic_map","0"},{"automatic_layer_strategy","1"},{"curved_layer_blend","0"},
+        {"change_filament_gcode",""},{"time_lapse_gcode",""},
+        {"printer_model","Bambu Lab X2D"},{"machine_start_gcode","G28\nT0 H[initial_no_support_hotend]\nM104 S210"},
+        {"layer_change_gcode","M73 L{layer_num+1}\nM991 S0 P{layer_num}\nM106 P2 S100"}});
+    c.set_key_value("filament_map_mode",new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+    c.set_key_value("printer_extruder_id",new ConfigOptionInts({1,2}));
+    c.set_key_value("printer_extruder_variant",new ConfigOptionStrings({"Direct Drive Standard","Direct Drive Standard"}));
+    c.set_key_value("extruder_printable_area",new ConfigOptionPointsGroups({
+        {Vec2d(0.,0.),Vec2d(200.,0.),Vec2d(200.,200.),Vec2d(0.,200.)},
+        {Vec2d(20.,0.),Vec2d(190.,0.),Vec2d(190.,190.),Vec2d(20.,190.)}}));
+    return c;
+}
+
 TriangleMesh holed_part()
 {
     indexed_triangle_set mesh;
@@ -66,6 +91,129 @@ void add_plane(ModelObject& object,double height,double gx,double gy=0.)
     CutPlane p; p.point=Vec3d(0.,0.,height); p.normal=Vec3d(-gx,-gy,1.).normalized();
     object.cut_planes.enabled=true; object.cut_planes.planes.push_back(p);
 }
+}
+
+TEST_CASE("Fixed nozzle limits retain parked hardware declarations and reject mismatched states", "[curved-engine][fixed-nozzle]")
+{
+    auto dynamic=fixed_nozzle_config(1);
+    for(const auto& key:{"nonplanar_fixed_nozzle","nonplanar_clearance_nozzle",
+                        "nonplanar_fixed_clearance_recorded","nonplanar_fixed_clearance_source"}) {
+        const std::string value=dynamic.option(key)->serialize();dynamic.erase(key);dynamic.set_deserialize_strict(key,value);
+    }
+    PrintConfig c;c.apply(dynamic,true);
+    const auto limits=CurvedTransition::FixedNozzleLimits::from_config(c,1);
+    REQUIRE(limits.nozzle==1);REQUIRE(limits.max_z==80.);
+    REQUIRE(limits.min_layer==.1);REQUIRE(limits.max_layer==.3);REQUIRE(limits.z_speed==5.);
+    SECTION("different active tip") {c.nonplanar_clearance_nozzle.value=1;}
+    SECTION("unrecorded") {c.nonplanar_fixed_clearance_recorded.value=false;}
+    SECTION("no source") {c.nonplanar_fixed_clearance_source.value=" \t";}
+    SECTION("unknown parked-tip side") {c.nonplanar_hotend_angle_xneg.value=0.;}
+    SECTION("incomplete route") {c.physical_extruder_map.values={0};}
+    SECTION("added nozzle") {c.nozzle_diameter.values.push_back(.4);}
+    SECTION("missing height") {c.extruder_printable_height.values[1]=0.;}
+    REQUIRE_THROWS(CurvedTransition::FixedNozzleLimits::from_config(c,1));
+}
+
+TEST_CASE("Fixed nozzle automatic slicing emits BBL selection and preserves live and imported Preview", "[curved-engine][fixed-nozzle][preview]")
+{
+    const int active=GENERATE(0,1);auto config=fixed_nozzle_config(active);
+    Print print;print.is_BBL_printer()=true;Model model;
+    Test::init_print({ramp(2.)},print,model,config);
+    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
+    print.process();
+    ScopedTemporaryFile temp(".gcode");GCodeProcessorResult preview;
+    print.export_gcode(temp.string(),&preview,nullptr);
+    const auto* object=print.objects().front();
+    REQUIRE(object->curved_field());REQUIRE(object->curved_domain());
+    REQUIRE(object->curved_nozzle_index()==size_t(active));REQUIRE(preview.tool_axis_fixed);
+    REQUIRE(preview.nozzle_group_result);
+    const auto live_nozzles=preview.nozzle_group_result->get_nozzles_for_filament(0);
+    REQUIRE(live_nozzles.size()==1);REQUIRE(live_nozzles.front().extruder_id==active);
+    std::ifstream input(temp.string());const std::string output((std::istreambuf_iterator<char>(input)),{});
+    REQUIRE(output.find("T0 H"+std::to_string(live_nozzles.front().extruder_id))!=std::string::npos);
+    REQUIRE(output.find("T0 H-1")==std::string::npos);
+    REQUIRE(output.find("M104 S210")!=std::string::npos);
+    REQUIRE(output.find("M106 P2 S100")!=std::string::npos);
+    const auto domain=*object->curved_domain(); // automatic selection may use a PlaneProgram, not a Ramp
+    const Vec2d shift=unscale(object->instances().front().shift);
+    const auto deposits=[&](const GCodeProcessorResult& result) {
+        size_t count=0;
+        for(const auto& move:result.moves) {
+            if(move.type!=EMoveType::Extrude || move.extrusion_role==erCustom) continue;
+            ++count;REQUIRE(move.extruder_id==0);
+            const Vec2d local=move.position.head<2>().cast<double>()-shift;
+            REQUIRE(local.x()>=domain.xmin-.1);REQUIRE(local.x()<=domain.xmax+.1);
+            REQUIRE(local.y()>=domain.ymin-.1);REQUIRE(local.y()<=domain.ymax+.1);
+        }
+        return count;
+    };
+    const size_t live_count=deposits(preview);REQUIRE(live_count>1000);
+    GCodeProcessor replay;replay.process_file(temp.string());
+    REQUIRE(replay.get_result().nozzle_group_result);
+    const auto imported=replay.get_result().nozzle_group_result->get_nozzles_for_filament(0);
+    REQUIRE(imported.size()==1);REQUIRE(imported.front().extruder_id==active);
+    REQUIRE(deposits(replay.get_result())==live_count);
+    // A changed bound must invalidate the curved slice, not merely re-export it.
+    config.set_deserialize_strict({{"extruder_printable_height",active==0?"4,80":"200,4"}});print.apply(model,config);
+    const_cast<PrintObject*>(print.objects().front())->slice();REQUIRE_FALSE(print.objects().front()->curved_field());
+}
+
+TEST_CASE("Fixed nozzle automatic mode keeps unsupported mappings and footprints planar", "[curved-engine][fixed-nozzle][fallback]")
+{
+    auto config=fixed_nozzle_config(1);Print print;print.is_BBL_printer()=true;Model model;
+    SECTION("mapping to other nozzle") {config.set_deserialize_strict({{"filament_map","1"}});}
+    SECTION("unmeasured clearance") {config.set_deserialize_strict({{"nonplanar_fixed_clearance_recorded","0"}});}
+    SECTION("automatic reassignment") {config.set_key_value("filament_map_mode",new ConfigOptionEnum<FilamentMapMode>(fmmAutoForFlush));}
+    SECTION("manual tags") {config.set_deserialize_strict({{"manual_filament_change","1"}});}
+    SECTION("two used materials") {
+        config.set_num_filaments(2);
+        config.set_deserialize_strict({{"filament_map","2,1"},{"wall_filament","1"},{"solid_infill_filament","2"}});
+    }
+    SECTION("wrong machine protocol") {print.is_BBL_printer()=false;}
+    SECTION("out of reach") {config.set_key_value("extruder_printable_area",new ConfigOptionPointsGroups({
+        {Vec2d(0.,0.),Vec2d(200.,0.),Vec2d(200.,200.),Vec2d(0.,200.)},
+        {Vec2d(150.,0.),Vec2d(190.,0.),Vec2d(190.,190.),Vec2d(150.,190.)}}));}
+    Test::init_print({ramp(2.)},print,model,config);
+    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
+    const_cast<PrintObject*>(print.objects().front())->slice();
+    REQUIRE_FALSE(print.objects().front()->curved_field());
+    REQUIRE(print.objects().front()->layer_strategy_decision().find("Automatic selection: planar.")!=std::string::npos);
+}
+
+TEST_CASE("Fixed nozzle writer refuses tool changes before mutation and applies offset once", "[curved-engine][fixed-nozzle]")
+{
+    PrintConfig c;c.apply(fixed_nozzle_config(1),true);
+    c.filament_map.values={2,1};c.filament_diameter.values={1.75,1.75};
+    GCodeWriter writer;writer.set_is_bbl_machine(true);writer.apply_print_config(c);writer.set_extruders({0,1});
+    REQUIRE(writer.set_extruder(0).find("M1020 S0 H1")!=std::string::npos);
+    REQUIRE(writer.filament()->extruder_id()==1);
+    CurvedTransition::Ramp ramp{0.,20.,0.,20.,3.,.08,0.,3.,4.6};auto field=ramp.field(.2);
+    const Vec2d placed(100.,80.);const Vec2d origin=placed-writer.extruder_offset_xy().head<2>();
+    REQUIRE_THROWS(writer.set_curved_blend(field,ramp.domain(),origin,2.,5.,0));
+    writer.set_curved_blend(field,ramp.domain(),origin,2.,5.,1);writer.set_curved_path(2.,.45,.2);
+    writer.travel_to_xyz(Vec3d(origin.x(),origin.y()+10.,2.));
+    REQUIRE_FALSE(writer.extrude_to_xy(Vec2d(origin.x()+20.,origin.y()+10.),1.).empty());
+    REQUIRE(std::abs(writer.get_position().x()+12.-(placed.x()+20.))<1e-9);
+    REQUIRE(std::abs(writer.get_position().z()-field->world_z(20.,10.,2.))<1e-9);
+    const auto position=writer.get_position();
+    REQUIRE_THROWS(writer.toolchange(1,0));REQUIRE_THROWS(writer.toolchange(0,1));
+    REQUIRE(writer.filament()->extruder_id()==1);REQUIRE(writer.get_position()==position);
+}
+
+TEST_CASE("Curved layer scripts retain Bambu cooling and progress but reject expanded motion", "[curved-engine][fixed-nozzle][scripts]")
+{
+    for(const std::string code:{"; comment\nM73 L2\nM991 S0 P1","M106 P2 S100\nM106 P10 S100","M142 P1 R30 S40 U0.3 V1 O45","G92 E0"})
+        REQUIRE(CurvedTransition::layer_code_safe(code));
+    for(const std::string code:{"G1 X10","T1","M1020 S0 H1","G92 X0","G92 E1","M106 S255 G1X0","M106 SNaN","{if layer_num>0}G1 X0{endif}"})
+        REQUIRE_FALSE(CurvedTransition::layer_code_safe(code));
+    auto config=fixed_nozzle_config(0);
+    config.set_deserialize_strict({{"layer_change_gcode","{if layer_num>=0}G1 X0{endif}"}});
+    Print print;print.is_BBL_printer()=true;Model model;Test::init_print({ramp(2.)},print,model,config);
+    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
+    REQUIRE_THROWS_WITH(Test::gcode(print),Catch::Matchers::ContainsSubstring("Expanded layer code"));
+    config.set_deserialize_strict({{"layer_change_gcode","G92 E0"},{"machine_start_gcode","G28\nT0 H-1"}});
+    print.apply(model,config);
+    REQUIRE_THROWS_WITH(Test::gcode(print),Catch::Matchers::ContainsSubstring("startup to explicitly select"));
 }
 
 TEST_CASE("Curved planes slice a curved roof without independent sections", "[curved-engine][planes]")

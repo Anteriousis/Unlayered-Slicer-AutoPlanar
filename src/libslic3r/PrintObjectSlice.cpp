@@ -15,6 +15,7 @@
 #include "Print.hpp"
 #include "CurvedPlaneProgram.hpp"
 #include "CurvedMesh.hpp"
+#include "CurvedFixedNozzle.hpp"
 #include "AutomaticCurvedSelection.hpp"
 #include "AutoPlanes.hpp"
 //BBS
@@ -1083,6 +1084,29 @@ void PrintObject::update_slice_frame()
     assert((m_object_to_slice * m_slice_to_object).isApprox(Transform3d::Identity(), 1e-9));
 }
 
+size_t PrintObject::curved_nozzle_index() const
+{
+    const auto& pc=m_print->config();
+    const auto used=m_print->extruders();
+    if(used.size()!=1) throw std::invalid_argument("Curved printing requires one used filament and one fixed active nozzle.");
+    if(pc.nozzle_diameter.size()==1) return 0;
+    // Reuse the existing BBL filament/nozzle protocol. Generic firmware tool
+    // routing, independent heads and clustered/toolchanger nozzles are outside
+    // this fixed dual-carriage integration.
+    if(pc.nozzle_diameter.size()!=2 || !m_print->is_BBL_printer() ||
+       pc.nonplanar_fixed_nozzle.value<1 || pc.nonplanar_fixed_nozzle.value>2)
+        throw std::invalid_argument("Curved printing on this dual-nozzle printer needs the fixed-nozzle BBL mode; keep the real two-nozzle profile.");
+    if(pc.filament_map_mode.value<fmmManual || m_print->is_dynamic_group_reorder() ||
+       m_print->full_print_config().opt_bool("enable_filament_dynamic_map") || pc.manual_filament_change.value)
+        throw std::invalid_argument("Fixed-nozzle curved printing requires manual filament mapping and physical nozzle selection, with automatic reassignment off.");
+    if(std::any_of(pc.extruder_max_nozzle_count.values.begin(),pc.extruder_max_nozzle_count.values.end(),[](int n){return n>1;}))
+        throw std::invalid_argument("Fixed-nozzle curved printing does not support nozzle clusters or toolchangers.");
+    const auto map=m_print->get_filament_maps();
+    if(used.front()>=map.size() || map[used.front()]!=pc.nonplanar_fixed_nozzle.value)
+        throw std::invalid_argument("The used filament must be manually mapped to the selected fixed nozzle.");
+    return size_t(pc.nonplanar_fixed_nozzle.value-1);
+}
+
 std::string PrintObject::curved_blend_error(bool automatic) const
 {
     if (!automatic && !m_config.curved_layer_blend.value) return {};
@@ -1093,8 +1117,9 @@ std::string PrintObject::curved_blend_error(bool automatic) const
         m_model_object->volumes.size()!=1 || !m_model_object->volumes.front()->is_model_part() ||
         m_model_object->has_custom_layering() || m_model_object->volumes.front()->is_mm_painted() || object_has_directed_parts(*m_model_object))
         return "Curved blend currently supports one closed mesh and one copy, without modifiers, painting, per-part build directions or variable layer heights.";
-    if (pc.nozzle_diameter.size()!=1 || m_print->extruders().size()!=1)
-        return "Curved blend currently supports one nozzle and one filament.";
+    size_t active=0;
+    try {active=curved_nozzle_index();(void)CurvedTransition::FixedNozzleLimits::from_config(pc,active);}
+    catch(const std::invalid_argument& e) {return e.what();}
     if (has_support_material() || m_config.enforce_support_layers.value>0 ||
         std::abs(m_config.layer_rotation_b.value)>EPSILON || std::abs(m_config.layer_rotation_c.value)>EPSILON ||
         m_config.slicing_mode.value!=SlicingMode::Regular)
@@ -1117,17 +1142,14 @@ std::string PrintObject::curved_blend_error(bool automatic) const
         return "Curved blend currently requires ordinary XYZ axis mapping.";
     if (!m_post_trafo_inv.linear().isApprox(Matrix3d::Identity(),1e-8) || std::abs(m_post_trafo_inv.translation().z())>1e-4)
         return "Curved blend requires the model's flat bottom on the bed, without a tilted build frame.";
-    // Custom layer code is appended as raw text outside the writer. Keep the
-    // existing harmless E reset, but never claim to transform raw XYZ movement.
-    auto harmless = [](std::string s) {
-        s.erase(std::remove_if(s.begin(),s.end(),[](unsigned char c){return std::isspace(c);}),s.end());
-        return s.empty() || s=="G92E0";
-    };
-    if (!harmless(pc.layer_change_gcode.value) || !harmless(pc.before_layer_change_gcode.value))
-        return "Curved blend supports empty layer-change code or G92 E0 only; custom layer motion is not transformed.";
+    // Expanded layer scripts are checked in GCode before emission. Only fan,
+    // progress and G92 E0 commands are allowed; raw axis/tool changes fail export.
+    for(const auto* script:{&pc.layer_change_gcode,&pc.before_layer_change_gcode})
+        if(script->value.find('{')==std::string::npos && !CurvedTransition::layer_code_safe(script->value))
+            return "Curved blend layer code permits only cooling/progress and G92 E0; axis, frame and tool changes are forbidden.";
     if (!pc.time_lapse_gcode.value.empty() || pc.farthest_point_timelapse.value || !m_print->model().get_curr_plate_custom_gcodes().gcodes.empty())
         return "Curved blend currently requires timelapse and model height-change custom G-code off.";
-    if (std::any_of(pc.extruder_offset.values.begin(),pc.extruder_offset.values.end(),[](const Vec2d& p){return !p.isZero(1e-8);}))
+    if (pc.nozzle_diameter.size()==1 && std::any_of(pc.extruder_offset.values.begin(),pc.extruder_offset.values.end(),[](const Vec2d& p){return !p.isZero(1e-8);}))
         return "Curved blend currently requires zero nozzle XY offset.";
     if (std::any_of(pc.slicing_pipeline_plugin.values.begin(),pc.slicing_pipeline_plugin.values.end(),[](const std::string& s){return !s.empty();}) ||
         std::any_of(pc.post_process.values.begin(),pc.post_process.values.end(),[](const std::string& s){return !s.empty();}))
@@ -1210,6 +1232,22 @@ void PrintObject::slice()
             triangles.push_back(t);
         }
         try {
+            const auto limits=CurvedTransition::FixedNozzleLimits::from_config(m_print->config(),curved_nozzle_index());
+            if(m_print->config().nozzle_diameter.size()==2) {
+                double xmin=INFINITY,xmax=-INFINITY,ymin=INFINITY,ymax=-INFINITY;
+                for(const auto& t:triangles) for(const auto& p:t) {
+                    xmin=std::min(xmin,p[0]);xmax=std::max(xmax,p[0]);
+                    ymin=std::min(ymin,p[1]);ymax=std::max(ymax,p[1]);
+                }
+                const Vec2d shift=unscale(m_instances.front().shift);
+                Polygon footprint;for(const Vec2d& p:std::vector<Vec2d>{{xmin,ymin},{xmax,ymin},{xmax,ymax},{xmin,ymax}})
+                    footprint.points.push_back(Point::new_scale(p+shift));
+                const auto fits=[&](const Points& area) {return area.size()>=3 && diff(Polygons{footprint},Polygons{Polygon(area)}).empty();};
+                const auto& pc=m_print->config();Points common,active;
+                for(const auto& p:pc.printable_area.values) common.push_back(Point::new_scale(p));
+                for(const auto& p:pc.extruder_printable_area.values[limits.nozzle]) active.push_back(Point::new_scale(p));
+                if(!fits(common) || !fits(active)) throw std::invalid_argument("Curved model and travel footprint exceed the fixed active nozzle's printable area.");
+            }
             if (its_num_open_edges(volume.mesh().its) != 0)
                 throw std::invalid_argument("Curved blend requires a closed mesh; repair the model first.");
             std::vector<CutPlane> selected_planes;
@@ -1316,7 +1354,7 @@ void PrintObject::slice()
                 std::vector<PlaneProgram::Target> targets;
                 for (const auto& p:planes) targets.push_back(p.target);
                 const double approach=std::max(2.,std::max(pc.nonplanar_approach_distance.value,pc.nonplanar_departure_distance.value));
-                if (pc.nonplanar_virtual_max_z.value<=0. || domain.top_max+approach>pc.nonplanar_virtual_max_z.value ||
+                if (limits.max_z<=0. || domain.top_max+approach>limits.max_z ||
                     domain.top_max+approach>pc.printable_height.value)
                     throw std::invalid_argument("Curved blend model and travel exceed the configured machine/Virtual Z limit");
                 const double first=m_slicing_params.first_object_layer_height;
@@ -1333,7 +1371,7 @@ void PrintObject::slice()
                     throw std::invalid_argument("Curved blend cannot finish the selected direction transition before the model ends; move the plane or use a gentler change");
                 program->set_reference_top(top);
                 Ramp schedule_bounds{};
-                object_layers=schedule_bounds.schedule(*program,first,m_config.layer_height.value,pc.min_layer_height.get_at(0),pc.max_layer_height.get_at(0));
+                object_layers=schedule_bounds.schedule(*program,first,m_config.layer_height.value,limits.min_layer,limits.max_layer);
                 // Contours are sampled at the layer midpoint and deposited at
                 // its top. A roof not aligned with this field can therefore
                 // print above its CAD height. Reserve a whole maximum physical
@@ -1343,7 +1381,7 @@ void PrintObject::slice()
                 for (size_t i=0;i+1<object_layers.size();i+=2)
                     largest_step=std::max(largest_step,object_layers[i+1]-object_layers[i]);
                 domain.top_max+=program->spacing_bounds(largest_step).max_vertical_mm+.02;
-                if (domain.top_max+approach>pc.nonplanar_virtual_max_z.value ||
+                if (domain.top_max+approach>limits.max_z ||
                     domain.top_max+approach>pc.printable_height.value)
                     throw std::invalid_argument("Curved blend printed layers and travel exceed the configured machine/Virtual Z limit");
                 m_curved_field=program; m_curved_domain=domain;
@@ -1363,7 +1401,7 @@ void PrintObject::slice()
             // NOT a measured safe nonplanar printing height.
             const double approach = std::max(2.,std::max(pc.nonplanar_approach_distance.value,pc.nonplanar_departure_distance.value));
             if (r.top_max>10. || r.top_max+approach>pc.printable_height.value ||
-                pc.nonplanar_virtual_max_z.value<=0. || r.top_max+approach>pc.nonplanar_virtual_max_z.value)
+                limits.max_z<=0. || r.top_max+approach>limits.max_z)
                 throw std::invalid_argument("Curved blend ramp/travel exceeds the experimental 10 mm part limit or configured machine Z limit");
             const double first = m_slicing_params.first_object_layer_height;
             // Search a bounded set of reference heights. Each candidate is
@@ -1373,7 +1411,7 @@ void PrintObject::slice()
                 try {
                     const auto field=r.field(first,reference);
                     object_layers=r.schedule(*field,first,m_config.layer_height.value,
-                        pc.min_layer_height.get_at(0),pc.max_layer_height.get_at(0));
+                        limits.min_layer,limits.max_layer);
                     m_curved_field=field; break;
                 } catch (const std::invalid_argument&) { }
             }

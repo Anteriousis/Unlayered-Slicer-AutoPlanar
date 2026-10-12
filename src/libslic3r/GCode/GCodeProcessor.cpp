@@ -3387,10 +3387,15 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
             }
         }
         else {
-            m_extruder_offsets.resize(extruder_offset->values.size());
-            for (size_t i = 0; i < extruder_offset->values.size(); ++i) {
-                Vec2f offset = extruder_offset->values[i].cast<float>();
-                m_extruder_offsets[i] = { offset(0), offset(1), 0.0f };
+            // Preview indexes offsets by filament, while the profile stores
+            // them by physical nozzle. Apply the already zero-based map once.
+            m_extruder_offsets.assign(m_result.filaments_count,DEFAULT_EXTRUDER_OFFSET);
+            for(size_t i=0;i<m_result.filaments_count;++i) {
+                const int nozzle=i<m_filament_maps.size()?m_filament_maps[i]:int(i);
+                if(nozzle>=0 && size_t(nozzle)<extruder_offset->values.size()) {
+                    const Vec2f offset=extruder_offset->values[nozzle].cast<float>();
+                    m_extruder_offsets[i]={offset.x(),offset.y(),0.f};
+                }
             }
         }
     }
@@ -6909,12 +6914,8 @@ void GCodeProcessor::ensure_nozzle_group_result(int min_filament_count)
         filament_map.resize(filament_count, filament_map.front());
     }
 
-    int min_value = *std::min_element(filament_map.begin(), filament_map.end());
-    if (min_value >= 1) {
-        for (int &value : filament_map) {
-            value -= 1;
-        }
-    }
+    // Both apply_config overloads already converted the stored 1-based map
+    // to zero-based nozzle indices. A job using only nozzle 2 must remain on 1.
 
     for (int &value : filament_map) {
         value = std::max(0, value);
@@ -7254,7 +7255,7 @@ void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type, 
                                                                     get_acceleration(normal_mode));
     const float junction_deviation = get_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, normal_mode_id);
     const bool use_jd_jerk = (m_flavor == gcfMarlinFirmware && junction_deviation > 0.0f);
-    const auto axis_jerk_for_preview = [this, use_jd_jerk, move_acceleration](Axis axis) {
+    const auto axis_jerk_for_preview = [this, use_jd_jerk, move_acceleration, normal_mode](Axis axis) {
         return use_jd_jerk ? get_axis_max_jerk_with_jd(normal_mode, axis, move_acceleration) : get_axis_max_jerk(normal_mode, axis);
     };
     const float jerk_x = axis_jerk_for_preview(X);

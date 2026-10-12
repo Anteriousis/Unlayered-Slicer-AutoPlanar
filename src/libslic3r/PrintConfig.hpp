@@ -1709,6 +1709,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                nonplanar_gantry_height))
     ((ConfigOptionFloat,                nonplanar_virtual_max_angle))
     ((ConfigOptionFloat,                nonplanar_virtual_max_z))
+    ((ConfigOptionInt,                  nonplanar_fixed_nozzle))
+    ((ConfigOptionInt,                  nonplanar_clearance_nozzle))
+    ((ConfigOptionBool,                 nonplanar_fixed_clearance_recorded))
+    ((ConfigOptionString,               nonplanar_fixed_clearance_source))
     // BELT_MOD -- belt printer machine description. The tilt (axis + angle) is the machine's build
     // direction: un-cut objects slice rotated by it and the emitted G-code is mapped into the
     // tilted-gantry machine frame by gcode_remap_* + MachineFrameTransform (GCode/BeltKinematics).

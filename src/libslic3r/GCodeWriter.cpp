@@ -43,10 +43,13 @@ bool GCodeWriter::full_gcode_comment = true;
 
 void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field> field,
                                   const CurvedTransition::ModelDomain& domain, const Vec2d& origin,
-                                  double travel_clearance, double z_speed)
+                                  double travel_clearance, double z_speed, int fixed_nozzle)
 {
     if (!field || travel_clearance<=0. || z_speed<=0.)
         throw RuntimeError("Curved blend needs positive travel clearance and Z speed");
+    if(fixed_nozzle>=0 && (!filament() || int(filament()->extruder_id())!=fixed_nozzle))
+        throw RuntimeError("The writer active nozzle differs from the planned fixed nozzle.");
+    m_curved_fixed_nozzle=fixed_nozzle;
     m_curved_field=std::move(field); m_curved_domain=domain; m_curved_origin=origin;
     m_curved_safe_z=domain.top_max+travel_clearance; m_curved_z_speed=z_speed;
 }
@@ -209,6 +212,8 @@ bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 {
     m_curved_field.reset(); m_curved_domain.reset();
+    m_curved_fixed_nozzle=-1;
+    m_fixed_dual_enabled=print_config.nozzle_diameter.size()==2 && print_config.nonplanar_fixed_nozzle.value>0;
     this->config.apply(print_config, true);
 
     // UNLAYERED_MOD — see extruder_offset_xy(). GCodeConfig does not carry extruder_offset, so the
@@ -386,7 +391,8 @@ void GCodeWriter::set_extruders(std::vector<unsigned int> extruder_ids)
         (even if prints only uses that one) since we need to output Tx commands
         first extruder has index 0 */
     //ORCA: Fix undefined behavior by checking if the vector is empty before taking max_element.
-    this->multiple_extruders = !extruder_ids.empty() && (*std::max_element(extruder_ids.begin(), extruder_ids.end())) > 0;
+    this->multiple_extruders = (!extruder_ids.empty() && (*std::max_element(extruder_ids.begin(), extruder_ids.end())) > 0) ||
+        (m_is_bbl_printers && m_fixed_dual_enabled);
 }
 
 std::string GCodeWriter::preamble()
@@ -871,6 +877,8 @@ std::string GCodeWriter::toolchange_prefix() const
 
 std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
 {
+    if(m_curved_field && m_curved_fixed_nozzle>=0)
+        throw RuntimeError("No nozzle or material changes are allowed during fixed-nozzle curved deposition.");
     // set the new extruder
     auto filament_extruder_iter = Slic3r::lower_bound_by_predicate(m_filament_extruders.begin(), m_filament_extruders.end(), [filament_id](const Extruder &e) { return e.id() < filament_id; });
     assert(filament_extruder_iter != m_filament_extruders.end() && filament_extruder_iter->id() == filament_id);

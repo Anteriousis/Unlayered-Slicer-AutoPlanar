@@ -136,6 +136,12 @@ per-nozzle XY areas and printable heights. The model's deposited-coordinate
 rectangle must fit both active and common build areas; command offsets are
 applied separately. The writer subtracts the active offset exactly once and
 checks that its physical nozzle still matches the planned state. It refuses an
+unplanned switch command even if the filament ID stays the same. On declared
+shared-carriage profiles, a single used filament still performs startup tool
+selection; generic T commands use the mapped physical tool number. The BBL S/H
+protocol and manual material tags retain their existing slot semantics. Standard
+heater T/P parameters also use the mapped physical tool, including heating before
+selection. It refuses an
 unexpected nozzle/material switch before mutating the active tool. Z speed uses
 the slowest configured normal-mode limit; unused silent-mode placeholders are
 ignored consistently with the existing writer.

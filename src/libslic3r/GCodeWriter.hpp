@@ -245,6 +245,7 @@ public:
 	// Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_filament_extruders;
     bool            m_single_extruder_multi_material;
+    bool            m_shared_carriage_tools = false;
     std::vector<Extruder*> m_curr_filament_extruder;
     int        m_curr_extruder_id;
     // Motion uses the global/base process variant until a filament becomes active.

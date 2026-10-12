@@ -219,6 +219,9 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
     // UNLAYERED_MOD — see extruder_offset_xy(). GCodeConfig does not carry extruder_offset, so the
     // per-extruder XY offsets are cached here, where the full PrintConfig is in hand.
     m_extruder_offsets = print_config.extruder_offset.values;
+    // This explicit physical-carriage declaration disambiguates physical tools
+    // from legacy virtual material slots. Select the tool before curved output.
+    m_shared_carriage_tools = print_config.nonplanar_shared_carriage.value && print_config.nozzle_diameter.size()>1;
     // UNLAYERED_MOD — see the clamp in lazy_lift()/eager_lift().
     m_nonplanar = print_config.enable_nonplanar.value;
 
@@ -391,7 +394,8 @@ void GCodeWriter::set_extruders(std::vector<unsigned int> extruder_ids)
         (even if prints only uses that one) since we need to output Tx commands
         first extruder has index 0 */
     //ORCA: Fix undefined behavior by checking if the vector is empty before taking max_element.
-    this->multiple_extruders = !extruder_ids.empty() && (*std::max_element(extruder_ids.begin(), extruder_ids.end())) > 0;
+    this->multiple_extruders = m_shared_carriage_tools ||
+        (!extruder_ids.empty() && (*std::max_element(extruder_ids.begin(), extruder_ids.end())) > 0);
 }
 
 std::string GCodeWriter::preamble()
@@ -474,6 +478,12 @@ std::string GCodeWriter::set_temperature(unsigned int temperature, GCodeFlavor f
 
 std::string GCodeWriter::set_temperature(unsigned int temperature, bool wait, int tool) const
 {
+    if (m_shared_carriage_tools && !m_is_bbl_printers) {
+        // Callers pass a filament slot. Standard M104/M109 T (RRF G10 P)
+        // addresses its mapped physical tool, including pre-selection heating.
+        if (tool>=0) tool=std::max(0,config.filament_map.get_at(size_t(tool))-1);
+        return set_temperature(temperature,this->config.gcode_flavor,wait,tool);
+    }
     // set tool to -1 to make sure we won't emit T parameter for single extruder or SEMM
     if (!this->multiple_extruders || m_single_extruder_multi_material)
         tool = -1;
@@ -898,8 +908,13 @@ std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
         // H-1 the stock change templates emit; an unsigned would wrap.
         if (m_is_bbl_printers && !config.manual_filament_change)
             gcode << "M1020 S" << filament_id << " H" << nozzle_id;
-        else
-            gcode << this->toolchange_prefix() << filament_id;
+        else {
+            // Standard T commands address a PHYSICAL tool. BBL's S/H protocol
+            // and manual material tags retain their existing slot identities.
+            const unsigned int command_tool = m_shared_carriage_tools && !m_is_bbl_printers && !config.manual_filament_change ?
+                m_curr_extruder_id : filament_id;
+            gcode << this->toolchange_prefix() << command_tool;
+        }
         if (GCodeWriter::full_gcode_comment)
             gcode << " ; change extruder";
         gcode << "\n";

@@ -253,6 +253,7 @@ TEST_CASE("Automatic slicing supports either fixed nozzle on a synthetic shared 
     REQUIRE(print.objects().front()->curved_field());
     REQUIRE(print.objects().front()->curved_toolhead_state().nozzle==size_t(active));
     REQUIRE(output.find("Automatic selection: curved.")!=std::string::npos);
+    REQUIRE(std::regex_search(output,std::regex("(^|\n)T"+std::to_string(active)+"( |\n)")));
     // Changing the active state's Z bound must trigger slicing again.
     config.set_deserialize_strict({{"nonplanar_state_max_z",active==0?"4,70":"90,4"}});print.apply(model,config);
     REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE_FALSE(print.objects().front()->curved_field());
@@ -275,7 +276,11 @@ TEST_CASE("Curved writer keeps the active offset and refuses switching before mu
 {
     PrintConfig config;config.apply(shared_carriage_config(1),true);
     config.filament_map.values={2,1};config.filament_diameter.values={1.75,1.75};
-    GCodeWriter writer;writer.apply_print_config(config);writer.set_extruders({0,1});writer.set_extruder(0);
+    GCodeWriter writer;writer.apply_print_config(config);writer.set_extruders({0});
+    REQUIRE(writer.multiple_extruders);
+    REQUIRE(writer.set_extruder(0).find("T1")!=std::string::npos);
+    REQUIRE(writer.set_temperature(210,false,0).find("T1")!=std::string::npos);
+    writer.set_extruders({0,1});writer.set_extruder(0);
     REQUIRE(writer.filament()->extruder_id()==1);
     CurvedTransition::Ramp ramp{0.,20.,0.,20.,3.,.08,0.,3.,4.6};auto field=ramp.field(.2);
     const Vec2d placed(100.,80.);
@@ -291,6 +296,8 @@ TEST_CASE("Curved writer keeps the active offset and refuses switching before mu
     REQUIRE_THROWS(writer.toolchange(1,0));
     REQUIRE_THROWS(writer.toolchange(0,0)); // same filament, unplanned firmware nozzle command
     REQUIRE(writer.filament()->extruder_id()==1);REQUIRE(writer.get_position()==position);
+    GCodeWriter bbl;bbl.set_is_bbl_machine(true);bbl.apply_print_config(config);bbl.set_extruders({0});
+    REQUIRE(bbl.set_extruder(0).find("M1020 S0 H1")!=std::string::npos);
 }
 
 TEST_CASE("Curved plane project reload preserves world positions when the volume origin moves", "[curved-engine][planes][3mf]")

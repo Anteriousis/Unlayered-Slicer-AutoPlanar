@@ -15,7 +15,7 @@ The measurements were made on 10 October 2026 from a live imported OpenCentauri 
 
 The [OpenCentauri CAD repository](https://github.com/OpenCentauri/cad) was observed at `c63a80d3026bf582296c6372a716c6e80fd5bbae`. The live imported assembly could not be proven to match that revision. It is a measured CAD representation, not a manufacturer-certified stock collision model. No third-party CAD is redistributed here. The numerical record is [tools/centauri_nonplanar/measurements.json](../../../tools/centauri_nonplanar/measurements.json); the [original public measurement package](https://github.com/Anteriousis/centauri-carbon-unlayered-presets) contains the fuller report and section figures.
 
-Low cowling meshes used a requested 0.002 mm surface deviation and 1 mm maximum edge; other surfaces used 0.020 mm deviation and 2 mm edge. Approximately ±0.05° describes numerical angular uncertainty, **not physical uncertainty**. Production revisions, seating, hot deformation, flexible wires and motion error remain unmeasured.
+Low cowling meshes used a requested 0.002 mm surface deviation and 1 mm maximum edge; other surfaces used 0.020 mm deviation and 2 mm edge. Approximately ±0.05° describes numerical angular uncertainty, **not physical uncertainty**. On 12 October the owner reported that the installed 0.4 mm toolhead dimensions and Z travel match CAD. This is owner-reported physical agreement; numerical physical endpoints, measurement precision, hot deformation, flexible-wire sweeps and dynamic running gap were not recorded. The 0.2 mm exterior geometry remains unconfirmed.
 
 ## Collision geometry
 
@@ -46,11 +46,13 @@ The intended nozzle contact region was excluded from those macro clearance angle
 | Side angle -Y | 6° | Rounded down from CAD gap calculation |
 | Gantry height | 14 mm | Conservative proxy below a carriage/PCB fastener at 15.123 mm; carriage plate 16.750 mm, lower X rod underside 34.250 mm. Verify the installed hardware. |
 | Maximum tilt | 5° | Trial ceiling, further restricted by directional/diagonal limits; nozzle does not rotate |
-| Maximum total Z | 100 mm | Software cap including stock end parking at Z100. **Not a verified 100 mm nonplanar object height.** |
+| Maximum total Z | 100 mm | Software nozzle-Z ceiling; current upstream print-height checking excludes custom startup/end scripts. **Not a verified 100 mm nonplanar object height.** |
 | Approach / departure | 2 mm / 2 mm | Trial allowances requiring inspection of every emitted path |
 | Print sequence | By group | Existing multiplanar workflow; deposition order must be checked |
 
 Commissioning models in the original trial were below 10 mm. A historical 10 mm total Z cap rejected stock end parking, which is why the exported preset uses 100 mm. Maximum feasible nonplanar object height remains undetermined: it depends on verified machine travel, staging/lifts, adjacent printed geometry, gantry clearance and cable/tube sweeps. Stock nominal build height is 256 mm; this alone is insufficient to establish a nonplanar height setting.
+
+The [12 October live Fusion height check](../../../tools/centauri_nonplanar/HEIGHT_CHECK_2026-10-12.md) measured a 169.300377 mm tip-to-bed gap at the displayed pose and mapped the enabled bed-slider limits to a raw upper separation of 260.300377 mm. Those joint limits also permit overlap at the other endpoint. The owner reports both the installed 0.4 mm toolhead dimensions and Z travel match CAD. These observations support the geometric budget but do not make a universal safe object height: a 100 mm deposited top plus a 2 mm lift requires at least Z102, and stock parking/macros must be reviewed separately. The 14 mm gantry parameter measures relative head clearance, not maximum object height. No numerical clearance or height limit was raised.
 
 ## Physical trial record
 

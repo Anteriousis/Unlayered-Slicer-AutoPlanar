@@ -2000,8 +2000,13 @@ void ViewerImpl::update_view_full_range()
         if (m_settings.top_layer_only_view_range) {
             const Interval& full_range = m_view_range.get_full();
             auto top_first_it = m_vertices.begin() + full_range[0];
+            // UNLAYERED_MOD -- stop at the end of the full range. When the top layer holds nothing
+            // visible (a cut segment's first layers are often outer wall only, and outer walls can be
+            // hidden) the walk used to run past full_range[1]; Range::set then swapped the bounds,
+            // the visible end no longer matched the full end and every line below turned DUMMY_COLOR.
+            const auto top_last_it = m_vertices.begin() + full_range[1];
             bool shortened = false;
-            while (top_first_it != m_vertices.end() && (top_first_it->layer_id < layers_range[1] || !is_visible(*top_first_it, m_settings))) {
+            while (top_first_it < top_last_it && (top_first_it->layer_id < layers_range[1] || !is_visible(*top_first_it, m_settings))) {
                 ++top_first_it;
                 shortened = true;
             }

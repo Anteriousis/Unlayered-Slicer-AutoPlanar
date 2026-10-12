@@ -37,6 +37,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <sstream>
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/trim.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
@@ -3713,6 +3715,8 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
             hp.envelope = HotendEnvelope::from_config(m_config);
             // A 3-axis printer never tilts its nozzle, whatever axis the chunk was tagged with.
             hp.upright  = m_config.virtual_5axis.value;
+            if (trunnion_ac_enabled(this->full_print_config()))
+                hp.ac = trunnion_ac_machine(this->full_print_config());
             const auto t0 = std::chrono::high_resolution_clock::now();
             m_conflict_result = check_hotend_collisions(*result, hp);
             BOOST_LOG_TRIVIAL(info) << "hotend collision check took "
@@ -3727,16 +3731,40 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
         // including the apex of each transition hop, which is normally the highest point in the
         // whole print. Post-processing scripts have also already run by this point, so this sees
         // exactly what the printer gets.
+        //
+        // Except the printer's own G-code: the machine start/end G-code (and filament change and
+        // other custom blocks) is written under a ";TYPE:Custom" role tag, and an end G-code that
+        // lifts the head and presents the print (Prusa MK3S: Z up, then X0 Y200) is not the
+        // toolpath climbing into the gantry. Refusing every print over it was most of the slice
+        // errors 0.1.3 reported. Transition hops carry no role tag of their own, so they keep the
+        // role of the extrusion before them and stay counted.
+        //
+        // The same scan refuses a toolpath that goes BELOW the plate (Z < 0). On a 3-axis printer that
+        // is the nozzle driven into the bed: a customer's A1 scraped its plate on 0.1.x. Nothing
+        // upstream should produce it any more (tilted objects are clipped at the plate in
+        // slice_volumes), so this is the last line of defence, not the fix.
         bool height_limit_exceeded = false;
-        if (m_config.enable_nonplanar.value && m_config.virtual_5axis.value && ! m_config.belt_printer.value &&
-            m_config.nonplanar_virtual_max_z.value > 0.) {
+        bool below_plate           = false;
+        const bool check_height = m_config.enable_nonplanar.value && m_config.virtual_5axis.value && ! m_config.belt_printer.value &&
+                                  m_config.nonplanar_virtual_max_z.value > 0.;
+        const bool check_floor  = m_config.enable_nonplanar.value && m_config.virtual_5axis.value && ! m_config.belt_printer.value;
+        if (check_height || check_floor) {
             const double limit   = m_config.nonplanar_virtual_max_z.value;
             double       worst_z = 0., worst_x = 0., worst_y = 0.;
+            double       low_z   = std::numeric_limits<double>::max(), low_x = 0., low_y = 0.;
             double       cur_x   = 0., cur_y   = 0.;
             {
                 boost::nowide::ifstream in(path);
                 std::string             line;
+                const std::string       role_tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+                bool                    in_custom = false;
                 while (std::getline(in, line)) {
+                    if (boost::starts_with(line, role_tag)) {
+                        std::string role = line.substr(role_tag.size());
+                        boost::trim(role);
+                        in_custom = role == ExtrusionEntity::role_to_string(erCustom);
+                        continue;
+                    }
                     if (line.size() < 2 || (line[0] != 'G' && line[0] != 'g'))
                         continue;
                     // G0/G1 only: arcs carry I/J/R and never change Z on this path.
@@ -3761,24 +3789,51 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
                         else { z = v; have_z = true; }
                         i = size_t(endp - line.c_str()) - 1;
                     }
-                    if (have_z && z > worst_z) {
+                    if (have_z && ! in_custom && z > worst_z) {
                         worst_z = z;
                         worst_x = cur_x;
                         worst_y = cur_y;
                     }
+                    if (have_z && ! in_custom && z < low_z) {
+                        low_z = z;
+                        low_x = cur_x;
+                        low_y = cur_y;
+                    }
                 }
             }
-            height_limit_exceeded = worst_z > limit + EPSILON;
+            height_limit_exceeded = check_height && worst_z > limit + EPSILON;
+            below_plate           = check_floor && low_z < - EPSILON;
+            if (below_plate) {
+                ConflictResult cr(_u8L("toolpath"), _u8L("the build plate"), low_z, nullptr, nullptr);
+                cr.message = (boost::format(_u8L("Virtual 5-axis: the toolpath goes below the build plate, to Z%1% mm (near "
+                                                 "X%2% Y%3%), which would drive the nozzle into the bed. Part of the object "
+                                                 "is probably sunk below the plate: drop it onto the plate and slice again."))
+                              % (boost::format("%.2f") % low_z).str()
+                              % (boost::format("%.1f") % low_x).str()
+                              % (boost::format("%.1f") % low_y).str()).str();
+                if (m_conflict_result) {
+                    if (! m_conflict_result->message.empty())
+                        cr.message += " " + m_conflict_result->message;
+                    cr._obj1 = m_conflict_result->_obj1;
+                    cr._obj2 = m_conflict_result->_obj2;
+                }
+                m_conflict_result = cr;
+                BOOST_LOG_TRIVIAL(error) << "virtual 5-axis below the plate: " << cr.message;
+            }
             if (height_limit_exceeded) {
                 ConflictResult cr(_u8L("toolpath"), _u8L("the gantry"), worst_z, nullptr, nullptr);
-                cr.message = (boost::format(_u8L("Virtual 5-axis: the toolpath reaches Z%1% mm in the G-code, "
-                                                 "above the %2% mm total height this printer allows (worst near "
-                                                 "X%3% Y%4%). Lower the part, reduce the cut plane angle, or "
-                                                 "raise \"Max total height\" in the printer settings."))
+                cr.message = (boost::format(_u8L("Virtual 5-axis: the toolpath reaches Z%1% mm (near X%3% Y%4%), above "
+                                                 "the %2% mm set in Printer settings > Motion ability > Non-planar "
+                                                 "Printing > \"Max print height (from the bed)\". Lower the part, reduce "
+                                                 "the cut plane angle, or raise that limit (0 means no limit)."))
                               % (boost::format("%.1f") % worst_z).str()
                               % (boost::format("%.1f") % limit).str()
                               % (boost::format("%.1f") % worst_x).str()
                               % (boost::format("%.1f") % worst_y).str()).str();
+                // Day one of 0.1.3 saw limits of 4, 5 and 7 mm: read as a clearance, not a height.
+                if (limit < 30.)
+                    cr.message += " " + _u8L("Note: this limit is measured from the bed, so it is usually close to the "
+                                             "printer's build height; a few millimetres refuses almost every print.");
                 // Only ONE ConflictResult survives into result->conflict_result and the GUI renders
                 // exactly one message, so fold anything already found into this one rather than
                 // dropping it: a print can both collide and exceed the height.
@@ -3805,7 +3860,7 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
         // G-code stays exportable and sendable (only the CLI blocks on it). This limit exists to
         // refuse, so raise a real slicing error -- after the assignment above, so the preview still
         // carries the marker. BackgroundSlicingProcess reports it and never finalizes the export.
-        if (height_limit_exceeded && m_conflict_result)
+        if ((height_limit_exceeded || below_plate) && m_conflict_result)
             throw Slic3r::SlicingError(m_conflict_result->message);
     }
     return path.c_str();

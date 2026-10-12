@@ -1229,6 +1229,13 @@ void GUI_App::post_init()
         }
     }
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
+    UsageTelemetry::set_phase("running");
+    // Log off / shut down with the app open: the process may be ended before OnExit, which the
+    // next launch would otherwise count as a crash.
+    Bind(wxEVT_END_SESSION, [](wxCloseEvent &evt) {
+        UsageTelemetry::end_session_by_os();
+        evt.Skip();
+    });
 //BBS: remove the single instance currently
 #ifdef _WIN32
     // Sets window property to mainframe so other instances can indentify it.
@@ -6285,6 +6292,11 @@ void GUI_App::check_new_version_sf(int by_user)
     BOOST_LOG_TRIVIAL(info) << "updater: checking " << url;
 
     auto http = Http::get(url);
+    // The diagnostics install id, so the site can count different installs rather than launches.
+    // Only while diagnostics are on: switching them off (or UNLAYERED_NO_TELEMETRY) drops it. The
+    // site keeps no ids, only a per-day hash sketch that counts how many (USAGE_DIAGNOSTICS.md).
+    if (const std::string install = UsageTelemetry::install_id(); !install.empty())
+        http.header("X-Unlayered-Install", install);
     // Verified TLS: since the manifest can now start an unattended install, it must come from the
     // real site. (Its sha256 is the only check on the installer, so a forged manifest would be a
     // forged installer.)

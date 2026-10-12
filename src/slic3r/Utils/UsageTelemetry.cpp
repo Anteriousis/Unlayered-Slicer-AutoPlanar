@@ -12,6 +12,10 @@
 #include <regex>
 #include <sstream>
 
+#include <cstdio>
+#include <cstring>
+#include <exception>
+
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/uuid/uuid.hpp>
@@ -61,6 +65,7 @@ struct State
     std::string url, install, session, version, channel, os;
     std::chrono::steady_clock::time_point started_at;
     int64_t                               started_ms{0};
+    std::string                           phase{"startup"};
 
     std::vector<json>          queue;
     std::map<std::string, int> counts;
@@ -163,11 +168,146 @@ void write_file(const fs::path &path, const std::string &content)
     fs::rename(tmp, path, ec);
 }
 
+// What the crash handlers write, prepared ahead because they run in a dying process: plain char
+// buffers, no allocation, no locks. Kept current by write_marker_locked().
+struct CrashMarker
+{
+    char path[1024]   = {0}; // UTF-8 path of this session's marker
+    char version[32]  = {0};
+    char phase[32]    = {0};
+    long long started = 0;
+    long long alive   = 0;
+};
+CrashMarker g_crash_marker;
+
+void copy_cstr(char *dst, size_t size, const std::string &src)
+{
+    std::snprintf(dst, size, "%s", src.c_str());
+}
+
 // This session's crash marker; see start(). Caller holds the mutex.
 void write_marker_locked(const State &s)
 {
+    const int64_t alive = now_ms();
     write_file(marker_path(s.session),
-               json{{"pid", current_pid()}, {"version", s.version}, {"started", s.started_ms}, {"alive", now_ms()}}.dump());
+               json{{"pid", current_pid()}, {"version", s.version}, {"started", s.started_ms}, {"alive", alive}, {"phase", s.phase}}
+                   .dump());
+    copy_cstr(g_crash_marker.path, sizeof(g_crash_marker.path), marker_path(s.session).string());
+    copy_cstr(g_crash_marker.version, sizeof(g_crash_marker.version), s.version);
+    copy_cstr(g_crash_marker.phase, sizeof(g_crash_marker.phase), s.phase);
+    g_crash_marker.started = s.started_ms;
+    g_crash_marker.alive   = alive;
+}
+
+// Keep only characters that are safe inside the JSON string and say nothing about the person.
+void sanitize_token(char *s)
+{
+    for (; *s; ++s)
+        if (!(std::isalnum(static_cast<unsigned char>(*s)) || *s == '.' || *s == '_' || *s == '-' || *s == '+'))
+            *s = '_';
+}
+
+// Rewrites this session's marker with what ended it. Runs inside a crash handler.
+void write_crash_marker(const char *exception, const char *at)
+{
+    if (g_crash_marker.path[0] == 0)
+        return;
+    char exc[48] = {0}, where[160] = {0};
+    std::snprintf(exc, sizeof(exc), "%s", exception ? exception : "");
+    std::snprintf(where, sizeof(where), "%s", at ? at : "");
+    sanitize_token(exc);
+    sanitize_token(where);
+    char body[512];
+    const int n = std::snprintf(body, sizeof(body),
+                                "{\"pid\":%ld,\"version\":\"%s\",\"started\":%lld,\"alive\":%lld,\"phase\":\"%s\","
+                                "\"exception\":\"%s\",\"at\":\"%s\"}",
+                                current_pid(), g_crash_marker.version, g_crash_marker.started, g_crash_marker.alive,
+                                g_crash_marker.phase, exc, where);
+    if (n <= 0)
+        return;
+    if (FILE *f = std::fopen(g_crash_marker.path, "wb")) {
+        std::fwrite(body, 1, std::min<size_t>(size_t(n), sizeof(body) - 1), f);
+        std::fclose(f);
+    }
+}
+
+#ifdef _WIN32
+// Module file name and offset for an address, into `out`. No allocation.
+void code_location_raw(const void *address, char *out, size_t size)
+{
+    out[0]   = 0;
+    HMODULE module = nullptr;
+    if (!address || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                        static_cast<LPCWSTR>(address), &module) || !module) {
+        std::snprintf(out, size, "unknown+0x%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(address)));
+        return;
+    }
+    wchar_t wpath[MAX_PATH] = {0};
+    const DWORD len = GetModuleFileNameW(module, wpath, MAX_PATH);
+    const wchar_t *name = wpath;
+    for (DWORD i = 0; i < len; ++i)
+        if (wpath[i] == L'\\' || wpath[i] == L'/')
+            name = wpath + i + 1;
+    char cname[128] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, name, -1, cname, int(sizeof(cname)) - 1, nullptr, nullptr);
+    const unsigned long long offset = reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(module);
+    std::snprintf(out, size, "%s+0x%llx", cname[0] ? cname : "unknown", offset);
+}
+
+LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
+std::atomic<bool>            g_crash_written{false};
+
+LONG WINAPI crash_filter(EXCEPTION_POINTERS *info)
+{
+    if (info && info->ExceptionRecord && !g_crash_written.exchange(true)) {
+        char exc[16], at[160];
+        std::snprintf(exc, sizeof(exc), "0x%08lX", static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode));
+        code_location_raw(info->ExceptionRecord->ExceptionAddress, at, sizeof(at));
+        write_crash_marker(exc, at);
+    }
+    return g_previous_filter ? g_previous_filter(info) : EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
+std::terminate_handler g_previous_terminate = nullptr;
+
+void on_terminate()
+{
+#ifdef _WIN32
+    if (!g_crash_written.exchange(true))
+#endif
+        write_crash_marker("terminate", "");
+    if (g_previous_terminate)
+        g_previous_terminate();
+    std::abort();
+}
+
+bool g_handlers_installed = false;
+
+void install_crash_handlers()
+{
+    if (g_handlers_installed)
+        return;
+    g_handlers_installed = true;
+#ifdef _WIN32
+    g_previous_filter = SetUnhandledExceptionFilter(crash_filter);
+#endif
+    g_previous_terminate = std::set_terminate(on_terminate);
+}
+
+// After a clean shutdown there is no marker to write into, so hand the process back.
+void uninstall_crash_handlers()
+{
+    if (!g_handlers_installed)
+        return;
+    g_handlers_installed = false;
+#ifdef _WIN32
+    if (SetUnhandledExceptionFilter(g_previous_filter) != crash_filter)
+        SetUnhandledExceptionFilter(crash_filter); // someone installed theirs after ours: leave it
+#endif
+    if (std::set_terminate(g_previous_terminate) != on_terminate)
+        std::set_terminate(on_terminate);
+    g_crash_marker.path[0] = 0;
 }
 
 json make_event(const std::string &name, json props)
@@ -308,8 +448,14 @@ void start(AppConfig &config, bool first_run)
         long pid    = marker.is_object() ? marker.value("pid", 0L) : 0L;
         if (pid != 0 && pid != current_pid() && process_alive(pid))
             continue;
-        if (s.on && marker.is_object()) {
+        // The operating system ended that session (end_session_by_os): not a crash.
+        const bool os_ended = marker.is_object() && marker.value("phase", std::string()) == "os_session_end";
+        if (s.on && marker.is_object() && !os_ended) {
             json props = {{"version", marker.value("version", std::string())}};
+            // Where it was and what ended it (older markers have neither).
+            for (const char *key : {"phase", "exception", "at"})
+                if (marker.contains(key) && marker[key].is_string() && !marker[key].get<std::string>().empty())
+                    props[key] = marker[key].get<std::string>().substr(0, 80);
             // "alive" is refreshed by every flush, so this is the uptime to within a few minutes.
             int64_t started = marker.value("started", int64_t(0)), alive = marker.value("alive", started);
             if (started > 0 && alive >= started)
@@ -320,7 +466,10 @@ void start(AppConfig &config, bool first_run)
         fs::remove(marker_file, rm_ec);
     }
     s.started_ms = now_ms();
+    s.phase      = "startup";
     write_marker_locked(s);
+    if (s.on)
+        install_crash_handlers();
 
     if (s.on) {
         json saved = json::parse(read_file(pending_path()), nullptr, false);
@@ -338,9 +487,48 @@ void start(AppConfig &config, bool first_run)
 
 bool enabled() { return state().on; }
 
+void set_phase(const char *phase)
+{
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.started || !phase || s.phase == phase)
+        return;
+    s.phase = phase;
+    write_marker_locked(s);
+}
+
+void end_session_by_os()
+{
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.started)
+        return;
+    s.phase = "os_session_end";
+    write_marker_locked(s);
+}
+
+std::string code_location(const void *address)
+{
+#ifdef _WIN32
+    char out[160];
+    code_location_raw(address, out, sizeof(out));
+    return out;
+#else
+    (void) address;
+    return {};
+#endif
+}
+
 bool disabled_by_environment() { return state().env_off; }
 
 bool is_first_run() { return state().first_run; }
+
+std::string install_id()
+{
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    return s.started && s.on ? s.install : std::string();
+}
 
 void set_enabled(AppConfig &config, bool on)
 {
@@ -459,6 +647,7 @@ void shutdown()
 
     boost::system::error_code ec;
     fs::remove(marker_path(session), ec);
+    uninstall_crash_handlers();
 }
 
 std::string preset_base_name(const PresetCollection &collection, const Preset &preset)

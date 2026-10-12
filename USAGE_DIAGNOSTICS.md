@@ -51,16 +51,21 @@ Each event has a name, a timestamp and the properties below. Nothing else is att
 |---|---|---|
 | `app_start` | Once per launch, about 30 seconds in | Operating system version (for example `10.0.26100`); `x64` or `arm64`; the app's display language; number of processor cores; installed memory in GB (rounded); whether this is the first launch of a new installation; whether stealth mode and dark mode are on; whether the Bambu Lab network plug-in is off, loaded or failed to load, and its version when loaded. |
 | `preset_selected` | When a different printer, process or filament preset is selected | Which kind (printer, process or filament); the built-in preset's name, or the built-in preset a custom one is based on, or `custom`; whether it is a built-in preset. |
-| `slice` | When slicing finishes | Result (`ok`, `error` or `cancelled`); how long it took; the number of plates, objects and copies; the printer, process and filament presets, named as in `preset_selected`; the printer's vendor; the material types (for example `PLA`); the **names** of up to 60 settings that differ from the built-in presets (for example `wall_loops`, never their values); which of a fixed list of features are on (non-planar printing, virtual 5-axis, Z anti-aliasing, wave overhangs, adaptive layer height, supports, spiral vase, prime tower, arc fitting, make-overhang-printable, brim ears, independent support layer height, cut planes, variable layer height, height-range modifiers, modifier parts, painted supports, seams, colours and fuzzy skin) and on how many copies; the chosen value of a fixed list of options with built-in choices (support type, wall generator, sparse infill pattern, slicing mode, print sequence, ironing type, fuzzy skin, seam position, timelapse type). If slicing failed: the type of error, and its message cut to the first line and 160 characters, with object, part and project names, quoted text and file paths removed. For errors in custom G-code templates only the type is sent, because the message would quote your own G-code. |
+| `slice` | When slicing finishes | Result (`ok`, `error` or `cancelled`); how long it took; the number of plates, objects and copies; the printer, process and filament presets, named as in `preset_selected`; the printer's vendor; the material types (for example `PLA`); the **names** of up to 60 settings that differ from the built-in presets (for example `wall_loops`, never their values); which of a fixed list of features are on (non-planar printing, virtual 5-axis, Z anti-aliasing, wave overhangs, adaptive layer height, supports, spiral vase, prime tower, arc fitting, make-overhang-printable, brim ears, independent support layer height, cut planes, variable layer height, height-range modifiers, modifier parts, painted supports, seams, colours and fuzzy skin) and on how many copies; the chosen value of a fixed list of options with built-in choices (support type, wall generator, sparse infill pattern, slicing mode, print sequence, ironing type, fuzzy skin, seam position, timelapse type). If slicing failed: the type of error, and its message cut to the first line and 160 characters, with object, part and project names, quoted text and file paths removed. For errors in custom G-code templates only the type is sent, because the message would quote your own G-code. If slicing itself crashed (a hardware error such as an access violation), the error's name and where it happened, as a program file name and offset. |
 | `export` | When G-code is exported or sent | What kind: `gcode` (and whether to removable media), `gcode_3mf` (and whether all plates), or `send` (and the kind of printer connection, for example `octoprint`; never its address). |
-| `crash` | At the next launch after the app closed unexpectedly | The version that crashed and roughly how long it had been running. |
+| `update_offered` | When the update check finds a newer version | The new version number; whether you checked by hand; whether you are signed in; what happened next: downloaded in the background, shown the update dialog and what you chose there (update, sign in, download page or close), skipped, or no in-app update possible (no installer for your platform, or a copy that cannot replace itself). |
+| `update_download` | When an update download finishes | The version; whether it succeeded; how many seconds it took; if it failed, the kind of failure (for example `network`, `checksum`, `not_signed_in`) and the HTTP status. Never the error text. |
+| `update_applied` | At the first launch after an update was downloaded | The version it was updating from and to; whether this launch is now the new version; how handing over to the installer went when the app closed (started, could not start, or another copy was still open). |
+| `account_signin` | When you sign in to Unlayered from the app | Whether it worked, was cancelled or failed, and whether an update or the Help menu asked for it. Never your email address or account. |
+| `crash` | At the next launch after the app closed unexpectedly | The version that crashed, roughly how long it had been running, and what it was doing (`startup`, `running`, `slicing` or `closing`). On Windows, when an unhandled error ended it: the error code (for example `0xC0000005`) and where it happened, as a program file name and an offset into it (for example `UnlayeredSlicer.dll+0x1a2b3c`, never a folder or path). A session that ended because Windows logged off or shut down is not reported. |
 | `session_end` | When the app closes | How long it was open, and counts of what was used during the session: tabs opened (`tab:<name>`), tools opened (`gizmo:<name>`, for example `gizmo:cut_planes`) and files opened by type (`import:stl`, `import:3mf`, ... or `import:other`). |
 
 ## On your computer
 
 Diagnostics keep a few small files in the `usage` folder of the app's data folder:
 
-- `session-<id>.json` while the app is running: its process id, version and start time, and the
+- `session-<id>.json` while the app is running: its process id, version, start time, what it is
+  doing (`startup`, `running`, `slicing`, `closing`), and the
   time it last sent diagnostics. It is deleted when the app closes normally. One left behind means
   that session crashed, which is reported as a `crash` event.
 - `pending.json`: batches that could not be sent (offline, or the site was down), at most 20. They
@@ -70,6 +75,12 @@ Diagnostics keep a few small files in the `usage` folder of the app's data folde
 
 Batches of at most 100 events go to `https://unlayered3d.com/api/slicer/telemetry` over HTTPS, every
 few minutes and when the app closes. No sign-in is used, and nothing in a request identifies you.
+
+**The update check carries the install id too.** While diagnostics are on, the app's check for a new version
+(`https://unlayered3d.com/slicer/latest.json`) sends the same `install` id in an `X-Unlayered-Install` header, so
+the site can count how many different installs check for updates rather than how many times. The site never
+stores the id itself, only a per-day hash sketch that can say how many, not which. With diagnostics off (or
+`UNLAYERED_NO_TELEMETRY` set) the update check sends no id.
 
 On the site, the request's IP address is used only to limit how often one address can send and to
 look up an approximate country. Neither the IP address nor any request header is stored. The

@@ -3,6 +3,7 @@
 
 #include "GCodeProcessor.hpp"
 #include "../PrintConfig.hpp"
+#include "TrunnionAC.hpp"
 
 #include <optional>
 
@@ -28,6 +29,10 @@ struct HotendCollisionParams
 {
     HotendEnvelope envelope;          // height <= 0 disables the check
     bool           upright = false;   // virtual 5-axis: the nozzle stays vertical
+    // A/C table-table machine: the head never tilts, the table does, so the head's faces in the bed
+    // frame come from the (A, C) the exporter picks for each episode (TrunnionAC::solve_sequence),
+    // not from tool_head_frame()'s B/C model.
+    std::optional<TrunnionAC::Machine> ac;
     double         margin  = 0.5;     // lateral tolerance on every face (line width / 2 + nozzle flat), mm
     double         eps     = 0.3;     // ignore material within this height above the tip: the layer being printed
 };

@@ -405,11 +405,14 @@ SCENARIO("Cut-plane segments slice as complementary geometry", "[cutplanes][slic
 
         THEN("the control run without cut planes does emit arcs") {
             // Guards the negative assertion below: if this fixture produced no arcs even when
-            // unsegmented, the "no arcs" check would prove nothing.
+            // unsegmented, the "no arcs" check would prove nothing. A planar print: with
+            // enable_nonplanar on, normalize_fdm turns arc fitting off for the whole print.
+            DynamicPrintConfig planar = config;
+            planar.set_deserialize_strict({ { "enable_nonplanar", "0" } });
             Slic3r::Print print;
             Model model;
             make_cube_plus_sphere(model, /*planes_enabled*/ false);
-            print.apply(model, config);
+            print.apply(model, planar);
             REQUIRE(print.objects().size() == 1);
             REQUIRE(! print.objects().front()->is_segment());
             const std::string gcode = export_gcode_string(print, "arc-control");

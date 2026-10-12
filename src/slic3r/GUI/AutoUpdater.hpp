@@ -2,6 +2,7 @@
 #define slic3r_GUI_AutoUpdater_hpp_
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -92,6 +93,8 @@ private:
     boost::filesystem::path        m_installer;
     std::optional<boost::filesystem::path> m_install_dir;
     bool                           m_relaunch{false};
+    // UNLAYERED_MOD -- for the update_download diagnostics event: how long the download took.
+    std::chrono::steady_clock::time_point m_download_started;
 };
 
 // The "## <version>" sections of a CHANGELOG.md that are newer than `after` and no newer than

@@ -284,6 +284,8 @@ set(lisbslic3r_sources
     GCode/Thumbnails.cpp
     GCode/Thumbnails.hpp
     GCode/ToolOrdering.cpp
+    GCode/TrunnionAC.cpp
+    GCode/TrunnionAC.hpp
     GCode/ToolOrdering.hpp
     GCode/OrderingStrategies.cpp
     GCode/OrderingStrategies.hpp

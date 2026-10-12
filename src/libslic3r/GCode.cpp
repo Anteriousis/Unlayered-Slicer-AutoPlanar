@@ -4620,8 +4620,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 
     // UNLAYERED_MOD — park the rotary axes back at identity at the end of a multiplanar print.
     // Only for machines that actually have them: on an ordinary 3-axis printer this used to emit a
-    // stray 20 mm lift plus an invalid "B-90 C0" on every single print.
-    if (m_config.enable_nonplanar.value) {
+    // stray 20 mm lift plus an invalid "B-90 C0" on every single print. Virtual 5-axis writes no
+    // rotary axes either, so it has nothing to park and gets no lift: the 20 mm climb was the highest
+    // move of every virtual print and refused it under "Max print height" when the part was within
+    // 20 mm of that limit. The end G-code lifts the head as on any 3-axis print.
+    if (m_config.enable_nonplanar.value && this->emit_rotary_axes()) {
         //lift z after final thingy
         file.write(m_writer.travel_to_z(m_writer.get_position().z() + 20.0, "lift before rotation"));
 

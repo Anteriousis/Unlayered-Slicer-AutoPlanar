@@ -1138,6 +1138,8 @@ void MainFrame::update_edge_panels()
 void MainFrame::shutdown()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "MainFrame::shutdown enter";
+    // A crash from here until OnExit is reported as one while closing.
+    UsageTelemetry::set_phase("closing");
     if (m_project != nullptr)
         m_project->shutdown();
     m_plugin_pages.shutdown();

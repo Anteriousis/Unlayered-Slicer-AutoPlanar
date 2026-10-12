@@ -126,3 +126,116 @@ TEST_CASE("Usage diagnostics keep batches and find crashes offline", "[UsageTele
     boost::system::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+
+// UNLAYERED_MOD 2026-10-11 (0.1.4) -- a crash says where it happened. Day one of 0.1.3 reported 17
+// "crashes" with nothing to go on: no phase, no exception, no location.
+TEST_CASE("Usage diagnostics report a crash's phase, exception and location, and skip OS session ends", "[UsageTelemetry]")
+{
+    const std::string old_data_dir = data_dir();
+    fs::path dir = fs::temp_directory_path() / fs::unique_path("usage-telemetry-%%%%-%%%%");
+    fs::create_directories(dir / "usage");
+    set_data_dir(dir.string());
+
+    AppConfig config;
+    config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
+    config.set_bool("usage_diagnostics", true);
+
+    // Two dead sessions: one crashed while slicing, one the operating system ended.
+    auto write_marker = [&](const std::string &name, const json &body) {
+        std::ofstream out((dir / "usage" / name).string());
+        out << body.dump();
+    };
+    write_marker("session-crashed.json", {{"pid", 0x7ffffff0}, {"version", "0.1.4"}, {"started", 1000}, {"alive", 31000},
+                                          {"phase", "slicing"}, {"exception", "0xC0000005"}, {"at", "UnlayeredSlicer.dll+0x1a2b3c"}});
+    write_marker("session-logoff.json", {{"pid", 0x7ffffff1}, {"version", "0.1.4"}, {"started", 1000}, {"alive", 31000},
+                                         {"phase", "os_session_end"}});
+
+    UsageTelemetry::start(config, false);
+    if (UsageTelemetry::disabled_by_environment()) {
+        UsageTelemetry::shutdown();
+        set_data_dir(old_data_dir);
+        SKIP("UNLAYERED_NO_TELEMETRY is set on this machine");
+    }
+
+    // The live session's marker carries the phase the app says it is in.
+    UsageTelemetry::set_phase("slicing");
+    fs::path live;
+    for (fs::directory_iterator it(dir / "usage"), end; it != end; ++it)
+        if (it->path().filename().string().rfind("session-", 0) == 0)
+            live = it->path();
+    REQUIRE(!live.empty());
+    CHECK(json::parse(slurp(live))["phase"] == "slicing");
+
+#ifdef _WIN32
+    // A code address is a module file name and an offset, never a path.
+    const std::string here = UsageTelemetry::code_location(reinterpret_cast<const void *>(&slurp));
+    INFO(here);
+    CHECK(here.find("slic3rutils_tests") != std::string::npos);
+    CHECK(here.find("+0x") != std::string::npos);
+    CHECK(here.find('\\') == std::string::npos);
+    CHECK(here.find('/') == std::string::npos);
+#endif
+
+    UsageTelemetry::shutdown();
+
+    json crash;
+    int  crashes = 0;
+    json batches = json::parse(slurp(dir / "usage" / "pending.json"));
+    for (const auto &body : batches) {
+        // Named, not iterated as a temporary: operator[] on a temporary would dangle.
+        const json batch = json::parse(body.get<std::string>());
+        for (const auto &e : batch["events"])
+            if (e["name"] == "crash") {
+                ++crashes;
+                crash = e["props"];
+            }
+    }
+    // Only the real crash: the session the operating system ended is not one.
+    INFO(slurp(dir / "usage" / "pending.json"));
+    CHECK(crashes == 1);
+    CHECK(crash["phase"] == "slicing");
+    CHECK(crash["exception"] == "0xC0000005");
+    CHECK(crash["at"] == "UnlayeredSlicer.dll+0x1a2b3c");
+    CHECK(crash["uptime_s"] == 30);
+    CHECK(!fs::exists(dir / "usage" / "session-logoff.json"));
+
+    set_data_dir(old_data_dir);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+
+// UNLAYERED_MOD 2026-10-11 (0.1.4) -- the update check sends the install id, and only while
+// diagnostics are on.
+TEST_CASE("Usage diagnostics give the install id out only while on", "[UsageTelemetry]")
+{
+    const std::string old_data_dir = data_dir();
+    fs::path dir = fs::temp_directory_path() / fs::unique_path("usage-telemetry-%%%%-%%%%");
+    fs::create_directories(dir);
+    set_data_dir(dir.string());
+
+    AppConfig config;
+    config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
+    config.set_bool("usage_diagnostics", true);
+
+    CHECK(UsageTelemetry::install_id().empty()); // not started yet
+    UsageTelemetry::start(config, true);
+    if (UsageTelemetry::disabled_by_environment()) {
+        CHECK(UsageTelemetry::install_id().empty());
+        UsageTelemetry::shutdown();
+        set_data_dir(old_data_dir);
+        SKIP("UNLAYERED_NO_TELEMETRY is set on this machine");
+    }
+    CHECK(UsageTelemetry::install_id() == config.get("usage_diagnostics_id"));
+    CHECK(UsageTelemetry::install_id().size() == 36);
+
+    UsageTelemetry::set_enabled(config, false);
+    CHECK(UsageTelemetry::install_id().empty());
+    UsageTelemetry::shutdown();
+    CHECK(UsageTelemetry::install_id().empty());
+
+    set_data_dir(old_data_dir);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}

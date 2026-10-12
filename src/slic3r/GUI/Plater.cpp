@@ -12692,7 +12692,7 @@ static bool usage_ignored_key(const std::string &key)
     return ignored.count(key) > 0;
 }
 
-static void record_usage_slice(const Model &model, int plate_count, const SlicingProcessCompletedEvent &evt)
+static void record_usage_slice(const Model &model, int plate_count, const SlicingProcessCompletedEvent &evt, const std::string &crash_site)
 {
     if (!UsageTelemetry::enabled())
         return;
@@ -12800,6 +12800,17 @@ static void record_usage_slice(const Model &model, int plate_count, const Slicin
     if (evt.error()) {
         std::string kind    = usage_error_kind(evt);
         props["error_type"] = kind;
+        // A hardware exception's message is one of BackgroundSlicingProcess' fixed names ("Access
+        // violation", ...): keep it, quotes and all would otherwise be redacted to "<...>". Where it
+        // faulted is a module file name and offset.
+        if (kind == "hard_crash") {
+            std::string first = evt.format_error_message().first;
+            first             = first.substr(0, first.find('\n'));
+            first.erase(std::remove(first.begin(), first.end(), '"'), first.end());
+            props["error"] = first.substr(0, 160);
+            if (!crash_site.empty())
+                props["crash_at"] = crash_site;
+        } else
         // A G-code template error quotes the person's own custom G-code; its kind is enough.
         if (kind != "gcode_template") {
             names.push_back(wxGetApp().plater()->get_project_name().ToUTF8().data());
@@ -12814,6 +12825,7 @@ static void record_usage_slice(const Model &model, int plate_count, const Slicin
 
 void Plater::priv::on_slicing_began()
 {
+    UsageTelemetry::set_phase("slicing");
     clear_warnings();
     notification_manager->close_notification_of_type(NotificationType::SignDetected);
     notification_manager->close_notification_of_type(NotificationType::ExportFinished);
@@ -12966,7 +12978,8 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         is_finished = true;
     }
 
-    record_usage_slice(this->model, this->partplate_list.get_plate_count(), evt);
+    record_usage_slice(this->model, this->partplate_list.get_plate_count(), evt, this->background_process.hard_crash_site());
+    UsageTelemetry::set_phase("running");
 
     //BBS: set the current plater's slice result to valid
     if (!this->background_process.empty())

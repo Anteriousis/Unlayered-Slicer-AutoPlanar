@@ -281,6 +281,15 @@ enum class AxisSelection {
     Count,
 };
 
+// UNLAYERED_MOD -- an A/C table-table machine reaches every tilted tool axis two ways, (A, C) and
+// (-A, C + 180). Which one the exporter takes (GCode/TrunnionAC.cpp), within the A limits.
+enum class AcSolution {
+    SmallestMove,   // whichever needs the least A + C travel from the current pose
+    NegativeA,      // always A <= 0 when the limits allow it
+    PositiveA,      // always A >= 0 when the limits allow it
+    Count,
+};
+
 // BELT_MOD -- belt printer tilt axis (OrcaSlicer's BeltRotationAxis, kept verbatim so belt printer
 // profiles carry over). The single "belt tilt": it drives the slicing rotation of every un-cut
 // object (PrintObject::update_slice_frame) and the post-slice machine frame (MachineFrameTransform).
@@ -448,11 +457,14 @@ enum BrimType {
     btAutoBrim,  // BBS
     btEar, // Orca
     btPainted,  // BBS
-    btLeadingEdgeOnly,   // BELT_MOD: belt printers, the apron ahead of the part only
     btOuterOnly,
     btInnerOnly,
     btOuterAndInner,
     btNoBrim,
+    // BELT_MOD: belt printers, the apron ahead of the part only. Last, after the upstream values:
+    // the brim_type combo and the object table map a list position straight to this value, so
+    // brim_type's enum_values must stay in enum order.
+    btLeadingEdgeOnly,
 };
 
 enum TimelapseType : int {
@@ -780,6 +792,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BedType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SkirtType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InputShaperType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AxisSelection)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AcSolution)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BeltRotationAxis)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(RemapAxis)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FirstLayerPlaneMode)
@@ -1707,6 +1720,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                nonplanar_gantry_height))
     ((ConfigOptionFloat,                nonplanar_virtual_max_angle))
     ((ConfigOptionFloat,                nonplanar_virtual_max_z))
+    // UNLAYERED_MOD -- A/C table-table ("trunnion") machines: the exported G-code is converted to
+    // machine A/C coordinates by GCode/TrunnionAC.cpp. Read only when axis_selection is A/C.
+    ((ConfigOptionFloat,                ac_pivot_height))
+    ((ConfigOptionFloat,                ac_c_axis_offset_x))
+    ((ConfigOptionFloat,                ac_c_axis_offset_y))
+    ((ConfigOptionEnum<AcSolution>,     ac_solution))
+    ((ConfigOptionFloat,                ac_table_radius))
+    ((ConfigOptionFloat,                ac_transition_clearance))
+    ((ConfigOptionFloat,                ac_rotation_speed))
     // BELT_MOD -- belt printer machine description. The tilt (axis + angle) is the machine's build
     // direction: un-cut objects slice rotated by it and the emitted G-code is mapped into the
     // tilted-gantry machine frame by gcode_remap_* + MachineFrameTransform (GCode/BeltKinematics).

@@ -5680,7 +5680,7 @@ PageShp TabPrinter::build_kinematics_page()
     // key is now derived in DynamicPrintConfig::normalize_fdm_1.
     optgroup->append_single_option_line("axis_selection", "multiplanar_tutorial#printer-settings");
     {
-        Line line = { L("A axis (about X)"), L("Rotation limits of the A axis (rotation about X). Stored for the machine definition; not consumed by slicing yet.") };
+        Line line = { L("A axis (about X)"), L("Rotation limits of the A axis (rotation about X). An A/C printer's G-code keeps A inside them.") };
         line.label_path = "multiplanar_tutorial#printer-settings";
         line.append_option(optgroup->get_option("axis_a_rotation_min"));
         line.append_option(optgroup->get_option("axis_a_rotation_max"));
@@ -5696,13 +5696,26 @@ PageShp TabPrinter::build_kinematics_page()
         optgroup->append_line(line);
     }
     {
-        Line line = { L("C axis (about Z)"), L("Rotation limits of the C axis (rotation about Z). Stored for the machine definition; not consumed by slicing yet.") };
+        Line line = { L("C axis (about Z)"), L("Rotation limits of the C axis (rotation about Z). An A/C printer's G-code keeps C inside them unless C is continuous.") };
         line.label_path = "multiplanar_tutorial#printer-settings";
         line.append_option(optgroup->get_option("axis_c_rotation_min"));
         line.append_option(optgroup->get_option("axis_c_rotation_max"));
         line.append_option(optgroup->get_option("axis_c_continuous"));
         optgroup->append_line(line);
     }
+    // UNLAYERED_MOD -- A/C table-table ("trunnion") geometry. Shown only for an A/C printer.
+    optgroup->append_single_option_line("ac_pivot_height", "multiplanar_tutorial#printer-settings");
+    {
+        Line line = { L("C axis offset"), L("Where the C axis (the turntable) pierces the bed, relative to the bed centre, at A = C = 0.") };
+        line.label_path = "multiplanar_tutorial#printer-settings";
+        line.append_option(optgroup->get_option("ac_c_axis_offset_x"));
+        line.append_option(optgroup->get_option("ac_c_axis_offset_y"));
+        optgroup->append_line(line);
+    }
+    optgroup->append_single_option_line("ac_solution", "multiplanar_tutorial#printer-settings");
+    optgroup->append_single_option_line("ac_table_radius", "multiplanar_tutorial#printer-settings");
+    optgroup->append_single_option_line("ac_transition_clearance", "multiplanar_tutorial#printer-settings");
+    optgroup->append_single_option_line("ac_rotation_speed", "multiplanar_tutorial#printer-settings");
     // radius / max_build_height / min_build_height are deliberately NOT shown. They feed nothing but
     // the translucent per-chunk cylinder drawn in the Prepare view (GLCanvas3D::_render_chunk_build_volumes
     // is their only reader); they constrain no slicing and validate nothing, so presenting them beside
@@ -6643,6 +6656,15 @@ void TabPrinter::toggle_options()
                          "nonplanar_gantry_height",
                          "nonplanar_virtual_max_angle", "nonplanar_virtual_max_z"})
             toggle_line(opt, enable_nonplanar);
+        // UNLAYERED_MOD -- the A/C machine geometry only means something on an A/C printer.
+        {
+            // A/B (0.1.4, a rough guess) reuses the same geometry: the pivot height and its offset.
+            const AxisSelection sel = m_config->opt_enum<AxisSelection>("axis_selection");
+            const bool is_ac = enable_nonplanar && (sel == AxisSelection::AC || sel == AxisSelection::AB);
+            for (auto opt : {"ac_pivot_height", "ac_c_axis_offset_x", "ac_solution", "ac_table_radius",
+                             "ac_transition_clearance", "ac_rotation_speed"})
+                toggle_line(opt, is_ac);
+        }
 
         // Within the section, grey out the rotary axis that is NOT part of the selected
         // pair (e.g. A/B selected -> C's options are disabled), and grey out an axis's

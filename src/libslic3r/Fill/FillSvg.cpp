@@ -9,6 +9,8 @@
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <map>
 #include <mutex>
@@ -16,6 +18,60 @@
 #include <tuple>
 
 namespace Slic3r {
+
+// The element whose id attribute is `id`: a self-closing tag, or the tag through its matching
+// close tag (nested tags of the same name are counted). Found by plain string search, not a regex:
+// the id comes from the file and may contain regex syntax, and a backtracking regex across a large
+// element recurses once per character, which can overflow a slicing thread's stack.
+static std::string svg_element_by_id(const std::string &text, const std::string &id)
+{
+    auto is_name_char = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+    auto name_at = [&text, &is_name_char](size_t pos) {
+        size_t end = pos;
+        while (end < text.size() && is_name_char(text[end]))
+            ++ end;
+        return text.substr(pos, end - pos);
+    };
+    for (size_t at = text.find(id); at != std::string::npos && ! id.empty(); at = text.find(id, at + 1)) {
+        // Must be the whole value of an id attribute: id="<id>", spaces allowed around '='.
+        if (at == 0 || text[at - 1] != '"' || at + id.size() >= text.size() || text[at + id.size()] != '"')
+            continue;
+        size_t q = at - 1;
+        while (q > 0 && std::isspace(static_cast<unsigned char>(text[q - 1])))
+            -- q;
+        if (q == 0 || text[q - 1] != '=')
+            continue;
+        -- q;
+        while (q > 0 && std::isspace(static_cast<unsigned char>(text[q - 1])))
+            -- q;
+        if (q < 3 || text.compare(q - 2, 2, "id") != 0 || ! std::isspace(static_cast<unsigned char>(text[q - 3])))
+            continue;
+        // Inside a tag: the nearest '<' before it, with no '>' in between.
+        const size_t start = text.rfind('<', q);
+        if (start == std::string::npos || text.find('>', start) < at)
+            continue;
+        const std::string name = name_at(start + 1);
+        const size_t open_end = text.find('>', at);
+        if (name.empty() || open_end == std::string::npos)
+            continue;
+        if (text[open_end - 1] == '/')
+            return text.substr(start, open_end + 1 - start);
+        int    depth = 1;
+        size_t pos   = open_end + 1;
+        for (size_t lt = text.find('<', pos); lt != std::string::npos; lt = text.find('<', pos)) {
+            const size_t gt = text.find('>', lt);
+            if (gt == std::string::npos)
+                break;
+            pos = gt + 1;
+            if (text[lt + 1] == '/' && name_at(lt + 2) == name) {
+                if (-- depth == 0)
+                    return text.substr(start, pos - start);
+            } else if (name_at(lt + 1) == name && text[gt - 1] != '/')
+                ++ depth;
+        }
+    }
+    return {};
+}
 
 // nanosvg does not implement <use>: replace every <use href="#id" x y transform> with the
 // referenced element wrapped in a <g> carrying the equivalent transform, so cloned art (the usual
@@ -44,11 +100,7 @@ static std::string svg_expand_use_elements(std::string svg_text)
             std::string replacement; // empty: drop an unresolvable <use>
             if (href.size() > 1 && href[0] == '#') {
                 const std::string id = href.substr(1);
-                // The referenced element: a self-closing tag, or an open/close pair of the same name.
-                const std::regex ref_re(R"re(<(\w+)\b[^>]*\bid\s*=\s*")re" + id + R"re("[^>]*(?:/>|>[\s\S]*?</\1\s*>))re");
-                std::smatch rm;
-                if (std::regex_search(svg_text, rm, ref_re)) {
-                    std::string element = rm[0].str();
+                if (std::string element = svg_element_by_id(svg_text, id); ! element.empty()) {
                     element = std::regex_replace(element, std::regex(R"re(\sid\s*=\s*"[^"]*")re"), std::string(), std::regex_constants::format_first_only);
                     const std::string x = attr(attrs, "x"), y = attr(attrs, "y"), transform = attr(attrs, "transform");
                     std::string t = transform;
@@ -74,12 +126,21 @@ static std::string svg_expand_use_elements(std::string svg_text)
 // of its own size. Returns the original text when there is no usable pattern.
 static std::string svg_pattern_cell_as_document(const std::string &svg_text)
 {
-    static const std::regex pattern_re(R"(<pattern\b([^>]*)>([\s\S]*?)</pattern>)", std::regex::icase);
-    std::smatch m;
-    if (! std::regex_search(svg_text, m, pattern_re))
+    // Plain string search for the same reason as svg_element_by_id(); tag names compare
+    // case-insensitively, as the regex this replaces did.
+    std::string lower = svg_text;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    size_t open = lower.find("<pattern");
+    while (open != std::string::npos && open + 8 < lower.size() && ! std::isspace(static_cast<unsigned char>(lower[open + 8])) && lower[open + 8] != '>')
+        open = lower.find("<pattern", open + 1);
+    if (open == std::string::npos)
         return svg_text;
-    const std::string attrs = m[1].str();
-    const std::string inner = m[2].str();
+    const size_t open_end = svg_text.find('>', open);
+    const size_t close    = open_end == std::string::npos ? std::string::npos : lower.find("</pattern>", open_end);
+    if (close == std::string::npos)
+        return svg_text;
+    const std::string attrs = svg_text.substr(open + 8, open_end - open - 8);
+    const std::string inner = svg_text.substr(open_end + 1, close - open_end - 1);
     auto attr = [&attrs](const char *name) -> std::string {
         const std::regex re(std::string(R"re((?:^|\s))re") + name + R"re(\s*=\s*"([^"]*)")re");
         std::smatch am;

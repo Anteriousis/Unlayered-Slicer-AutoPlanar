@@ -283,3 +283,32 @@ TEST_CASE("A world direction below the slice frame's horizon leans along the sam
     const Vec3d line = up.z() < 0. ? Vec3d(- up) : up;
     CHECK(lean.slope.x() * line.x() > 0.);
 }
+
+TEST_CASE("A leaning run shifts an enforcer volume once", "[SupportDirection]")
+{
+    // The generators hand project_and_append_custom_facets() the enforcer volumes that
+    // slice_support_volumes() has already shifted into the sheared frame. With nothing painted it
+    // must leave them alone; shifting them again put the enforcer z * slope off at every layer.
+    Slic3r::Print print;
+    Slic3r::Model model;
+    const DynamicPrintConfig config = direction_config({
+        { "support_direction",   "custom" },
+        { "support_direction_b", -30. },
+        { "support_direction_c", 0. },
+    });
+    Slic3r::Test::init_print({ cantilever() }, print, model, config);
+    TriangleMesh block = make_cube(4., 4., 4.);
+    block.translate(20.f, 2.f, 8.f);
+    model.objects.front()->add_volume(std::move(block), ModelVolumeType::SUPPORT_ENFORCER);
+    print.apply(model, print.full_print_config());
+    print.process();
+
+    PrintObject &object = *print.get_object(0);
+    ScopedSupportShear shear(object);
+    REQUIRE(shear.active());
+    std::vector<Polygons> enforcers = object.slice_support_enforcers();
+    REQUIRE(std::any_of(enforcers.begin(), enforcers.end(), [](const Polygons &p) { return ! p.empty(); }));
+    const std::vector<Polygons> sliced = enforcers;
+    object.project_and_append_custom_facets(false, EnforcerBlockerType::ENFORCER, enforcers);
+    CHECK(enforcers == sliced);
+}

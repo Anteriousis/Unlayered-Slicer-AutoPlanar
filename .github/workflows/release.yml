@@ -10,9 +10,9 @@ name: Release
 # prerelease. A single alphanumeric prerelease identifier, no dots. version.inc must already say the
 # same version, minus the leading "v".
 
+# Manual only (Actions > Run workflow): automatic runs on push, pull request or a schedule
+# cost money on the private repository, so none start on their own.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       dry_run:

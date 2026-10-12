@@ -10,11 +10,11 @@
 
 Unlayered Slicer is Unlayered 3D's fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer). It is built on OrcaSlicer 2.5.0-dev and keeps its feature set: calibration tools, wall and seam control, adaptive layer heights, tree supports, multi-material printing, and network printing through Klipper, PrusaLink, OctoPrint, Duet and others.
 
-This README describes **Unlayered Slicer 0.1.3**.
+This README describes **Unlayered Slicer 0.1.4**.
 
 - **Website:** <https://unlayered3d.com>
 - **What's new:** [CHANGELOG.md](CHANGELOG.md) lists the changes in each release.
-- **Source:** this repository. Each release is tagged; [`v0.1.3`](https://github.com/Unlayered3D/Unlayered-Slicer/tree/v0.1.3) is the exact source of the 0.1.3 installer.
+- **Source:** this repository. Each release is tagged; [`v0.1.4`](https://github.com/Unlayered3D/Unlayered-Slicer/tree/v0.1.4) is the exact source of the 0.1.4 installer.
 
 # What it adds
 
@@ -22,7 +22,7 @@ This README describes **Unlayered Slicer 0.1.3**.
 
 Instead of slicing a whole model in flat layers parallel to the bed, you split it into segments with cut planes, and each segment is sliced in its own orientation. Overhangs and surfaces can then be printed in whichever direction suits them.
 
-- **Cut Planes** (left toolbar, Prepare view): place planes on an object without splitting it. A coloured preview shows the segments they produce, and each part can be given its own build direction.
+- **Cut Planes** (top toolbar, Prepare view): place planes on an object without splitting it. A coloured preview shows the segments they produce, and each part can be given its own build direction.
 - **Skeleton Cut** (Advanced mode): computes a skeleton of the model and adds a cut plane for each branch.
 - **Supports per segment**: support generation follows the segments rather than assuming one flat bed.
 - **Hotend collision check**: after slicing, a sidebar warning shows where the hotend would hit already-printed material.
@@ -30,8 +30,8 @@ Instead of slicing a whole model in flat layers parallel to the bed, you split i
 
 These features are switched on per printer: **Printer settings ▸ Motion ability ▸ Non-planar printing** (Advanced mode). The printer type there decides what the G-code looks like:
 
-- **A/B, B/C or A/C** for machines with two rotary axes. The segment orientations are written as rotary-axis moves.
-- **Virtual** for an ordinary three-axis printer. Each segment's layers are still tilted, but the nozzle stays upright and no rotary moves are written. Set **Max tilt angle** and **Max total height** to suit your hotend. Both default to 0, which means *no limit*.
+- **A/B, B/C or A/C** for machines with two rotary axes. The segment orientations are written as rotary-axis moves. **A/C** (a C turntable on an A cradle) converts the exported G-code to the machine's own coordinates, using the A/C settings under Motion ability; **A/B** is an experimental first take on a bed tilted by three independent Z leadscrews ("tri-Z"): A and B are the bed's tilt about X and Y, which the firmware turns into leadscrew heights.
+- **Virtual** for an ordinary three-axis printer. Each segment's layers are still tilted, but the nozzle stays upright and no rotary moves are written. Set **Max tilt angle** and **Max print height (from the bed)** to suit your printer. Both default to 0, which means *no limit*.
 
 ## Unlayered printers
 

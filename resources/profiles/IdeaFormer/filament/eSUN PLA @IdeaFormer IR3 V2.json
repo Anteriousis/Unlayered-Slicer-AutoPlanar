@@ -4,6 +4,7 @@
 	"inherits": "Generic PLA @IdeaFormer IR3 V2",
 	"from": "system",
 	"setting_id": "XqkviBmFHEglXueX",
+	"filament_id": "OFkrxQC4",
 	"instantiation": "true",
 	"compatible_printers": [
 		"IdeaFormer IR3 V2 0.4 nozzle"

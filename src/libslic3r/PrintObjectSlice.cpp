@@ -941,6 +941,23 @@ void groupingVolumesForBrim(PrintObject* object, LayerPtrs& layers, int firstLay
 // Idempotent; called from slice() for every object and, for cut-plane segments only, from
 // update_slicing_parameters() (ordinary objects skip that call: it costs a full mesh merge per
 // Print::apply and nothing reads their frame before slice()).
+// UNLAYERED_MOD -- an ordinary object (not a cut segment) sliced in a tilted frame on a flat bed: a
+// whole-object layer rotation (layer_rotation_b/c) that is not about Z alone. Same test as
+// support_floor_is_tilted(), minus the belt.
+static bool tilted_on_flat_bed(const PrintObject &object)
+{
+    if (object.is_segment() || object.print()->config().belt_printer.value)
+        return false;
+    return (layer_rotation_trafo(object.print()->config(), object.config()).linear() * Vec3d::UnitZ()).z() < 1. - EPSILON;
+}
+
+// A tilted object (above) that reaches below the plate: its frame is rebased onto its own minimum and
+// slice_volumes() clips it at the plate.
+static bool tilted_and_sunk(const PrintObject &object)
+{
+    return tilted_on_flat_bed(object) && object.model_object()->bounding_box_exact().min.z() < - EPSILON;
+}
+
 void PrintObject::update_slice_frame()
 {
     // Compute plate center from the incoming transform and build
@@ -1041,7 +1058,12 @@ void PrintObject::update_slice_frame()
         // the tilted frame that slab is a gantry-normal slice through above-belt material, and it
         // also lowered a sunk object's print_z against every other object on the belt. The belt
         // clip (bed_clip below) removes exactly the material under the belt instead.
-        const double sink = m_print->config().belt_printer.value ? 0. : std::min(box_min.z(), 0.0);
+        // UNLAYERED_MOD -- nor for a whole-object layer rotation (layer_rotation_b/c) on a flat bed, for
+        // the same reason: the slab left unsliced is measured along the TILTED axis, so it kept part of
+        // the material under the plate (walls printed to Z -8.3 on a sunk 45 degree benchy, the kind of
+        // print that scraped a customer's A1 bed) and dropped material above it. Rebase onto the
+        // object's own minimum; slice_volumes() clips what is under the plate.
+        const double sink = m_print->config().belt_printer.value || tilted_and_sunk(*this) ? 0. : std::min(box_min.z(), 0.0);
         tempTrafo.translation() = Eigen::Vector3d(0, 0, sink - new_box_min.z());
         // BELT_MOD -- belt schedule: raise this object's frame so print_z is comparable across the
         // objects on the belt (Print::update_belt_schedule()). Undone exactly by post_trafo_inverse.
@@ -1728,6 +1750,58 @@ void PrintObject::slice_volumes()
 
             for (size_t i = 0; i < floor_support.size() && i < m_layers.size(); ++ i)
                 m_layers[i]->segment_floor_support = std::move(floor_support[i]);
+        }
+    }
+
+    // UNLAYERED_MOD -- the build plate as a clip for a SUNK object with a whole-object layer rotation
+    // (see update_slice_frame). Keeps world z >= h/2 * cos(tilt) at each slice plane, so no bead
+    // reaches below the plate, the same margin as a cut segment's Bed clip. Leading layers it empties
+    // are dropped HERE, before the per-volume slices are copied for brim grouping and handed to the
+    // regions, so every per-layer array stays aligned. An object resting on the plate skips all this
+    // and keeps its exact old toolpaths.
+    if (tilted_and_sunk(*this) && ! m_layers.empty()) {
+        Vec3d  n_bed;
+        double k_bed;
+        this->bed_plane_in_slice_frame(n_bed, k_bed);
+        for (VolumeSlices &vs : objSliceByVolume)
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, vs.slices.size()),
+                [this, &vs, &slice_zs, n_bed, k_bed](const tbb::blocked_range<size_t> &range) {
+                    for (size_t i = range.begin(); i < range.end() && i < slice_zs.size(); ++ i) {
+                        if (vs.slices[i].empty())
+                            continue;
+                        const double margin = 0.5 * m_layers[i]->height * std::abs(n_bed.z());
+                        vs.slices[i] = intersection_ex(vs.slices[i],
+                            SegmentSupportBounds::half_plane_at(n_bed, margin - k_bed, slice_zs[i], true));
+                    }
+                });
+        const auto is_part_slices = [this](const VolumeSlices &vs) {
+            for (const ModelVolume *mv : this->model_object()->volumes)
+                if (mv->id() == vs.volume_id)
+                    return mv->is_model_part();
+            return false;
+        };
+        size_t lead = 0;
+        for (; lead + 1 < slice_zs.size(); ++ lead) {
+            bool empty = true;
+            for (const VolumeSlices &vs : objSliceByVolume)
+                if (lead < vs.slices.size() && ! vs.slices[lead].empty() && is_part_slices(vs)) {
+                    empty = false;
+                    break;
+                }
+            if (! empty)
+                break;
+        }
+        if (lead > 0) {
+            for (VolumeSlices &vs : objSliceByVolume)
+                vs.slices.erase(vs.slices.begin(), vs.slices.begin() + std::min(lead, vs.slices.size()));
+            slice_zs.erase(slice_zs.begin(), slice_zs.begin() + lead);
+            for (size_t i = 0; i < lead; ++ i)
+                delete m_layers[i];
+            m_layers.erase(m_layers.begin(), m_layers.begin() + lead);
+            m_layers.front()->lower_layer = nullptr;
+            for (Layer *layer : m_layers)
+                layer->set_id(layer->id() - lead);
+            BOOST_LOG_TRIVIAL(info) << "layer rotation: dropped " << lead << " leading layer(s) lying wholly under the build plate";
         }
     }
 

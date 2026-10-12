@@ -4,10 +4,9 @@ name: Nightly dev build
 # Build all on main with `publish` on. Nights with nothing new cost a minute of Linux runner time
 # instead of a full build. See .github/publish/README.md.
 
+# Manual only (Actions > Run workflow): automatic runs on push, pull request or a schedule
+# cost money on the private repository, so none start on their own.
 on:
-  schedule:
-    # 08:00 UTC: the middle of the night across the US.
-    - cron: '0 8 * * *'
   workflow_dispatch: # run the check by hand
 
 permissions:

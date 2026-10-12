@@ -267,3 +267,33 @@ TEST_CASE("Catfill resource and a stroke-only SVG file produce infill", "[FillSv
         REQUIRE(fill_with(ipSvg).empty());
     }
 }
+
+TEST_CASE("SVG infill <use> resolves ids that are not regex-safe", "[FillSvg]") {
+    // The referenced id is looked up by plain string search: an id with regex syntax in it used to
+    // be pasted into a std::regex, which threw and failed the slice.
+    for (const std::string id : { "cell", "cell(1)", "cell[2]", "a.b*c+" }) {
+        INFO("id " << id);
+        const std::string svg = R"svg(<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10mm" height="10mm" viewBox="0 0 10 10">
+  <defs><g id=")svg" + id + R"svg("><path d="M 1 1 L 4 1" fill="none" stroke="#000" stroke-width="0.3"/></g></defs>
+  <use href="#)svg" + id + R"svg(" x="0" y="0"/>
+  <use xlink:href="#)svg" + id + R"svg(" x="5" y="5"/>
+</svg>)svg";
+        SvgInfillTile tile;
+        REQUIRE_NOTHROW(tile = FillSvg::tile_from_svg_text(svg));
+        REQUIRE_FALSE(tile.empty());
+        // Two clones of the 3 mm stroke.
+        CHECK(tile.lines.size() == 2);
+        CHECK_THAT(tile.length, WithinAbs(6., 0.05));
+    }
+}
+
+TEST_CASE("SVG infill <use> clones a group with nested groups whole", "[FillSvg]") {
+    const char *svg = R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 10 10">
+  <defs><g id="outer"><g><path d="M 1 1 L 4 1" fill="none" stroke="#000" stroke-width="0.3"/></g>
+    <path d="M 1 2 L 4 2" fill="none" stroke="#000" stroke-width="0.3"/></g></defs>
+  <use href="#outer"/>
+</svg>)svg";
+    const SvgInfillTile tile = FillSvg::tile_from_svg_text(svg);
+    // Both strokes: the first </g> closes the nested group, not the referenced one.
+    CHECK(tile.lines.size() == 2);
+}

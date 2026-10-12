@@ -28,6 +28,7 @@ add_executable(${_TEST_NAME}_tests
     test_filament_mixer.cpp
     test_fill_plane_path.cpp
     test_fill_svg.cpp
+    test_trunnion.cpp
     test_infill_mesh_tiling.cpp
     test_geometry.cpp
     test_multimaterial_segmentation.cpp

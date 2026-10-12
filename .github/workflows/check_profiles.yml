@@ -1,20 +1,7 @@
 name: Check profiles
+# Manual only (Actions > Run workflow): automatic runs on push, pull request or a schedule
+# cost money on the private repository, so none start on their own.
 on:
-  pull_request:
-    # release/* is included because pr-merge-bot.yml lets delegates merge into
-    # it, and it gates on this workflow's result. Without it a delegated merge
-    # into a release branch would run no profile validation at all.
-    branches:
-    - main
-    - release/*
-    paths:
-    - 'resources/profiles/**'
-    # The extra JSON check also validates resources/printers/bambu_filament_ids.json,
-    # and lives in scripts/, so a PR touching only those must still run this workflow.
-    - 'resources/printers/**'
-    - 'scripts/**'
-    - ".github/workflows/check_profiles.yml"
-
   workflow_dispatch:
     inputs:
       logLevel:

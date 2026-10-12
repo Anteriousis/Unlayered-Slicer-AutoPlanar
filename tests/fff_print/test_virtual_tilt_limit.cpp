@@ -8,6 +8,8 @@
 #include "test_helpers.hpp"
 
 #include <cmath>
+#include <fstream>
+#include <boost/filesystem.hpp>
 
 using namespace Slic3r;
 
@@ -272,4 +274,187 @@ TEST_CASE("A virtual 5-axis slice steeper than the hotend allows is refused with
     const StringObjectException accepted = validate(allowed - 1.);
     INFO(accepted.string);
     CHECK(accepted.string.empty());
+}
+
+
+// UNLAYERED_MOD 2026-10-11 -- "Max print height (from the bed)" checks the toolpath only.
+//
+// The check scanned the whole written G-code, so a printer's own end G-code that lifts and
+// presents the print (Prusa MK3S: Z up, then X0 Y200) refused every virtual 5-axis slice. It was
+// most of the slice errors 0.1.3 reported on its first day.
+TEST_CASE("The virtual 5-axis height limit ignores the printer's own start and end G-code", "[VirtualTiltLimit]")
+{
+    // A 20 mm cube, no tilt: the toolpath tops out a little above 20 mm.
+    auto slice = [](double max_z) {
+        Model        model;
+        ModelObject *object = model.add_object();
+        object->add_volume(make_cube(20., 20., 20.));
+        object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "enable_nonplanar",            "1" },
+            { "axis_selection",              "virtual" },
+            { "nonplanar_virtual_max_z",     max_z },
+            { "layer_change_gcode",          "G92 E0" },
+            { "machine_start_gcode",         "G1 Z120 F600 ; start lift\n" },
+            { "machine_end_gcode",           "G1 Z150 F600 ; lift\nG1 X0 Y200 F3000 ; present print\n" },
+        });
+        Print print;
+        print.apply(model, config);
+        REQUIRE(print.config().virtual_5axis.value);
+        print.set_status_silent();
+        print.process();
+        // The height check runs on the export WITH a processor result, as the app's is (Test::gcode
+        // exports without one and would skip it). Absolute temp path, as test_cut_plane_apply does.
+        const auto out_path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("maxz-%%%%%%%%.gcode");
+        struct Remove { boost::filesystem::path p; ~Remove() { boost::system::error_code ec; boost::filesystem::remove(p, ec); } } remove{out_path};
+        GCodeProcessorResult result;
+        print.export_gcode(out_path.string(), &result, nullptr);
+        std::ifstream in(out_path.string());
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+
+    // 25 mm clears the 20 mm part. The Z120 start and Z150 end moves are the printer's, not the
+    // toolpath, and a virtual print no longer climbs 20 mm "before rotation" at the end.
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = slice(25.));
+    CHECK(gcode.find("lift before rotation") == std::string::npos);
+    CHECK(gcode.find("G1 Z150") != std::string::npos);
+
+    // 10 mm is below the part itself: still refused, naming the setting and where it is.
+    try {
+        slice(10.);
+        FAIL("a toolpath above the limit was not refused");
+    } catch (const SlicingError &e) {
+        const std::string msg = e.what();
+        INFO(msg);
+        CHECK(msg.find("Max print height (from the bed)") != std::string::npos);
+        CHECK(msg.find("Motion ability") != std::string::npos);
+        // Below 30 mm the message explains that the limit is a height, not a clearance.
+        CHECK(msg.find("measured from the bed") != std::string::npos);
+    }
+}
+
+
+// UNLAYERED_MOD 2026-10-11 (0.1.4) -- 0.1.3 diagnostics reported two slicing crashes (access
+// violation) on an FLSun V400: a delta whose round bed is centred on the origin, with cut planes,
+// virtual 5-axis, by-group sequence and a prime tower. A cube does not reproduce it on that bed with
+// any printer type, with or without the tower (the crash needs their geometry; 0.1.4's crash_at will
+// say where), but the combination is covered from now on.
+TEST_CASE("Virtual 5-axis cut planes slice on a round bed centred on the origin (FLSun V400)", "[VirtualTiltLimit][RoundBed]")
+{
+    const double deg = PI / 180.;
+    for (const Vec3d offset : { Vec3d(0., 0., 0.), Vec3d(40., -30., 0.) }) {
+        for (const char *tower : { "0", "1" })
+        for (const char *axes : { "virtual", "ab", "ac", "bc" }) {
+            Model        model;
+            ModelObject *object = model.add_object();
+            object->name        = "cube";
+            object->add_volume(make_cube(20., 20., 30.));
+            ModelInstance *instance = object->add_instance();
+            instance->set_offset(offset);
+            CutPlaneStack stack;
+            stack.enabled = true;
+            CutPlane cp;
+            cp.point  = Vec3d(10., 10., 15.);
+            cp.normal = Vec3d(std::sin(15. * deg), 0., std::cos(15. * deg)).normalized();
+            stack.planes.push_back(cp);
+            object->cut_planes  = stack;
+            instance->auto_drop = true;
+            object->ensure_on_bed();
+
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict({
+                { "printable_area",       "149.429x13.0734,147.721x26.0472,144.889x38.8229,140.954x51.303,135.946x63.3927,129.904x75,122.873x86.0365,114.907x96.4181,106.066x106.066,96.4181x114.907,86.0365x122.873,75x129.904,63.3927x135.946,51.303x140.954,38.8229x144.889,26.0472x147.721,13.0734x149.429,0x150,-13.0734x149.429,-26.0472x147.721,-38.8229x144.889,-51.303x140.954,-63.3927x135.946,-75x129.904,-86.0365x122.873,-96.4181x114.907,-106.066x106.066,-114.907x96.4181,-122.873x86.0365,-129.904x75,-135.946x63.3927,-140.954x51.303,-144.889x38.8229,-147.721x26.0472,-149.429x13.0734,-150x0,-149.429x-13.0734,-147.721x-26.0472,-144.889x-38.8229,-140.954x-51.303,-135.946x-63.3927,-129.904x-75,-122.873x-86.0365,-114.907x-96.4181,-106.066x-106.066,-96.4181x-114.907,-86.0365x-122.873,-75x-129.904,-63.3927x-135.946,-51.303x-140.954,-38.8229x-144.889,-26.0472x-147.721,-13.0734x-149.429,-0x-150,13.0734x-149.429,26.0472x-147.721,38.8229x-144.889,51.303x-140.954,63.3927x-135.946,75x-129.904,86.0365x-122.873,96.4181x-114.907,106.066x-106.066,114.907x-96.4181,122.873x-86.0365,129.904x-75,135.946x-63.3927,140.954x-51.303,144.889x-38.8229,147.721x-26.0472,149.429x-13.0734,150x-0" },
+                { "printable_height",     "410" },
+                { "enable_nonplanar",     "1" },
+                { "axis_selection",       axes },
+                { "print_sequence",       "by group" },
+                { "enable_prime_tower",   tower },
+                { "wall_generator",       "arachne" },
+                { "layer_change_gcode",   "G92 E0" },
+            });
+            INFO("offset " << offset.x() << "," << offset.y() << ", prime tower " << tower << ", axes " << axes);
+            Print print;
+            print.apply(model, config);
+            print.set_status_silent();
+            const auto out_path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("roundbed-%%%%%%%%.gcode");
+            struct Remove { boost::filesystem::path p; ~Remove() { boost::system::error_code ec; boost::filesystem::remove(p, ec); } } remove{out_path};
+            GCodeProcessorResult result;
+            // A hardware exception here kills the test run: that is the reproduction.
+            try {
+                print.process();
+                print.export_gcode(out_path.string(), &result, nullptr);
+            } catch (const SlicingError &e) {
+                // A refusal (tilt limit, collision) is fine; only a crash is the bug.
+                WARN("refused: " << e.what());
+            }
+            SUCCEED();
+        }
+    }
+}
+// UNLAYERED_MOD 2026-10-11 (0.1.4) -- a customer's A1 scraped its bed printing a tilted benchy with
+// tilted layers. An object sunk into the plate with a whole-object layer rotation was sliced from its
+// own minimum along the TILTED axis, which kept part of what is under the plate: walls went to
+// Z -8.3 on a sunk 45 degree benchy. Now it is clipped at the plate, and the export refuses any
+// toolpath below it as a last line of defence.
+TEST_CASE("A sunk object with a layer rotation is clipped at the build plate", "[VirtualTiltLimit][BelowPlate]")
+{
+    auto slice = [](double sink) {
+        Model        model;
+        ModelObject *object = model.add_object();
+        object->add_volume(make_cube(20., 20., 20.));
+        object->add_instance()->set_offset(Vec3d(100., 100., - sink));
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "enable_nonplanar",   "1" },
+            { "axis_selection",     "virtual" },
+            { "layer_rotation_b",   30 },
+            { "layer_rotation_c",   0 },
+            { "layer_change_gcode", "G92 E0" },
+        });
+        Print print;
+        print.apply(model, config);
+        REQUIRE(print.config().virtual_5axis.value);
+        print.set_status_silent();
+        print.process();
+        const auto out_path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("sunk-%%%%%%%%.gcode");
+        struct Remove { boost::filesystem::path p; ~Remove() { boost::system::error_code ec; boost::filesystem::remove(p, ec); } } remove{out_path};
+        GCodeProcessorResult result;
+        print.export_gcode(out_path.string(), &result, nullptr);
+        // Lowest Z word of the toolpath (outside the printer's own ;TYPE:Custom blocks) and the
+        // number of extruding moves.
+        std::ifstream in(out_path.string());
+        std::string   line;
+        bool          custom = false;
+        double        low_z  = 1e9;
+        size_t        extrusions = 0;
+        while (std::getline(in, line)) {
+            if (line.rfind(";TYPE:", 0) == 0) {
+                custom = line.find("Custom") != std::string::npos;
+                continue;
+            }
+            if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)
+                continue;
+            const std::string code = line.substr(0, line.find(';'));
+            if (const size_t z = code.find(" Z"); z != std::string::npos && ! custom)
+                low_z = std::min(low_z, std::atof(code.c_str() + z + 2));
+            if (code.find(" E") != std::string::npos && (code.find(" X") != std::string::npos || code.find(" Y") != std::string::npos))
+                ++ extrusions;
+        }
+        return std::make_pair(low_z, extrusions);
+    };
+
+    // Resting on the plate: nothing to clip.
+    const auto [rest_z, rest_n] = slice(0.);
+    CHECK(rest_z >= 0.);
+    CHECK(rest_n > 0);
+
+    // Sunk 8 mm: slices without being refused, and nothing goes below the plate.
+    std::pair<double, size_t> sunk;
+    REQUIRE_NOTHROW(sunk = slice(8.));
+    CHECK(sunk.first >= 0.);
+    CHECK(sunk.second > 0);
+    // Less material than the cube on the plate: the part under the plate is gone.
+    CHECK(sunk.second < rest_n);
 }

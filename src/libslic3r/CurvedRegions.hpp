@@ -73,6 +73,12 @@ public:
         const auto q=displacement(x,y,world_z(x,y,w));
         return {q.dx/(1.-q.dz),q.dy/(1.-q.dz)};
     }
+    // Gradient of a physical roof after mapping into the logical slice frame.
+    // Used only to rank candidate usefulness; field bounds are independent.
+    Gradient logical_roof_gradient(double x,double y,double z,double gx,double gy) const {
+        const auto q=displacement(x,y,z);
+        return {(1.-q.dz)*gx-q.dx,(1.-q.dz)*gy-q.dy};
+    }
 private:
     struct Sample {double value=0.,dx=0.,dy=0.,dz=0.;};
     static void check(double x,double y,double z) {
@@ -100,12 +106,14 @@ private:
 // Roof selection is a heuristic. Accepted fields have analytic bounds above;
 // bridge/support toolpaths are checked against their full bead boxes at export.
 inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triangle>& mesh,
-    double first,double step,double allowed,double solid_depth,bool sparse)
+    double first,double step,double allowed,double solid_depth,bool sparse,const std::function<void()>& cancel={})
 {
-    struct Face {double x,y,z,gx,gy,area;};
+    struct Face {double x,y,z,gx,gy,area,xmin,xmax,ymin,ymax,zmax;const Ramp::Triangle* triangle;};
     struct Box {double xmin,xmax,ymin,ymax,zmax;};
-    std::vector<Face> roofs;std::vector<Box> contacts;
+    std::vector<Face> roofs,surfaces;std::vector<Box> contacts;
+    size_t inspected=0;
     for(const auto& t:mesh) {
+        if(cancel && (++inspected%4096)==0) cancel();
         const auto& a=t[0];const auto& b=t[1];const auto& c=t[2];
         const double nx=(b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]);
         const double ny=(b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]);
@@ -117,29 +125,73 @@ inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triang
             std::min({a[1],b[1],c[1]})-1.,std::max({a[1],b[1],c[1]})+1.,zmax});
         if(nz<=0.) continue;
         const double gx=-nx/nz,gy=-ny/nz,g=std::hypot(gx,gy);
-        if(g<std::tan(.5*3.14159265358979323846/180.) || g>std::tan(30.*3.14159265358979323846/180.)) continue;
-        roofs.push_back({(a[0]+b[0]+c[0])/3.,(a[1]+b[1]+c[1])/3.,(a[2]+b[2]+c[2])/3.,gx,gy,nz*.5});
+        if(g>std::tan(30.*3.14159265358979323846/180.)) continue;
+        const Face face{(a[0]+b[0]+c[0])/3.,(a[1]+b[1]+c[1])/3.,(a[2]+b[2]+c[2])/3.,gx,gy,nz*.5,
+            std::min({a[0],b[0],c[0]}),std::max({a[0],b[0],c[0]}),std::min({a[1],b[1],c[1]}),std::max({a[1],b[1],c[1]}),zmax,&t};
+        surfaces.push_back(face);
+        if(g>=std::tan(.5*3.14159265358979323846/180.)) roofs.push_back(face);
     }
     std::stable_sort(roofs.begin(),roofs.end(),[](const Face& a,const Face& b){return a.area>b.area;});
     std::vector<Regions::Patch> patches;
+    // A compact field can make a plane worse by moving its stair-steps to the
+    // taper. Include adjacent flat roofs in the cost and require a positive
+    // sampled reduction. This is a ranking heuristic, not a finish certificate.
+    const auto benefit=[&](const Regions::Patch& p) {
+        const Regions trial({p.x-p.radius,p.x+p.radius,p.y-p.radius,p.y+p.radius,p.hi,0.},{p},allowed);
+        double before=0.,after=0.;
+        constexpr int divisions=16,samples=divisions*divisions;
+        for(const auto& f:surfaces) {
+            if(cancel && (++inspected%4096)==0) cancel();
+            if(f.zmax<=p.lo || f.xmax<=p.x-p.radius || f.xmin>=p.x+p.radius ||
+               f.ymax<=p.y-p.radius || f.ymin>=p.y+p.radius) continue;
+            const auto& t=*f.triangle;
+            const auto sample=[&](double u,double v) {
+                const double x=t[0][0]+u*(t[1][0]-t[0][0])+v*(t[2][0]-t[0][0]);
+                const double y=t[0][1]+u*(t[1][1]-t[0][1])+v*(t[2][1]-t[0][1]);
+                const double z=t[0][2]+u*(t[1][2]-t[0][2])+v*(t[2][2]-t[0][2]);
+                if(z<=p.lo || std::hypot(x-p.x,y-p.y)>=p.radius) return;
+                const auto q=trial.logical_roof_gradient(x,y,z,f.gx,f.gy);
+                before+=f.area*(f.gx*f.gx+f.gy*f.gy)/samples;
+                after+=f.area*(q.dx*q.dx+q.dy*q.dy)/samples;
+            };
+            // Both triangles of each barycentric grid cell have equal area.
+            for(int i=0;i<divisions;++i) for(int j=0;j<divisions-i;++j) {
+                sample((i+1./3.)/divisions,(j+1./3.)/divisions);
+                if(i+j<divisions-1) sample((i+2./3.)/divisions,(j+2./3.)/divisions);
+            }
+        }
+        return before>1e-12 && after<before*.98?before-after:0.;
+    };
+    size_t proposals=0;
     for(const auto& f:roofs) {
-        double radius=std::clamp(std::sqrt(f.area)*.7,1.,6.);
-        bool overlap=false;
-        for(const auto& p:patches) if(std::hypot(f.x-p.x,f.y-p.y)<radius+p.radius) {overlap=true;break;}
-        if(overlap) continue;
+        if(cancel) cancel();
         const double g=std::hypot(f.gx,f.gy),scale=std::min(1.,.70*allowed/g);
         const double gx=f.gx*scale,gy=f.gy*scale;
         if(std::hypot(gx,gy)<std::tan(.5*3.14159265358979323846/180.) || scale<.10) continue;
-        const double amplitude=.17*std::hypot(gx,gy)*radius;
-        const double depth=std::max(sparse?step:3.*step,1.875*amplitude/.20);
-        // Leave the first top-shell bridge horizontal in sparse jobs. The
-        // field starts above its bead and keeps all protected undersides flat.
-        double lo=first;
-        if(sparse) lo=std::max(lo,f.z-solid_depth+step);
-        for(const auto& b:contacts) if(f.x+radius>b.xmin && f.x-radius<b.xmax && f.y+radius>b.ymin && f.y-radius<b.ymax)
-            lo=std::max(lo,b.zmax+3.*step);
-        if(lo+depth+step*.5>f.z) continue;
-        patches.push_back({f.x,f.y,radius,lo,lo+depth,gx,gy});
+        bool covered=false;
+        for(const auto& p:patches) if(std::hypot(f.x-p.x,f.y-p.y)<p.radius+1.) {covered=true;break;}
+        if(covered) continue;
+        if(++proposals>256) break;
+        const double base=std::clamp(std::sqrt(f.area)*.7,1.,12.);
+        Regions::Patch best{};double best_gain=0.;
+        for(double factor:{.75,1.,1.5,2.,4.,8.,16.}) {
+            const double radius=std::clamp(base*factor,1.,24.);
+            bool overlap=false;
+            for(const auto& p:patches) if(std::hypot(f.x-p.x,f.y-p.y)<radius+p.radius) {overlap=true;break;}
+            if(overlap) continue;
+            const double amplitude=.17*std::hypot(gx,gy)*radius;
+            const double depth=std::max(sparse?step:3.*step,1.875*amplitude/.20);
+            double lo=first;
+            if(sparse) lo=std::max(lo,f.z-solid_depth+step);
+            for(const auto& b:contacts) if(f.x+radius>b.xmin && f.x-radius<b.xmax && f.y+radius>b.ymin && f.y-radius<b.ymax)
+                lo=std::max(lo,b.zmax+3.*step);
+            if(lo+depth+step*.5>f.z) continue;
+            const Regions::Patch p{f.x,f.y,radius,lo,lo+depth,gx,gy};
+            const double gain=benefit(p);
+            if(gain>best_gain) {best=p;best_gain=gain;}
+        }
+        if(best_gain<=0.) continue;
+        patches.push_back(best);
         if(patches.size()==64) break;
     }
     return patches;

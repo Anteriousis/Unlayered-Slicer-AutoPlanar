@@ -331,7 +331,8 @@ TEST_CASE("Automatic slicing selects independent fields for different models and
     }
     SECTION("sparse infill") {
         config.set_deserialize_strict({{"sparse_infill_density","15%"}});
-        Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
+        const TriangleMesh roof(AutoPlanesFixtures::heightfield_block(2.,2.,1,[](double x){return 10.+.05*x;}));
+        Print print;Model model;Test::init_print({roof},print,model,config);
         REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE(print.objects().front()->curved_field());
         REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(print.objects().front()->curved_field()));
         REQUIRE(print.objects().front()->printing_region(0).config().sparse_infill_density.value==15.);

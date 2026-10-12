@@ -152,8 +152,13 @@ taper and temporal blend are C2. The spatial gradient operator has eigenvalues
 `0.17*|g|*r`. Temporal derivative and Hessian bounds establish monotonicity, slope,
 normal spacing, conforming mesh error and emitted path subdivision. Local Hessian
 boxes avoid refining identity facets unnecessarily, with shared edge splits still
-propagated to neighbours. Patch selection is a roof-normal heuristic, not a surface
-finish or support-saving measurement. A patch tapers to horizontal at its edges;
+propagated to neighbours. The selector tries several patch radii and uses equal-area
+barycentric quadrature over affected upward facets, including adjacent flat roofs.
+It requires at least a 2% sampled reduction in projected squared roof slope in the
+logical slice frame. This rejects compact patches that merely move stair-stepping
+to their taper. The proposal count is bounded at 256 and the accepted patch count
+at 64; cancellation is checked during selection. The score is a roof-alignment
+heuristic, not a surface finish or support-saving measurement. A patch tapers to horizontal at its edges;
 it need not flatten an entire curved roof.
 
 An integer schedule respects explicit printer minimum normal spacing and maximum

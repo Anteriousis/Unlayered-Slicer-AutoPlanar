@@ -1337,7 +1337,7 @@ void PrintObject::slice()
                 if(regional) {
                     using namespace CurvedTransition;
                     auto patches=select_regions(triangles,m_slicing_params.first_object_layer_height,
-                        m_config.layer_height.value,allowed,solid_depth,sparse);
+                        m_config.layer_height.value,allowed,solid_depth,sparse,[this]{m_print->throw_if_canceled();});
                     patches.erase(std::remove_if(patches.begin(),patches.end(),[&](const Regions::Patch& p) {
                         return std::find(m_curved_rejected_centres.begin(),m_curved_rejected_centres.end(),Vec2d(p.x,p.y))!=m_curved_rejected_centres.end();
                     }),patches.end());

@@ -38,7 +38,27 @@ TEST_CASE("Regional selection retains useful roofs above protected undersides", 
     Regions f({-10.,10.,-10.,10.,11.,0.},p,.08);
     REQUIRE(f.identity_on_box(-10.,10.,-10.,10.,0.,3.6));
     REQUIRE(f.slope_bound()<=.08);
-    REQUIRE_FALSE(select_regions(faces,.2,.2,.08,1.,true).empty());
+    // Its only useful broad patch cannot fit inside this thin sparse top shell.
+    REQUIRE(select_regions(faces,.2,.2,.08,1.,true).empty());
     for(auto& v:faces[1]) v[2]=10.5;
     REQUIRE(select_regions(faces,.2,.2,.08,1.,false).empty());
+}
+
+TEST_CASE("Regional sparse selection ranks whole roof alignment instead of patch centre alone", "[curved-blend][regions][automatic]")
+{
+    std::vector<Ramp::Triangle> narrow{{{{0.,0.,10.},{2.,0.,10.1},{2.,2.,10.1}}},
+        {{{0.,0.,10.},{2.,2.,10.1},{0.,2.,10.}}},
+        {{{0.,0.,3.},{2.,2.,3.},{2.,0.,3.}}},{{{0.,0.,3.},{0.,2.,3.},{2.,2.,3.}}}};
+    const auto p=select_regions(narrow,.2,.2,.08,1.,true);
+    REQUIRE_FALSE(p.empty());
+    Regions f({0.,2.,0.,2.,10.1,0.},p,.08);
+    double before=0.,after=0.;
+    // Independent denser XY integration across the complete roof, including taper.
+    for(int i=0;i<100;++i) for(int j=0;j<100;++j) {
+        const double x=(i+.5)*.02,y=(j+.5)*.02;
+        const auto g=f.logical_roof_gradient(x,y,10.+.05*x,.05,0.);
+        before+=.05*.05;after+=g.dx*g.dx+g.dy*g.dy;
+    }
+    REQUIRE(after<before);
+    REQUIRE(f.identity_on_box(0.,2.,0.,2.,0.,9.));
 }

@@ -125,9 +125,23 @@ struct Ramp {
 
     static double bead_area(double width,double normal_height)
     {
-        if (!(width>0. && normal_height>0. && normal_height<=width))
-            throw std::invalid_argument("Curved blend: bead height exceeds its width");
-        return normal_height*(width-normal_height*(1.-3.14159265358979323846/4.));
+        // Match Flow::mm3_per_mm, including classic narrow gap fill. Upstream
+        // permits width < height; the validity condition is positive area.
+        const double area=normal_height*(width-normal_height*(1.-3.14159265358979323846/4.));
+        if (!std::isfinite(width) || !std::isfinite(normal_height) ||
+            !(width>0. && normal_height>0. && area>0.) || !std::isfinite(area))
+            throw std::invalid_argument("Curved blend: bead dimensions produce nonpositive or invalid flow");
+        return area;
+    }
+
+    static double max_bead_area(double width,double maximum_height)
+    {
+        if (!std::isfinite(width) || !std::isfinite(maximum_height) || width<=0. || maximum_height<=0.)
+            throw std::invalid_argument("Curved blend: invalid flow bound dimensions");
+        // The upstream area expression is a concave quadratic in height. A
+        // narrow gap-fill bead can reach its maximum BEFORE the height bound.
+        const double peak=width/(2.*(1.-3.14159265358979323846/4.));
+        return bead_area(width,std::min(maximum_height,peak));
     }
 
 private:

@@ -72,7 +72,11 @@ vertical layer height. Requested nominal layer step is an upper bound; the engin
 may choose a smaller logical step. Paths are subdivided using a Lipschitz bound
 of at most 0.005 mm vertical chord error before coordinate rounding. Physical bead
 area and segment length replace the planar geometric flow factor while retaining
-material/role ratios. This bead model is not a bonding guarantee.
+material/role ratios. Narrow classic gap fill uses the same positive-area
+width/height convention as upstream Flow. Its speed bound accounts for the area
+maximum inside the permitted height interval, not just at its upper endpoint.
+Nonpositive or nonfinite mapped flow is refused. This bead model is not a bonding
+guarantee.
 
 ## Motion and Preview
 

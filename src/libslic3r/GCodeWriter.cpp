@@ -54,7 +54,7 @@ void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field
 void GCodeWriter::set_curved_path(double w, double width, double height)
 {
     if (!m_curved_field) return;
-    if (height<=0. || width<=height) throw RuntimeError("Curved blend requires a positive non-bridge bead height smaller than its width");
+    CurvedTransition::Ramp::bead_area(width,height); // same validity rule as upstream gap fill
     m_curved_w=w; m_curved_width=width; m_curved_height=height;
 }
 
@@ -62,7 +62,7 @@ double GCodeWriter::curved_max_flow_scale() const
 {
     if (!m_curved_field) return 1.;
     const double h=m_curved_field->spacing_bounds(m_curved_height).max_vertical_mm;
-    return std::max(1.,CurvedTransition::Ramp::bead_area(m_curved_width,h) /
+    return std::max(1.,CurvedTransition::Ramp::max_bead_area(m_curved_width,h) /
         CurvedTransition::Ramp::bead_area(m_curved_width,m_curved_height) *
         std::sqrt(1.+m_curved_domain->slope()*m_curved_domain->slope()));
 }

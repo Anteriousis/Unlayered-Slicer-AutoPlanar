@@ -122,6 +122,7 @@
 #include "InstanceCheck.hpp"
 #ifdef __APPLE__
 #include "DeepLinkHandlerMac.h"
+#include "MacQuitHandler.h"
 #endif
 #include "NotificationManager.hpp"
 #include "UnsavedChangesDialog.hpp"
@@ -849,6 +850,7 @@ namespace {
 bool                     s_usage_first_run      = false;
 bool                     s_usage_app_start_sent = false;
 std::unique_ptr<wxTimer> s_usage_timer;
+std::unique_ptr<wxTimer> s_usage_heartbeat; // UsageTelemetry::heartbeat(): the hang watchdog's pulse
 
 void record_usage_app_start()
 {
@@ -873,9 +875,14 @@ void record_usage_app_start()
         {"stealth", app.app_config->get_stealth_mode()},
         {"dark_mode", GUI_App::dark_mode()},
     };
-    // The Bambu network plug-in: never opted into, or opted in and did / did not load.
+    // The Bambu network plug-in: never opted into, or opted in and did / did not load. Not asked once
+    // the app is closing: GUI_App::shutdown() has shut the plug-in down, and is_loaded() on it then
+    // crashed (SIGSEGV) -- on macOS a Quit takes seconds, so a Quit 20-30 s after launch met the
+    // first app_start tick mid-shutdown, and stop_usage_diagnostics() runs after shutdown too.
     if (!app.app_config->get_bool("installed_networking"))
         props["bambu_plugin"] = "off";
+    else if (app.is_closing())
+        props["bambu_plugin"] = "unknown";
     else if (BBLNetworkPlugin::instance().is_loaded()) {
         props["bambu_plugin"]         = "loaded";
         props["bambu_plugin_version"] = BBLNetworkPlugin::instance().get_version();
@@ -896,7 +903,8 @@ void start_usage_diagnostics(GUI_App &app)
     app.Bind(wxEVT_TIMER, [](wxTimerEvent &) {
         static int ticks = 0;
         ++ticks;
-        if (!UsageTelemetry::enabled())
+        // Nothing to do mid-shutdown; stop_usage_diagnostics() sends what is left.
+        if (!UsageTelemetry::enabled() || wxGetApp().is_closing())
             return;
         if (!s_usage_app_start_sent) {
             record_usage_app_start();
@@ -905,6 +913,14 @@ void start_usage_diagnostics(GUI_App &app)
             UsageTelemetry::flush();
     }, timer_id);
     s_usage_timer->Start(30 * 1000);
+
+    // The hang watchdog's pulse: it stops when the main thread's event loop does. Also beats in
+    // modal loops (wxTimer runs in the common run-loop modes on macOS), so an open dialog is not a hang.
+    const int heartbeat_id = wxWindow::NewControlId();
+    s_usage_heartbeat      = std::make_unique<wxTimer>(&app, heartbeat_id);
+    app.Bind(wxEVT_TIMER, [](wxTimerEvent &) { UsageTelemetry::heartbeat(); }, heartbeat_id);
+    s_usage_heartbeat->Start(5 * 1000);
+    UsageTelemetry::heartbeat();
 
     // Said once, where it can be switched off. On by default, so the person is told rather than asked.
     if (UsageTelemetry::enabled() && !app.app_config->get_bool("usage_diagnostics_notice_shown")) {
@@ -929,6 +945,7 @@ void start_usage_diagnostics(GUI_App &app)
 void stop_usage_diagnostics()
 {
     s_usage_timer.reset();
+    s_usage_heartbeat.reset();
     // A session too short for the timer still says what it ran on.
     if (UsageTelemetry::enabled())
         record_usage_app_start();
@@ -1234,6 +1251,13 @@ void GUI_App::post_init()
     // next launch would otherwise count as a crash.
     Bind(wxEVT_END_SESSION, [](wxCloseEvent &evt) {
         UsageTelemetry::end_session_by_os();
+#ifdef __APPLE__
+        // A macOS Quit ends here: AppKit exit()s after applicationWillTerminate, so OnExit (and its
+        // stop_usage_diagnostics) never runs. Send session_end and clear the marker now. Guarded
+        // against running twice. (AutoUpdater::on_app_exit is NOT run here: this event also fires at
+        // logout / shut down, when starting an installer is not safe.)
+        stop_usage_diagnostics();
+#endif
         evt.Skip();
     });
 //BBS: remove the single instance currently
@@ -2122,6 +2146,10 @@ bool GUI_App::has_network_update_available() const
 
 void GUI_App::show_network_plugin_download_dialog(bool is_update)
 {
+    // Never mid-quit: a plug-in check that lands during shutdown opened this modal over the closing
+    // app, and on macOS a modal holds the Quit back -- the app hung until Force Quit.
+    if (is_closing() || mainframe == nullptr)
+        return;
     auto load_error = Slic3r::NetworkAgent::get_load_error();
 
     NetworkPluginDownloadDialog::Mode mode;
@@ -3092,6 +3120,9 @@ bool GUI_App::on_init_inner()
     // Override wxWidgets' kAEGetURL handler so unlayeredslicer:// deep links keep
     // working after the wxWidgets 3.3.2 upgrade on macOS (#13119).
     register_mac_deep_link_handler();
+    // Same regression for the Quit Apple event (Dock > Quit, logout): without this, a Quit while the
+    // setup wizard is up was dropped and new users Force Quit (MacQuitHandler.h).
+    register_mac_quit_handler([this] { return quit_from_wizard(); });
 #endif
 #if BBL_RELEASE_TO_PUBLIC
     wxLog::SetLogLevel(wxLOG_Message);
@@ -3150,6 +3181,13 @@ bool GUI_App::on_init_inner()
 
     wxGetApp().Bind(wxEVT_QUERY_END_SESSION, [this](auto & e) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< "received wxEVT_QUERY_END_SESSION";
+#ifdef __APPLE__
+        // Never close the main frame under the setup wizard: end the wizard, and quit after it returns.
+        if (quit_from_wizard()) {
+            e.Veto();
+            return;
+        }
+#endif
         if (mainframe) {
             wxCloseEvent e2(wxEVT_CLOSE_WINDOW);
             e2.SetCanVeto(true);
@@ -6297,6 +6335,10 @@ void GUI_App::check_new_version_sf(int by_user)
     // site keeps no ids, only a per-day hash sketch that counts how many (USAGE_DIAGNOSTICS.md).
     if (const std::string install = UsageTelemetry::install_id(); !install.empty())
         http.header("X-Unlayered-Install", install);
+    // Unlayered's own copies (dev edition, build trees, UNLAYERED_INTERNAL) are counted apart from
+    // customers', on the same rule as the diagnostics channel.
+    if (UsageTelemetry::is_internal_copy())
+        http.header("X-Unlayered-Edition", "dev");
     // Verified TLS: since the manifest can now start an unattended install, it must come from the
     // real site. (Its sha256 is the only check on the installer, so a forged manifest would be a
     // forged installer.)
@@ -6384,6 +6426,15 @@ void GUI_App::check_new_version_sf(int by_user)
                         if (!d.name.empty() && !d.url.empty())
                             candidate.account_downloads.push_back(std::move(d));
                     }
+                }
+
+                // Platform-specific rollouts: a release published for other platforms only is not an
+                // update here, so a Mac-only release is never announced on Windows (and the newest
+                // release that does have this platform's installer is chosen instead).
+                if (!release_targets_platform(candidate.assets, candidate.account_downloads)) {
+                    BOOST_LOG_TRIVIAL(info) << "updater: " << *tag_opt << " lists no installer for "
+                                            << updater_platform() << "; not an update on this platform";
+                    return;
                 }
 
                 const bool is_prerelease = node.get_optional<bool>("prerelease").get_value_or(false);
@@ -9961,7 +10012,13 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
     std::string strFinish = wxGetApp().app_config->get("firstguide", "finish");
     long        pStyle    = wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU;
     if (strFinish == "false" || strFinish.empty())
+#ifdef __APPLE__
+        // macOS keeps the red button on the first run too: it cancels the wizard (skip setup), so a
+        // new user is never trapped in it.
+        pStyle = wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU | wxTAB_TRAVERSAL;
+#else
         pStyle = wxCAPTION | wxTAB_TRAVERSAL;
+#endif
 
     GuideFrame wizard(this, pStyle);
     auto page = start_page == ConfigWizard::SP_WELCOME ? GuideFrame::BBL_WELCOME :
@@ -9969,7 +10026,27 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
                 start_page == ConfigWizard::SP_PRINTERS ? GuideFrame::BBL_MODELS_ONLY :
                 GuideFrame::BBL_MODELS;
     wizard.SetStartPage(page);
+    m_running_wizard    = &wizard;
+    m_quit_after_wizard = false;
+#ifdef __APPLE__
+    // Cmd-Q: the menu bar is disabled under the modal wizard, so catch the key itself.
+    void *quit_key_monitor = add_mac_quit_key_monitor([this] { quit_from_wizard(); });
+#endif
     bool       res = wizard.run();
+#ifdef __APPLE__
+    remove_mac_event_monitor(quit_key_monitor);
+#endif
+    m_running_wizard = nullptr;
+    if (m_quit_after_wizard) {
+        // A Quit arrived during the wizard, which quit_from_wizard() closed without saving anything.
+        // Re-issue it now that no modal dialog is up: the normal Quit path, so a clean exit.
+        m_quit_after_wizard = false;
+        BOOST_LOG_TRIVIAL(info) << "run_wizard: quitting, as requested while the wizard was up";
+#ifdef __APPLE__
+        CallAfter([] { request_mac_terminate(); });
+#endif
+        return false;
+    }
 
     if (res) {
         load_current_presets();
@@ -9988,6 +10065,18 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
     }
 
     return res;
+}
+
+bool GUI_App::quit_from_wizard()
+{
+    if (m_running_wizard == nullptr)
+        return false;
+    m_quit_after_wizard = true;
+    // wxID_ABORT, not wxID_CANCEL: cancelling installs the default printer, and a user who quit
+    // has chosen nothing, so the wizard should come back at the next launch.
+    if (m_running_wizard->IsModal())
+        m_running_wizard->EndModal(wxID_ABORT);
+    return true;
 }
 
 void GUI_App::show_desktop_integration_dialog()

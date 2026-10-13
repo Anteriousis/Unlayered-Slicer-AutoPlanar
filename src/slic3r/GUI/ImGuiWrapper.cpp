@@ -612,7 +612,11 @@ ImVec2 ImGuiWrapper::calc_text_size(std::string_view text,
                                     bool  hide_text_after_double_hash,
                                     float wrap_width)
 {
-    return ImGui::CalcTextSize(text.data(), text.data() + text.length(),
+    // A default-constructed or empty view has a null data(): imgui takes a null end pointer to mean
+    // "NUL-terminated" and strlen()s the null begin (a crash in ImFont::CalcTextSizeA).
+    static const char empty[] = "";
+    const char       *begin   = text.data() ? text.data() : empty;
+    return ImGui::CalcTextSize(begin, begin + text.length(),
                                hide_text_after_double_hash, wrap_width);
 }
 

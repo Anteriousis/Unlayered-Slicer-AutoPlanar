@@ -319,6 +319,10 @@ private:
     std::unique_ptr<Downloader> m_downloader;
     // The Unlayered account and the "Restart to update" self-update. See AutoUpdater.hpp.
     std::unique_ptr<AutoUpdater> m_auto_updater;
+    // The setup wizard while it is up (run_wizard), and whether a Quit arrived during it: the
+    // wizard is closed first and the quit re-issued once it has returned (macOS, MacQuitHandler.h).
+    wxDialog*       m_running_wizard { nullptr };
+    bool            m_quit_after_wizard { false };
 
     //BBS
     std::atomic<bool> m_is_closing {false};
@@ -883,6 +887,9 @@ private:
     void set_live_printer_agent(std::shared_ptr<IPrinterAgent> agent); // null clears the selection
 
     bool            config_wizard_startup();
+    // A Quit while the setup wizard is up: close the wizard (nothing is saved, so it returns at the
+    // next launch) and quit once run_wizard() has returned. True when a wizard was up.
+    bool            quit_from_wizard();
 	void            check_updates(const bool verbose);
 
     // select or add MachineObject

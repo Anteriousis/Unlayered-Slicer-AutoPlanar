@@ -6,6 +6,10 @@
 
 #include <nlohmann/json.hpp>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/UsageTelemetry.hpp"
@@ -239,3 +243,85 @@ TEST_CASE("Usage diagnostics give the install id out only while on", "[UsageTele
     boost::system::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+TEST_CASE("Usage diagnostics report Unlayered's own copies as channel dev", "[UsageTelemetry]")
+{
+    // The site counts only "release" towards customers.
+    CHECK(UsageTelemetry::channel_for("0.1.4", false) == "release");
+    CHECK(UsageTelemetry::channel_for("0.1.5-beta1", false) == "beta");
+    CHECK(UsageTelemetry::channel_for("0.1.5-RC2", false) == "beta");
+    CHECK(UsageTelemetry::channel_for("0.2.0-dev", false) == "dev");
+    // An internal copy is dev whatever its version says.
+    CHECK(UsageTelemetry::channel_for("0.1.4", true) == "dev");
+    CHECK(UsageTelemetry::channel_for("0.1.5-beta1", true) == "dev");
+    // This test runs from the build tree, which no installer put there.
+    CHECK(UsageTelemetry::is_internal_copy());
+}
+
+#ifdef _WIN32
+// A crash names its callers, not just the faulting address. The child process (hidden test case below)
+// starts diagnostics in a scratch data dir and dereferences null three calls deep; the marker it leaves
+// behind is what the next launch would report.
+namespace {
+__declspec(noinline) void crash_level_three(volatile int *target) { *target = 1; }
+__declspec(noinline) void crash_level_two(volatile int *target) { crash_level_three(target); *target = 2; }
+__declspec(noinline) void crash_level_one(volatile int *target) { crash_level_two(target); *target = 3; }
+} // namespace
+
+TEST_CASE("Usage diagnostics crash child", "[.CrashChild]")
+{
+    char dir[MAX_PATH] = {0};
+    REQUIRE(GetEnvironmentVariableA("UNLAYERED_CRASH_TEST_DIR", dir, MAX_PATH) > 0);
+    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS); // no "has stopped working" window
+    set_data_dir(dir);
+    AppConfig config;
+    config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
+    config.set_bool("usage_diagnostics", true);
+    UsageTelemetry::start(config, false);
+    UsageTelemetry::set_phase("slicing");
+    crash_level_one(nullptr);
+}
+
+TEST_CASE("Usage diagnostics crash marker names the callers", "[UsageTelemetry]")
+{
+    if (UsageTelemetry::disabled_by_environment())
+        SKIP("UNLAYERED_NO_TELEMETRY is set on this machine");
+
+    fs::path dir = fs::temp_directory_path() / fs::unique_path("usage-crash-%%%%-%%%%");
+    fs::create_directories(dir / "usage");
+    SetEnvironmentVariableA("UNLAYERED_CRASH_TEST_DIR", dir.string().c_str());
+
+    wchar_t exe[MAX_PATH] = {0};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring command = L"\"" + std::wstring(exe) + L"\" \"[CrashChild]\"";
+    STARTUPINFOW        startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    REQUIRE(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process));
+    WaitForSingleObject(process.hProcess, 60000);
+    DWORD exit_code = 0;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    SetEnvironmentVariableA("UNLAYERED_CRASH_TEST_DIR", nullptr);
+    CHECK(exit_code == 0xC0000005);
+
+    json marker;
+    for (fs::directory_iterator it(dir / "usage"), end; it != end; ++it)
+        if (it->path().filename().string().rfind("session-", 0) == 0)
+            marker = json::parse(slurp(it->path()), nullptr, false);
+    REQUIRE(marker.is_object());
+    INFO(marker.dump());
+    CHECK(marker["exception"] == "0xC0000005");
+    CHECK(marker["phase"] == "slicing");
+    const std::string at = marker["at"].get<std::string>();
+    // The faulting frame, then its callers: all inside this test program, 3+ frames deep.
+    size_t frames = 0;
+    for (size_t pos = 0; (pos = at.find("slic3rutils_tests.exe+0x", pos)) != std::string::npos; ++pos)
+        ++frames;
+    CHECK(frames >= 3);
+    CHECK(at.find('>') != std::string::npos);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+#endif

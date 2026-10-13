@@ -49,6 +49,15 @@ const char *updater_arch();
 // installer that cannot be verified is never run unattended.
 std::optional<AccountDownload> select_account_download(const std::vector<AccountDownload> &downloads);
 
+// Platform-specific rollouts: whether a manifest release was published for this platform, so that
+// publishing a Mac-only 0.1.5 does not announce 0.1.5 to Windows or Linux. True when the release
+// lists an installer for this platform: an unlayered_downloads entry naming it, or an asset of its
+// file type (.exe/.msi on Windows, .dmg on macOS, .AppImage on Linux). A release that lists no
+// installers at all (a page-only manifest) is still true, as before, so an old manifest cannot
+// silently stop updates. Unlike the select_* functions this does not ask whether the update can be
+// installed in place, only whether it exists for this platform.
+bool release_targets_platform(const std::vector<AppUpdateAsset> &assets, const std::vector<AccountDownload> &downloads);
+
 // Where this copy is installed, if - and only if - it can update itself without asking: a per-user
 // installation made by our NSIS installer (its uninstaller sits next to the executable and the
 // current user's registry hive names this folder). A Program Files install, a portable copy, a

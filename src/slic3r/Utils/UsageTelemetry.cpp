@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -11,11 +12,13 @@
 #include <mutex>
 #include <regex>
 #include <sstream>
+#include <thread>
 
 #include <cstdio>
 #include <cstring>
 #include <exception>
 
+#include <boost/dll/runtime_symbol_info.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/uuid/uuid.hpp>
@@ -32,8 +35,18 @@
 #include <windows.h>
 #else
 #include <cerrno>
+#include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
+#endif
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <sys/ucontext.h>
 #endif
 
 namespace fs = boost::filesystem;
@@ -53,6 +66,11 @@ constexpr size_t MAX_EVENTS_PER_BATCH = 100; // the site rejects more
 constexpr size_t MAX_QUEUED           = 400; // offline for a long session: drop, never grow
 constexpr size_t MAX_PENDING_BATCHES  = 20;  // unsent batches kept on disk between launches
 constexpr double EXIT_BUDGET_S        = 6.0; // the longest shutdown() may hold up closing the app
+// The main thread has not beaten (heartbeat()) for this long: the marker says "hang" until it does.
+constexpr int64_t HANG_AFTER_MS = 30 * 1000;
+// How often the watchdog refreshes the marker's "alive", so a dead session's uptime is known to
+// the minute rather than to the 5-minute flush.
+constexpr int64_t ALIVE_EVERY_MS = 60 * 1000;
 
 struct State
 {
@@ -72,12 +90,29 @@ struct State
     std::vector<std::string>   pending;   // batch bodies a failed send left for later
     std::map<int, std::string> in_flight; // bodies being sent in the background
     int                        next_id{0};
+
+    // Hang watchdog (heartbeat(), watchdog_loop()).
+    std::atomic<int64_t>    last_beat_ms{0}; // steady clock; 0 until the first beat
+    int64_t                 hang_after_ms{HANG_AFTER_MS};
+    std::atomic<bool>       hung{false};
+    bool                    watchdog_running{false};
+    std::condition_variable watchdog_wake;
+    int64_t                 alive_written_ms{0}; // steady clock
 };
 
+// Never destroyed. On macOS a Quit ends the process with exit() from inside AppKit, without
+// shutdown() (see GUI_App::shutdown): the watchdog thread is still running then, and a State torn
+// down by the static destructors under it would be a crash at exit, reported as one.
 State &state()
 {
-    static State s;
-    return s;
+    static State *s = new State;
+    return *s;
+}
+
+int64_t steady_ms()
+{
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
 int64_t now_ms()
@@ -119,6 +154,29 @@ std::string channel_of(std::string version)
         if (version.find(pre) != std::string::npos)
             return "beta";
     return "release";
+}
+
+// UNLAYERED_MOD -- whether this executable is an installed copy. Only installers put the slicer
+// where a customer runs it; anything else is a developer's own build.
+bool runs_installed()
+{
+    boost::system::error_code ec;
+    const boost::filesystem::path exe = boost::dll::program_location(ec);
+    if (ec || exe.empty())
+        return true; // cannot tell: count it as a customer's, as before
+#if defined(_WIN32)
+    // The NSIS installer (per-user or per-machine) puts Uninstall.exe beside the executable.
+    return boost::filesystem::exists(exe.parent_path() / "Uninstall.exe", ec);
+#elif defined(__APPLE__)
+    for (boost::filesystem::path p = exe.parent_path(); ! p.empty() && p != p.root_path(); p = p.parent_path())
+        if (p.extension() == ".app")
+            return true;
+    return false;
+#else
+    const char *appimage = std::getenv("APPIMAGE");
+    const char *flatpak  = std::getenv("FLATPAK_ID");
+    return (appimage && *appimage) || (flatpak && *flatpak);
+#endif
 }
 
 long current_pid()
@@ -186,12 +244,16 @@ void copy_cstr(char *dst, size_t size, const std::string &src)
 }
 
 // This session's crash marker; see start(). Caller holds the mutex.
-void write_marker_locked(const State &s)
+void write_marker_locked(State &s)
 {
     const int64_t alive = now_ms();
-    write_file(marker_path(s.session),
-               json{{"pid", current_pid()}, {"version", s.version}, {"started", s.started_ms}, {"alive", alive}, {"phase", s.phase}}
-                   .dump());
+    json marker = {{"pid", current_pid()}, {"version", s.version}, {"started", s.started_ms}, {"alive", alive}, {"phase", s.phase}};
+    // A session that dies while frozen (typically force-quit) is a hang, not a crash. A crash
+    // handler that runs later rewrites the marker with the signal or exception instead.
+    if (s.hung)
+        marker["exception"] = "hang";
+    write_file(marker_path(s.session), marker.dump());
+    s.alive_written_ms = steady_ms();
     copy_cstr(g_crash_marker.path, sizeof(g_crash_marker.path), marker_path(s.session).string());
     copy_cstr(g_crash_marker.version, sizeof(g_crash_marker.version), s.version);
     copy_cstr(g_crash_marker.phase, sizeof(g_crash_marker.phase), s.phase);
@@ -199,11 +261,35 @@ void write_marker_locked(const State &s)
     g_crash_marker.alive   = alive;
 }
 
+// Marks the marker "hang" while the main thread has not called heartbeat() for HANG_AFTER_S, and
+// refreshes "alive" every minute. Detached on purpose: see state().
+void watchdog_loop()
+{
+    State &s = state();
+    std::unique_lock<std::mutex> lock(s.mutex);
+    while (s.started) {
+        s.watchdog_wake.wait_for(lock, std::chrono::seconds(5));
+        if (!s.started)
+            break;
+        const int64_t now = steady_ms(), beat = s.last_beat_ms.load();
+        const bool    hung = beat > 0 && now - beat > s.hang_after_ms;
+        if (hung != s.hung.load()) {
+            if (hung)
+                BOOST_LOG_TRIVIAL(warning) << "usage diagnostics: the main thread has not responded for "
+                                           << (now - beat) / 1000 << " s";
+            s.hung = hung;
+            write_marker_locked(s);
+        } else if (now - s.alive_written_ms >= ALIVE_EVERY_MS)
+            write_marker_locked(s);
+    }
+    s.watchdog_running = false;
+}
+
 // Keep only characters that are safe inside the JSON string and say nothing about the person.
 void sanitize_token(char *s)
 {
     for (; *s; ++s)
-        if (!(std::isalnum(static_cast<unsigned char>(*s)) || *s == '.' || *s == '_' || *s == '-' || *s == '+'))
+        if (!(std::isalnum(static_cast<unsigned char>(*s)) || *s == '.' || *s == '_' || *s == '-' || *s == '+' || *s == '>'))
             *s = '_';
 }
 
@@ -212,12 +298,12 @@ void write_crash_marker(const char *exception, const char *at)
 {
     if (g_crash_marker.path[0] == 0)
         return;
-    char exc[48] = {0}, where[160] = {0};
+    char exc[48] = {0}, where[200] = {0};
     std::snprintf(exc, sizeof(exc), "%s", exception ? exception : "");
     std::snprintf(where, sizeof(where), "%s", at ? at : "");
     sanitize_token(exc);
     sanitize_token(where);
-    char body[512];
+    char body[768];
     const int n = std::snprintf(body, sizeof(body),
                                 "{\"pid\":%ld,\"version\":\"%s\",\"started\":%lld,\"alive\":%lld,\"phase\":\"%s\","
                                 "\"exception\":\"%s\",\"at\":\"%s\"}",
@@ -225,11 +311,26 @@ void write_crash_marker(const char *exception, const char *at)
                                 g_crash_marker.phase, exc, where);
     if (n <= 0)
         return;
+    const size_t len = std::min<size_t>(size_t(n), sizeof(body) - 1);
+#ifdef _WIN32
     if (FILE *f = std::fopen(g_crash_marker.path, "wb")) {
-        std::fwrite(body, 1, std::min<size_t>(size_t(n), sizeof(body) - 1), f);
+        std::fwrite(body, 1, len, f);
         std::fclose(f);
     }
+#else
+    // open/write, not stdio: this runs in a signal handler.
+    const int fd = ::open(g_crash_marker.path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        const ssize_t written = ::write(fd, body, len);
+        (void) written;
+        ::close(fd);
+    }
+#endif
 }
+
+// Once per process: the first crash handler to run writes the marker, later ones (an abort()
+// raised by a terminate handler, a second fault) leave it alone.
+std::atomic<bool> g_crash_written{false};
 
 #ifdef _WIN32
 // Module file name and offset for an address, into `out`. No allocation.
@@ -254,28 +355,228 @@ void code_location_raw(const void *address, char *out, size_t size)
     std::snprintf(out, size, "%s+0x%llx", cname[0] ? cname : "unknown", offset);
 }
 
+#if defined(_M_X64)
+// Appends ">module+0xoffset" for the callers of the faulting function (up to 5), so a crash inside a
+// library call (imgui, wx, the GL driver) names who made it. Walks the unwind tables from the
+// exception's own CONTEXT: no allocation, nothing is read through a guessed pointer.
+void append_caller_chain(const CONTEXT *record, char *out, size_t size)
+{
+    if (!record)
+        return;
+    CONTEXT ctx = *record;
+    for (int frame = 0; frame < 5; ++frame) {
+        DWORD64 image_base = 0;
+        PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(ctx.Rip, &image_base, nullptr);
+        if (!entry) {
+            // A leaf function (strlen, a tiny accessor) has no unwind data and has not touched the stack
+            // pointer: its return address is at the top of the stack.
+            __try {
+                ctx.Rip = *reinterpret_cast<const DWORD64 *>(ctx.Rsp);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return;
+            }
+            ctx.Rsp += sizeof(DWORD64);
+        } else {
+            PVOID   handler_data = nullptr;
+            DWORD64 establisher  = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, ctx.Rip, entry, &ctx, &handler_data, &establisher, nullptr);
+        }
+        if (ctx.Rip == 0)
+            return;
+        char one[80];
+        code_location_raw(reinterpret_cast<const void *>(ctx.Rip), one, sizeof(one));
+        const size_t used = std::strlen(out);
+        if (used + std::strlen(one) + 2 >= size)
+            return;
+        std::snprintf(out + used, size - used, ">%s", one);
+    }
+}
+#else
+void append_caller_chain(const CONTEXT *, char *, size_t) {}
+#endif
+
 LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
-std::atomic<bool>            g_crash_written{false};
 
 LONG WINAPI crash_filter(EXCEPTION_POINTERS *info)
 {
     if (info && info->ExceptionRecord && !g_crash_written.exchange(true)) {
-        char exc[16], at[160];
+        char exc[16], at[200];
         std::snprintf(exc, sizeof(exc), "0x%08lX", static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode));
         code_location_raw(info->ExceptionRecord->ExceptionAddress, at, sizeof(at));
+        append_caller_chain(info->ContextRecord, at, sizeof(at));
         write_crash_marker(exc, at);
     }
     return g_previous_filter ? g_previous_filter(info) : EXCEPTION_CONTINUE_SEARCH;
 }
 #endif
 
+#ifndef _WIN32
+// macOS and Linux: a fatal signal writes its name and, on macOS, where it happened into the
+// marker, then goes on exactly as it would have (the previous handler, or the default action), so
+// the process still dies and macOS still writes its own crash report.
+constexpr int CRASH_SIGNALS[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP};
+struct sigaction g_previous_actions[NSIG];
+// The handler's own stack, so a stack overflow on the main thread is still recorded.
+char g_alt_stack[64 * 1024];
+
+const char *signal_name(int sig)
+{
+    switch (sig) {
+    case SIGSEGV: return "SIGSEGV";
+    case SIGBUS: return "SIGBUS";
+    case SIGILL: return "SIGILL";
+    case SIGFPE: return "SIGFPE";
+    case SIGABRT: return "SIGABRT";
+    case SIGTRAP: return "SIGTRAP";
+    default: return "signal";
+    }
+}
+
+#ifdef __APPLE__
+// The executable's __TEXT segment. All of the slicer's own code is in the one executable (only
+// Python is a separate library), so an offset into it is a complete location.
+uintptr_t g_main_begin = 0, g_main_end = 0;
+
+void find_main_image()
+{
+    const auto *header = reinterpret_cast<const mach_header_64 *>(_dyld_get_image_header(0));
+    if (!header || header->magic != MH_MAGIC_64)
+        return;
+    const auto *cmd = reinterpret_cast<const load_command *>(header + 1);
+    for (uint32_t i = 0; i < header->ncmds; ++i) {
+        if (cmd->cmd == LC_SEGMENT_64) {
+            const auto *seg = reinterpret_cast<const segment_command_64 *>(cmd);
+            if (std::strncmp(seg->segname, "__TEXT", sizeof(seg->segname)) == 0) {
+                g_main_begin = reinterpret_cast<uintptr_t>(header);
+                g_main_end   = g_main_begin + uintptr_t(seg->vmsize);
+                return;
+            }
+        }
+        cmd = reinterpret_cast<const load_command *>(reinterpret_cast<const char *>(cmd) + cmd->cmdsize);
+    }
+}
+
+bool in_main_image(uintptr_t address) { return address >= g_main_begin && address < g_main_end; }
+
+// No snprintf: appends "0x<hex>" to [p, end).
+void append_hex(char *&p, char *end, uintptr_t value)
+{
+    char digits[2 * sizeof(uintptr_t)];
+    int  n = 0;
+    do {
+        digits[n++] = "0123456789abcdef"[value & 0xf];
+        value >>= 4;
+    } while (value && n < int(sizeof(digits)));
+    for (const char *c = "0x"; *c && p < end; ++c)
+        *p++ = *c;
+    while (n > 0 && p < end)
+        *p++ = digits[--n];
+}
+
+void append_str(char *&p, char *end, const char *s)
+{
+    while (*s && p < end)
+        *p++ = *s++;
+}
+
+// "UnlayeredSlicer.arm64+0x2f1a3c>+0x2e1b00>+0x1c2d44": the faulting instruction, then the return
+// addresses of up to five of the slicer's own frames below it, as offsets into the executable (the
+// same ">" chain the Windows filter writes). The faulting instruction comes from the signal's saved
+// context: backtrace() from inside the handler would start at the handler and skip it.
+// "ext" first when the fault itself is outside it (a system library, Python): abort() is one.
+// Symbolicate an offset with
+//   atos -arch arm64 -o UnlayeredSlicer.app/Contents/MacOS/UnlayeredSlicer -l 0x100000000 <0x100000000 + offset>
+// using the very build that crashed (the version and arch are in the event).
+void crash_location(const ucontext_t *uc, char *out, size_t size)
+{
+    out[0] = 0;
+    if (!uc || !uc->uc_mcontext || g_main_begin == 0)
+        return;
+    // Pointer-authentication bits off (return addresses saved by system code are signed).
+    constexpr uintptr_t ADDRESS_MASK = 0x00007fffffffffffULL;
+    uintptr_t pc = 0, lr = 0, fp = 0;
+#if defined(__arm64__)
+    pc = uintptr_t(arm_thread_state64_get_pc(uc->uc_mcontext->__ss)) & ADDRESS_MASK;
+    lr = uintptr_t(arm_thread_state64_get_lr(uc->uc_mcontext->__ss)) & ADDRESS_MASK;
+    fp = uintptr_t(arm_thread_state64_get_fp(uc->uc_mcontext->__ss));
+#elif defined(__x86_64__)
+    pc = uintptr_t(uc->uc_mcontext->__ss.__rip);
+    fp = uintptr_t(uc->uc_mcontext->__ss.__rbp);
+#endif
+    char *p = out, *end = out + size - 1;
+    if (in_main_image(pc)) {
+#if defined(__arm64__)
+        append_str(p, end, "UnlayeredSlicer.arm64+");
+#else
+        append_str(p, end, "UnlayeredSlicer.x86_64+");
+#endif
+        append_hex(p, end, pc - g_main_begin);
+    } else
+        append_str(p, end, "ext");
+
+    int       frames = 0;
+    uintptr_t last   = pc;
+    auto      add    = [&](uintptr_t ret) {
+        if (frames < 5 && in_main_image(ret) && ret != last) {
+            append_str(p, end, ">+");
+            append_hex(p, end, ret - g_main_begin);
+            ++frames;
+            last = ret;
+        }
+    };
+    add(lr); // a leaf function may not have saved it on the stack yet
+    // Walk the frame-pointer chain within this thread's stack (macOS keeps frame pointers).
+    pthread_t       self   = pthread_self();
+    const uintptr_t top    = uintptr_t(pthread_get_stackaddr_np(self));
+    const uintptr_t bottom = top - uintptr_t(pthread_get_stacksize_np(self));
+    for (int i = 0; i < 64 && frames < 5; ++i) {
+        if (fp < bottom || fp + 2 * sizeof(uintptr_t) > top || (fp & (sizeof(uintptr_t) - 1)) != 0)
+            break;
+        const uintptr_t next = reinterpret_cast<const uintptr_t *>(fp)[0];
+        add(reinterpret_cast<const uintptr_t *>(fp)[1] & ADDRESS_MASK);
+        if (next <= fp)
+            break;
+        fp = next;
+    }
+    *p = 0;
+}
+#endif // __APPLE__
+
+void crash_signal(int sig, siginfo_t *info, void *context)
+{
+    if (!g_crash_written.exchange(true)) {
+        char at[200] = {0};
+#ifdef __APPLE__
+        crash_location(static_cast<const ucontext_t *>(context), at, sizeof(at));
+#endif
+        write_crash_marker(signal_name(sig), at);
+    }
+    // Hand it on as if we had never been here.
+    const struct sigaction &previous = g_previous_actions[sig];
+    sigaction(sig, &previous, nullptr);
+    if ((previous.sa_flags & SA_SIGINFO) && previous.sa_sigaction) {
+        previous.sa_sigaction(sig, info, context);
+        return;
+    }
+    if (previous.sa_handler != SIG_DFL && previous.sa_handler != SIG_IGN && previous.sa_handler != nullptr) {
+        previous.sa_handler(sig);
+        return;
+    }
+    // Default action. A fault returns to the faulting instruction and dies on it, so macOS reports
+    // the original fault. A signal that was sent (abort(), kill) would let the process carry on,
+    // so it is raised again. macOS gives a sent SIGSEGV the same si_code as a fault and no si_pid;
+    // only si_addr tells them apart (null when sent). A fault at address 0 is raised too, and
+    // dies just the same.
+    if (sig == SIGABRT || !info || info->si_code <= 0 || info->si_code == SI_USER || info->si_addr == nullptr)
+        raise(sig);
+}
+#endif // !_WIN32
+
 std::terminate_handler g_previous_terminate = nullptr;
 
 void on_terminate()
 {
-#ifdef _WIN32
     if (!g_crash_written.exchange(true))
-#endif
         write_crash_marker("terminate", "");
     if (g_previous_terminate)
         g_previous_terminate();
@@ -291,6 +592,34 @@ void install_crash_handlers()
     g_handlers_installed = true;
 #ifdef _WIN32
     g_previous_filter = SetUnhandledExceptionFilter(crash_filter);
+#else
+#ifdef __APPLE__
+    find_main_image();
+#endif
+    stack_t alt{};
+    alt.ss_sp    = g_alt_stack;
+    alt.ss_size  = sizeof(g_alt_stack);
+    alt.ss_flags = 0;
+    sigaltstack(&alt, nullptr); // this (the main) thread's; other threads' overflows go unrecorded
+    struct sigaction action{};
+    action.sa_sigaction = crash_signal;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    for (int sig : CRASH_SIGNALS) {
+        sigaction(sig, &action, &g_previous_actions[sig]);
+        // Someone else's handler runs after ours (chained). Say whose, once: it decides what
+        // happens to the process after the marker is written.
+        const struct sigaction &previous = g_previous_actions[sig];
+        const void *fn = (previous.sa_flags & SA_SIGINFO) ? reinterpret_cast<const void *>(previous.sa_sigaction)
+                                                          : reinterpret_cast<const void *>(previous.sa_handler);
+        if (fn != reinterpret_cast<const void *>(SIG_DFL) && fn != reinterpret_cast<const void *>(SIG_IGN)) {
+            Dl_info dl{};
+            const char *module = dladdr(fn, &dl) && dl.dli_fname ? std::strrchr(dl.dli_fname, '/') : nullptr;
+            BOOST_LOG_TRIVIAL(info) << "usage diagnostics: " << signal_name(sig) << " already had a handler, in "
+                                    << (module ? module + 1 : "an unknown module") << " ("
+                                    << (dl.dli_sname ? dl.dli_sname : "?") << "); it runs after ours";
+        }
+    }
 #endif
     g_previous_terminate = std::set_terminate(on_terminate);
 }
@@ -304,6 +633,13 @@ void uninstall_crash_handlers()
 #ifdef _WIN32
     if (SetUnhandledExceptionFilter(g_previous_filter) != crash_filter)
         SetUnhandledExceptionFilter(crash_filter); // someone installed theirs after ours: leave it
+#else
+    for (int sig : CRASH_SIGNALS) {
+        struct sigaction current{};
+        if (sigaction(sig, nullptr, &current) == 0 && (current.sa_flags & SA_SIGINFO) &&
+            current.sa_sigaction == crash_signal)
+            sigaction(sig, &g_previous_actions[sig], nullptr); // someone installed theirs after ours: leave it
+    }
 #endif
     if (std::set_terminate(g_previous_terminate) != on_terminate)
         std::set_terminate(on_terminate);
@@ -417,13 +753,20 @@ void start(AppConfig &config, bool first_run)
     s.env_off    = env && *env;
     s.first_run  = first_run;
     s.version    = UNLAYERED_VERSION;
-    s.channel    = channel_of(s.version);
+    s.channel    = channel_for(s.version, is_internal_copy());
     s.os         = os_name();
     s.started_at = std::chrono::steady_clock::now();
     s.session    = new_uuid();
 
     std::string url = config.get("usage_diagnostics_url");
     s.url = url.empty() ? DEFAULT_URL : url;
+    // Undocumented too: "usage_diagnostics_hang_s", a shorter hang threshold for testing the watchdog.
+    s.hang_after_ms = HANG_AFTER_MS;
+    try {
+        const std::string hang_s = config.get("usage_diagnostics_hang_s");
+        if (!hang_s.empty() && std::stoi(hang_s) > 0)
+            s.hang_after_ms = int64_t(std::stoi(hang_s)) * 1000;
+    } catch (...) {}
 
     s.install = config.get("usage_diagnostics_id");
     if (!is_uuid(s.install)) {
@@ -455,7 +798,7 @@ void start(AppConfig &config, bool first_run)
             // Where it was and what ended it (older markers have neither).
             for (const char *key : {"phase", "exception", "at"})
                 if (marker.contains(key) && marker[key].is_string() && !marker[key].get<std::string>().empty())
-                    props[key] = marker[key].get<std::string>().substr(0, 80);
+                    props[key] = marker[key].get<std::string>().substr(0, 190);
             // "alive" is refreshed by every flush, so this is the uptime to within a few minutes.
             int64_t started = marker.value("started", int64_t(0)), alive = marker.value("alive", started);
             if (started > 0 && alive >= started)
@@ -481,8 +824,28 @@ void start(AppConfig &config, bool first_run)
         fs::remove(pending_path(), ec);
 
     s.started = true;
+    s.hung    = false;
+    s.last_beat_ms = 0; // no hang until the app has started beating (heartbeat())
+    if (!s.watchdog_running) {
+        s.watchdog_running = true;
+        std::thread(watchdog_loop).detach();
+    }
     BOOST_LOG_TRIVIAL(info) << "usage diagnostics: " << (s.on ? "on" : (s.env_off ? "off (UNLAYERED_NO_TELEMETRY)" : "off"))
                             << ", channel " << s.channel;
+}
+
+void heartbeat()
+{
+    State &s = state();
+    s.last_beat_ms = steady_ms();
+    if (s.hung.load()) {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.started && s.hung.load()) {
+            BOOST_LOG_TRIVIAL(info) << "usage diagnostics: the main thread is responding again";
+            s.hung = false;
+            write_marker_locked(s);
+        }
+    }
 }
 
 bool enabled() { return state().on; }
@@ -528,6 +891,19 @@ std::string install_id()
     State &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     return s.started && s.on ? s.install : std::string();
+}
+
+bool is_internal_copy()
+{
+    const char *internal = std::getenv("UNLAYERED_INTERNAL");
+    if (internal && *internal)
+        return true;
+    return ! runs_installed();
+}
+
+std::string channel_for(const std::string &version, bool internal)
+{
+    return internal ? std::string("dev") : channel_of(version);
 }
 
 void set_enabled(AppConfig &config, bool on)
@@ -606,7 +982,7 @@ void shutdown()
         std::lock_guard<std::mutex> lock(s.mutex);
         if (!s.started)
             return;
-        s.started = false; // nothing queued after this point
+        s.started = false; // nothing queued after this point; also ends watchdog_loop()
         session   = s.session;
         if (s.on) {
             double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - s.started_at).count();
@@ -645,6 +1021,7 @@ void shutdown()
         save_pending_locked(s);
     }
 
+    state().watchdog_wake.notify_all();
     boost::system::error_code ec;
     fs::remove(marker_path(session), ec);
     uninstall_crash_handlers();

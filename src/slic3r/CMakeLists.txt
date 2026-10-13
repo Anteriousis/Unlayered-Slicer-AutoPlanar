@@ -860,6 +860,8 @@ if (APPLE)
             GUI/InstanceCheckMac.h
             GUI/DeepLinkHandlerMac.mm
             GUI/DeepLinkHandlerMac.h
+            GUI/MacQuitHandler.mm
+            GUI/MacQuitHandler.h
             GUI/GUI_UtilsMac.mm
         )
     FIND_LIBRARY(DISKARBITRATION_LIBRARY DiskArbitration)

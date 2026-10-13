@@ -40,7 +40,7 @@ Every batch carries:
 | `install` | A random id (a UUID) created on your computer when the app first starts, stored in the app's settings. It is not derived from your hardware or account, and is not linked to either. It is never sent while diagnostics are off. |
 | `session` | A random id created each time the app starts. |
 | `app.version` | The Unlayered Slicer version, for example `0.1.3`. |
-| `app.channel` | `release` or `dev` (a development build), so developers' copies can be told apart. |
+| `app.channel` | `release`, `beta` (an alpha, beta or release-candidate version) or `dev`. Unlayered's own copies always say `dev`: a development build, a copy run from a build folder rather than installed, or one started with the `UNLAYERED_INTERNAL` environment variable set. The site counts only `release` towards its usage figures. |
 | `app.os` | `windows`, `mac` or `linux`. |
 
 ## Events
@@ -57,7 +57,7 @@ Each event has a name, a timestamp and the properties below. Nothing else is att
 | `update_download` | When an update download finishes | The version; whether it succeeded; how many seconds it took; if it failed, the kind of failure (for example `network`, `checksum`, `not_signed_in`) and the HTTP status. Never the error text. |
 | `update_applied` | At the first launch after an update was downloaded | The version it was updating from and to; whether this launch is now the new version; how handing over to the installer went when the app closed (started, could not start, or another copy was still open). |
 | `account_signin` | When you sign in to Unlayered from the app | Whether it worked, was cancelled or failed, and whether an update or the Help menu asked for it. Never your email address or account. |
-| `crash` | At the next launch after the app closed unexpectedly | The version that crashed, roughly how long it had been running, and what it was doing (`startup`, `running`, `slicing` or `closing`). On Windows, when an unhandled error ended it: the error code (for example `0xC0000005`) and where it happened, as a program file name and an offset into it (for example `UnlayeredSlicer.dll+0x1a2b3c`, never a folder or path). A session that ended because Windows logged off or shut down is not reported. |
+| `crash` | At the next launch after the app closed unexpectedly | The version that crashed, how long it had been running (to the minute), and what it was doing (`startup`, `running`, `slicing` or `closing`). What ended it, when the app could tell: on Windows the error code (for example `0xC0000005`); on macOS and Linux the signal (for example `SIGSEGV`); `terminate` for an unhandled program error; `hang` when the app had stopped responding (which is what a force-quit of a frozen app looks like). Where it happened, on Windows and macOS, as a program file name and offsets into it (for example `UnlayeredSlicer.dll+0x1a2b3c` or `UnlayeredSlicer.arm64+0x2f1a3c>+0x2e1b00`, never a folder or path). A session that ended because the computer logged off or shut down, or on macOS an ordinary Quit, is not reported. |
 | `session_end` | When the app closes | How long it was open, and counts of what was used during the session: tabs opened (`tab:<name>`), tools opened (`gizmo:<name>`, for example `gizmo:cut_planes`) and files opened by type (`import:stl`, `import:3mf`, ... or `import:other`). |
 
 ## On your computer

@@ -157,6 +157,39 @@ const char *updater_platform()
 
 const char *updater_arch() { return detect_updater_arch() == "arm64" ? "arm64" : "x64"; }
 
+namespace {
+
+// An asset file that installs this platform's build (any architecture).
+bool asset_is_for_this_platform(const std::string &file_name)
+{
+    const std::string n = boost::algorithm::to_lower_copy(file_name);
+    // Published alongside the installers; none of them is the application.
+    if (n.find("validator") != std::string::npos || n.find("pdb") != std::string::npos)
+        return false;
+#if defined(_WIN32)
+    return boost::algorithm::iends_with(n, ".exe") || boost::algorithm::iends_with(n, ".msi");
+#elif defined(__APPLE__)
+    return boost::algorithm::iends_with(n, ".dmg");
+#else
+    return boost::algorithm::iends_with(n, ".appimage");
+#endif
+}
+
+} // namespace
+
+bool release_targets_platform(const std::vector<AppUpdateAsset> &assets, const std::vector<AccountDownload> &downloads)
+{
+    if (assets.empty() && downloads.empty())
+        return true;
+    for (const auto &d : downloads)
+        if (boost::algorithm::iequals(d.platform, updater_platform()))
+            return true;
+    for (const auto &a : assets)
+        if (asset_is_for_this_platform(a.name))
+            return true;
+    return false;
+}
+
 std::optional<AccountDownload> select_account_download(const std::vector<AccountDownload> &downloads)
 {
 #if defined(_WIN32)

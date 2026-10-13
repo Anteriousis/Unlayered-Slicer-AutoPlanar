@@ -2,6 +2,30 @@
 
 All notable changes to Unlayered Slicer are listed here, newest first.
 
+## 0.1.5 — 2026-10-13
+
+Changes since **0.1.4** (2026-10-12).
+
+### Fixed
+
+- **macOS: Quit while the setup wizard was open did nothing.** Dock › Quit, logging out and Cmd-Q
+  were ignored while the first-run wizard was up, so the only way out was Force Quit, and the
+  wizard came back at the next launch. Quitting now closes the wizard (it returns next time, since
+  nothing was saved) and quits normally. The wizard's red close button cancels setup.
+- **macOS: a crash when quitting within the first half-minute** after launch.
+- **macOS: Quit with another dialog open** (such as the Bambu Lab network plug-in prompt) is refused,
+  as it always was on macOS, instead of leaving a half-closed app behind.
+- **A crash measuring text in the 3D view** (an empty label).
+- **Updates only offer a version that has an installer for your system.** A release published for
+  one platform no longer prompts the others to update.
+
+### Changed
+
+- **Crash reports name the calling code**, not just where the crash happened, on Windows, and macOS
+  and Linux now report crashes and hangs at all. See [USAGE_DIAGNOSTICS.md](USAGE_DIAGNOSTICS.md).
+- Unlayered's own copies of the slicer (developer builds, copies run from a build folder, or with
+  `UNLAYERED_INTERNAL` set) report diagnostics as `dev`, so they are not counted with customers'.
+
 ## 0.1.4 — 2026-10-12
 
 Changes since **0.1.3** (2026-10-11).

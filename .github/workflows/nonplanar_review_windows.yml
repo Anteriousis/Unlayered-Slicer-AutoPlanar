@@ -1,10 +1,10 @@
 name: Nonplanar review Windows
 
-# Focused verification on the contribution branches; upstream release workflows
-# retain their existing manual dispatch policy.
+# Focused verification on the contribution branches and this fork's main
+# integration. Release/publishing workflows retain manual dispatch.
 on:
   push:
-    branches: [codex/upstream-auto-planes, codex/upstream-curved-transitions]
+    branches: [codex/upstream-auto-planes, codex/upstream-curved-transitions, codex/curved-layer-engine, main]
   workflow_dispatch:
 
 permissions:
@@ -16,6 +16,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  centauri_profiles:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate Elegoo profile catalog and compatibility
+        run: python3 scripts/orca_extra_profile_check.py --vendor Elegoo
   calibration_geometry:
     runs-on: ubuntu-24.04
     steps:

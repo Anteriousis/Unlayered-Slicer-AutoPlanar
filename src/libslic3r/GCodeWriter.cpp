@@ -91,7 +91,7 @@ double GCodeWriter::curved_travel_height(const Vec3d& target) const
     // it does not assume a clear local shortcut or a logical layer height.
     // Unknown positions after custom start code retain the full-solid fallback.
     const double bound=std::max(m_max_extrusion_z,target.z())+
-        m_curved_max_bead_rise+m_curved_travel_clearance;
+        m_curved_max_bead_rise+m_curved_travel_clearance+.001;
     // Round upward before output precision rounds a traverse below its bound.
     // Round computed bounds only. Re-rounding an already emitted staging Z can
     // ratchet it upward at floating-point values such as 2.007 mm.

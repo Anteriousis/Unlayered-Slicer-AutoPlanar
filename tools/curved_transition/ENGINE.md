@@ -217,7 +217,8 @@ limits. This is a toolpath bound, not a measured allowance for material swelling
 
 Travel leaves vertically, traverses above the whole plate's bounded printed paths by at least 2 mm and
 descends vertically. Its height uses the greatest physical deposition Z emitted
-so far, plus a bound on tilted bead-edge rise and the configured clearance
+so far, plus a bound on tilted bead-edge rise, 0.001 mm for output rounding,
+and the configured clearance
 (at least 2 mm). The same bound survives changes between objects, instances,
 planar support paths and curved fields; future unprinted layers do not raise it.
 Unknown positions after custom code retain the full final-plate height fallback.

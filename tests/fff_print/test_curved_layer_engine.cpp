@@ -400,6 +400,11 @@ TEST_CASE("Curved plate validates generated brim and skirt reach", "[curved-engi
 {
     auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},
         {"printable_area","0x0,100x0,100x100,0x100"},{"brim_type","outer_only"},{"brim_width","6"}});
+    // Generate outside the common machine area on purpose. Otherwise the brim
+    // generator's independent bed clip can hide the paths this guard must test.
+    // Do not depend on Model's shared bed polygon left by another test.
+    config.set_key_value("extruder_printable_area",new ConfigOptionPointsGroups({
+        {Vec2d(-200.,-200.),Vec2d(200.,-200.),Vec2d(200.,200.),Vec2d(-200.,200.)}}));
     SECTION("brim") {}
     SECTION("skirt") {config.set_deserialize_strict({{"brim_type","no_brim"},{"skirt_loops","1"},{"skirt_distance","6"}});}
     Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
@@ -422,6 +427,8 @@ TEST_CASE("Sequential curved plates include generated adhesion paths in neighbou
     auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},
         {"print_sequence","by object"},{"brim_type","no_brim"},{"brim_width","50"},
         {"printable_area","-350x-350,350x-350,350x350,-350x350"}});
+    config.set_key_value("extruder_printable_area",new ConfigOptionPointsGroups({
+        {Vec2d(-350.,-350.),Vec2d(350.,-350.),Vec2d(350.,350.),Vec2d(-350.,350.)}}));
     bool adhesion=false;
     SECTION("model spacing without adhesion") {}
     SECTION("wide brim approaches an earlier part") {

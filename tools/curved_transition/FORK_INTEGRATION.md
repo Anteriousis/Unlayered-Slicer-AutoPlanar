@@ -9,8 +9,11 @@ The updated fork PR #3 targets `main` and combines:
 - Current upstream 0.1.4 source and its build/profile fixes.
 - The reviewed auto-plane suggestions, painted-seam preservation and corrected
   MCT-1 geometry from the original PRs #1 and #2.
-- Continuous transitions and automatic regional selection at validated engine
-  commit `902d2d6e0414d8b250508481ed26cd7108c3d94c`.
+- Continuous transitions, automatic regional selection and progressive travel
+  at engine commit `523c5bfa303dcf2e8450c21d776bb0135701ecb1`.
+  The earlier `902d2d6e` engine and `4b0ef6cd` integration passed native and
+  packaged checks. The updated engine/integration require their own exact-source
+  build, native suite and packaged geometry/time comparisons.
 - The independent Centauri 0.4/0.2 experimental catalog proposal at
   `3aa086faaa3827c4b996ca3b0c185bc6b95c0342`.
 
@@ -39,3 +42,10 @@ for supported conditions and the limits of the measurements.
 The three official upstream contributions remain separate. The combined fork
 request prepares this experimental fork's main branch and does not merge any
 official upstream request.
+
+Progressive travel preserves the configured clearance and motion limits. It
+uses a conservative bound on actual physical deposition across the plate,
+including tilted bead-edge rise, rather than future unprinted layers. An XY
+detour stays raised until its final approach. Unknown positions retain the full
+final-plate fallback. Empty/repeated layer changes preserve an existing staging
+height without upward rounding creep. See ENGINE.md for the process scope.

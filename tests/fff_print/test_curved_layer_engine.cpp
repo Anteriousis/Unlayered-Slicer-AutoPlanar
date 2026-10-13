@@ -179,8 +179,20 @@ TEST_CASE("Fixed nozzle automatic mode keeps unsupported mappings and footprints
         {Vec2d(0.,0.),Vec2d(200.,0.),Vec2d(200.,200.),Vec2d(0.,200.)},
         {Vec2d(150.,0.),Vec2d(190.,0.),Vec2d(190.,190.),Vec2d(150.,190.)}}));}
     Test::init_print({ramp(2.)},print,model,config);
-    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
-    if(scenario=="two materials") REQUIRE(print.extruders().size()==2);
+    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));
+    if(scenario=="two materials") {
+        // Make the two consumed materials explicit on the actual fixture
+        // object, then verify its applied region before testing the fallback.
+        model.objects.front()->config.set("outer_wall_filament_id",1);
+        model.objects.front()->config.set("internal_solid_filament_id",2);
+        model.objects.front()->config.set("top_surface_filament_id",2);
+    }
+    print.apply(model,config);
+    if(scenario=="two materials") {
+        REQUIRE(print.config().filament_diameter.size()==2);
+        REQUIRE(print.objects().front()->printing_region(0).config().internal_solid_filament_id.value==2);
+        REQUIRE(print.extruders().size()==2);
+    }
     const_cast<PrintObject*>(print.objects().front())->slice();
     INFO("scenario="<<scenario<<" decision="<<print.objects().front()->layer_strategy_decision());
     REQUIRE_FALSE(print.objects().front()->curved_field());
@@ -309,7 +321,9 @@ TEST_CASE("Automatic slicing checks explicit plane transitions and rejects ambig
     auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"}});
     Print print;Model model;Test::init_print({TriangleMesh(its_make_cube(20.,20.,18.))},print,model,config);
     add_plane(*model.objects.front(),4.,.035);add_plane(*model.objects.front(),11.,-.035);print.apply(model,config);
-    REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE(print.objects().front()->curved_field());
+    REQUIRE_FALSE(Test::gcode(print).empty());
+    INFO(print.objects().front()->layer_strategy_decision());
+    REQUIRE(print.objects().front()->curved_field());
     model.objects.front()->cut_planes.planes.back().point.z()=4.1;print.apply(model,config);
     REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE_FALSE(print.objects().front()->curved_field());
     REQUIRE(print.objects().front()->layer_strategy_decision().find("intersecting")!=std::string::npos);
@@ -389,8 +403,15 @@ TEST_CASE("Curved plate validates generated brim and skirt reach", "[curved-engi
     SECTION("brim") {}
     SECTION("skirt") {config.set_deserialize_strict({{"brim_type","no_brim"},{"skirt_loops","1"},{"skirt_distance","6"}});}
     Print print;Model model;Test::init_print({ramp(2.)},print,model,config);
-    model.objects.front()->instances.front()->set_offset(Vec3d(12.,50.,0.));print.apply(model,config);
+    // The source ramp spans [0,20]; the instance translation is its lower-left
+    // location, not its centre. Keep the model on the bed but adhesion outside.
+    model.objects.front()->instances.front()->set_offset(Vec3d(2.,50.,0.));print.apply(model,config);
+    REQUIRE(model.objects.front()->instance_bounding_box(0).min.x()==Catch::Approx(2.));
     print.process();REQUIRE(print.objects().front()->curved_field());
+    REQUIRE_FALSE(print.first_layer_convex_hull().empty());
+    const auto adhesion_bounds=get_extents(print.first_layer_convex_hull());
+    INFO("first-layer hull x="<<unscale<double>(adhesion_bounds.min.x())<<","<<unscale<double>(adhesion_bounds.max.x()));
+    REQUIRE(unscale<double>(adhesion_bounds.min.x())<0.);
     ScopedTemporaryFile output(".gcode");
     REQUIRE_THROWS_WITH(print.export_gcode(output.string(),nullptr,nullptr),
         Catch::Matchers::ContainsSubstring("brim/skirt exceeds"));
@@ -399,7 +420,8 @@ TEST_CASE("Curved plate validates generated brim and skirt reach", "[curved-engi
 TEST_CASE("Sequential curved plates include generated adhesion paths in neighbour clearance", "[curved-engine][multi-model][clearance]")
 {
     auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},
-        {"print_sequence","by object"},{"brim_type","no_brim"},{"brim_width","50"}});
+        {"print_sequence","by object"},{"brim_type","no_brim"},{"brim_width","50"},
+        {"printable_area","-350x-350,350x-350,350x350,-350x350"}});
     bool adhesion=false;
     SECTION("model spacing without adhesion") {}
     SECTION("wide brim approaches an earlier part") {
@@ -410,6 +432,10 @@ TEST_CASE("Sequential curved plates include generated adhesion paths in neighbou
     model.objects[1]->instances.front()->set_offset(Vec3d(180.,100.,0.));print.apply(model,config);
     print.process();REQUIRE(print.objects()[0]->curved_field());REQUIRE(print.objects()[1]->curved_field());
     if(adhesion) {
+        const auto hull=get_extents(print.first_layer_convex_hull());
+        REQUIRE(unscale<double>(hull.min.x())>0.);
+        REQUIRE(unscale<double>(hull.max.x())<300.);
+        REQUIRE(unscale<double>(hull.max.y())<300.);
         ScopedTemporaryFile output(".gcode");
         REQUIRE_THROWS_WITH(print.export_gcode(output.string(),nullptr,nullptr),
             Catch::Matchers::ContainsSubstring("too close"));

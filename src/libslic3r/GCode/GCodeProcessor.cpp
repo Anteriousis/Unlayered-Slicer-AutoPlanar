@@ -3378,8 +3378,11 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     const ConfigOptionPoints* extruder_offset = config.option<ConfigOptionPoints>("extruder_offset");
     const ConfigOptionBool* single_extruder_multi_material = config.option<ConfigOptionBool>("single_extruder_multi_material");
     if (extruder_offset != nullptr) {
-        //BBS: for single extruder multi material, only use the offset of first extruder
-        if (single_extruder_multi_material != nullptr && single_extruder_multi_material->getBool()) {
+        // A multi-nozzle machine may inherit the single-nozzle material flag.
+        // Its physical offsets must follow the filament map, as in live Preview.
+        // Retain the first-offset convention only for an actual single nozzle.
+        if (single_extruder_multi_material != nullptr && single_extruder_multi_material->getBool() &&
+            (nozzle_diameter == nullptr || nozzle_diameter->size() <= 1) && !extruder_offset->values.empty()) {
             Vec2f offset = extruder_offset->values[0].cast<float>();
             m_extruder_offsets.resize(m_result.filaments_count);
             for (size_t i = 0; i < m_result.filaments_count; ++i) {

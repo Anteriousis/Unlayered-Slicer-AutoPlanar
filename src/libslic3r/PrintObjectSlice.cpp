@@ -1333,7 +1333,11 @@ void PrintObject::slice()
                     const auto& rc=printing_region(i).config();sparse|=rc.sparse_infill_density.value<100.;
                     solid_depth=std::min(solid_depth,std::max(rc.top_shell_thickness.value,rc.top_shell_layers.value*m_config.layer_height.value));
                 }
-                const bool regional=target.needs_support_planning || !target.useful || sparse || has_support_material();
+                // An authored stack supplies its own target even on a flat roof.
+                // Support/contact and sparse-infill constraints still require
+                // the regional strategy before considering a whole-object stack.
+                const bool regional=target.needs_support_planning ||
+                    (selected_planes.empty() && !target.useful) || sparse || has_support_material();
                 if(regional) {
                     using namespace CurvedTransition;
                     auto patches=select_regions(triangles,m_slicing_params.first_object_layer_height,

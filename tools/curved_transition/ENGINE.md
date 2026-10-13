@@ -216,7 +216,17 @@ is refused. That inflated height is also checked against machine and Virtual Z
 limits. This is a toolpath bound, not a measured allowance for material swelling.
 
 Travel leaves vertically, traverses above the whole plate's bounded printed paths by at least 2 mm and
-descends vertically. Every such travel requests ordinary retraction, including
+descends vertically. Its height uses the greatest physical deposition Z emitted
+so far, plus a bound on tilted bead-edge rise and the configured clearance
+(at least 2 mm). The same bound survives changes between objects, instances,
+planar support paths and curved fields; future unprinted layers do not raise it.
+Unknown positions after custom code retain the full final-plate height fallback.
+Custom machine-start routines must finish with a prepared bed and may not leave
+unmodeled obstructions; firmware macros and material swelling are not inferred.
+An XY detour retains all planned waypoints at one raised height, with one
+departure and one final approach. Exact repeated destinations emit no motion.
+These changes do not reduce the configured clearance or raise motion limits.
+Every actual travel requests ordinary retraction, including
 short nominal XY gaps. XY and Z speed are separate; Z velocity and volumetric flow
 respect configured limits. This may be slow and does not establish string-free
 material tuning. Model height plus travel must remain below machine and Virtual Z

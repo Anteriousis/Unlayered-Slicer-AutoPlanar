@@ -172,7 +172,16 @@ TEST_CASE("Fixed nozzle automatic mode keeps unsupported mappings and footprints
     SECTION("two used materials") {
         scenario="two materials";
         config.set_num_filaments(2);
-        config.set_deserialize_strict({{"filament_map","2,1"},{"outer_wall_filament_id","1"},{"internal_solid_filament_id","2"},{"top_surface_filament_id","2"}});
+        // set_num_filaments() only visits filament_option_keys(), which this
+        // upstream ConfigDef does not initialize. Supply both persistent slots
+        // and their variant identities explicitly, as a real project does.
+        config.set_deserialize_strict({{"filament_diameter","1.75,1.75"},
+            {"filament_colour","#FF0000;#00FF00"},{"filament_map","2,1"},
+            {"outer_wall_filament_id","1"},{"internal_solid_filament_id","2"},{"top_surface_filament_id","2"}});
+        config.set_key_value("filament_self_index",new ConfigOptionInts({1,2}));
+        config.set_key_value("filament_extruder_variant",new ConfigOptionStrings({"Direct Drive Standard","Direct Drive Standard"}));
+        REQUIRE(config.opt<ConfigOptionFloats>("filament_diameter")->size()==2);
+        REQUIRE((config.opt<ConfigOptionInts>("filament_self_index")->values==std::vector<int>{1,2}));
     }
     SECTION("wrong machine protocol") {scenario="machine protocol";print.is_BBL_printer()=false;}
     SECTION("out of reach") {scenario="footprint";config.set_key_value("extruder_printable_area",new ConfigOptionPointsGroups({

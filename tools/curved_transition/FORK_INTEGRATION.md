@@ -10,7 +10,7 @@ The updated fork PR #3 targets `main` and combines:
 - The reviewed auto-plane suggestions, painted-seam preservation and corrected
   MCT-1 geometry from the original PRs #1 and #2.
 - Continuous transitions, automatic regional selection and progressive travel
-  at engine commit `523c5bfa303dcf2e8450c21d776bb0135701ecb1`.
+  at engine commit `6471b3f23c149b1d8ca5017cf53c2eea9caff877`.
   The earlier `902d2d6e` engine and `4b0ef6cd` integration passed native and
   packaged checks. The updated engine/integration require their own exact-source
   build, native suite and packaged geometry/time comparisons.

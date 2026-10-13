@@ -92,10 +92,11 @@ double GCodeWriter::curved_travel_height(const Vec3d& target) const
     // Unknown positions after custom start code retain the full-solid fallback.
     const double bound=std::max(m_max_extrusion_z,target.z())+
         m_curved_max_bead_rise+m_curved_travel_clearance;
-    const double safe=std::max({bound,m_pos.z(),
-        is_current_position_clear()?0.:m_curved_safe_z});
     // Round upward before output precision rounds a traverse below its bound.
-    return std::ceil(safe*1000.)/1000.;
+    // Round computed bounds only. Re-rounding an already emitted staging Z can
+    // ratchet it upward at floating-point values such as 2.007 mm.
+    return std::max({std::ceil(bound*1000.)/1000.,m_pos.z(),
+        is_current_position_clear()?0.:std::ceil(m_curved_safe_z*1000.)/1000.});
 }
 
 std::string GCodeWriter::travel_to_curved_path(const std::vector<Vec3d>& points, const std::string& comment)

@@ -886,3 +886,13 @@ TEST_CASE("Curved travel clears prior deposition and batches an XY detour", "[cu
     writer.set_current_position_clear(false);
     REQUIRE(writer.travel_to_xyz(Vec3d(0.,10.,2.)).find("Z30")!=std::string::npos);
 }
+
+TEST_CASE("Empty curved layers preserve an already rounded staging height", "[curved-engine][travel]")
+{
+    GCodeWriter writer;writer.set_extruders({0});writer.set_extruder(0);
+    writer.set_curved_blend(std::make_shared<CurvedTransition::Identity>(),
+        {0.,20.,0.,20.,28.,0.},Vec2d::Zero(),2.,5.);
+    writer.travel_to_xyz_direct(Vec3d(0.,0.,2.007));
+    for(int i=0;i<10;++i) writer.travel_to_z(.2+.2*i);
+    REQUIRE(writer.get_position().z()==2.007);
+}

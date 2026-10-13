@@ -114,8 +114,8 @@ public:
     void        set_min_extrusion_z(double z) { m_min_extrusion_z = z; }
     double      min_extrusion_z() const { return m_min_extrusion_z; }
     // UNLAYERED_MOD — highest MACHINE-frame Z at which this file has laid material so far. The
-    // nozzle tip sits on top of the bead it is extruding, so this is an upper bound on the height
-    // of everything printed, in the frame travels are emitted in. GCode::m_max_layer_z cannot serve
+    // nozzle tip follows the top path centre; curved travel additionally bounds
+    // tilted bead-edge rise. GCode::m_max_layer_z cannot serve
     // that role for multiplanar prints: it tracks Layer::print_z, which for a tilted chunk is a
     // distance along that chunk's build normal, not a bed-frame height.
     double      max_extrusion_z() const { return m_max_extrusion_z; }

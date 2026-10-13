@@ -45,13 +45,15 @@ void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field
                                   const CurvedTransition::ModelDomain& domain, const Vec2d& origin,
                                   double travel_clearance, double z_speed, int fixed_nozzle)
 {
-    if (!field || travel_clearance<=0. || z_speed<=0.)
+    if (!field || !std::isfinite(travel_clearance) || !std::isfinite(z_speed) ||
+        travel_clearance<=0. || z_speed<=0.)
         throw RuntimeError("Curved blend needs positive travel clearance and Z speed");
     if(fixed_nozzle>=0 && (!filament() || int(filament()->extruder_id())!=fixed_nozzle))
         throw RuntimeError("The writer active nozzle differs from the planned fixed nozzle.");
     m_curved_fixed_nozzle=fixed_nozzle;
     m_curved_field=std::move(field); m_curved_domain=domain; m_curved_origin=origin;
     m_curved_safe_z=std::max(m_curved_plate_safe_z,domain.top_max+travel_clearance); m_curved_z_speed=z_speed;
+    m_curved_travel_clearance=travel_clearance;
 }
 
 void GCodeWriter::set_curved_path(double w, double width, double height)
@@ -59,6 +61,10 @@ void GCodeWriter::set_curved_path(double w, double width, double height)
     if (!m_curved_field) return;
     CurvedTransition::Ramp::bead_area(width,height); // same validity rule as upstream gap fill
     m_curved_w=w; m_curved_width=width; m_curved_height=height;
+    // Tilted bead edges can stand above the tip's path centre. Retain the
+    // largest rise across fields, instances, planar supports and layer changes.
+    m_curved_max_bead_rise=std::max(m_curved_max_bead_rise,
+        width*.5*m_curved_domain->slope());
 }
 
 double GCodeWriter::curved_max_flow_scale() const
@@ -77,13 +83,48 @@ Vec3d GCodeWriter::curved_physical_point(const Vec3d& p) const
     return q;
 }
 
+double GCodeWriter::curved_travel_height(const Vec3d& target) const
+{
+    // All native deposition uses physical coordinates and contributes to the
+    // same plate-wide high-water mark, including planar objects and supports.
+    // Future, unprinted layers are not obstacles. This remains a global bound;
+    // it does not assume a clear local shortcut or a logical layer height.
+    // Unknown positions after custom start code retain the full-solid fallback.
+    const double bound=std::max(m_max_extrusion_z,target.z())+
+        m_curved_max_bead_rise+m_curved_travel_clearance;
+    // Round upward before output precision rounds a traverse below its bound.
+    // Round computed bounds only. Re-rounding an already emitted staging Z can
+    // ratchet it upward at floating-point values such as 2.007 mm.
+    return std::max({std::ceil(bound*1000.)/1000.,m_pos.z(),
+        is_current_position_clear()?0.:std::ceil(m_curved_safe_z*1000.)/1000.});
+}
+
+std::string GCodeWriter::travel_to_curved_path(const std::vector<Vec3d>& points, const std::string& comment)
+{
+    if(!m_curved_field) throw RuntimeError("A curved travel route needs an active field");
+    if(points.empty()) return {};
+    auto physical=points;
+    // Intermediate detour heights are ignored: they stay at the raised bound.
+    physical.back()=curved_physical_point(points.back());
+    return curved_travel(physical,comment);
+}
+
 std::string GCodeWriter::curved_travel(const Vec3d& target, const std::string& comment)
 {
-    // Traverse ABOVE THE WHOLE certified solid, not merely above a logical layer
-    // number. Straight vertical departure and approach are outside printed
-    // material; the configured slope envelope bounds the surrounding head.
-    // All three moves are native writer output and are read by Preview.
-    const double safe=std::max({m_curved_safe_z,m_pos.z(),target.z()});
+    return curved_travel(std::vector<Vec3d>{target},comment);
+}
+
+std::string GCodeWriter::curved_travel(const std::vector<Vec3d>& points, const std::string& comment)
+{
+    if(std::any_of(points.begin(),points.end(),[](const Vec3d& p){return !p.allFinite();}))
+        throw RuntimeError("Curved travel requires finite coordinates");
+    const Vec3d& target=points.back();
+    if(is_current_position_clear() && points.size()==1 && (target-m_pos).norm()<1e-9) {
+        m_lifted=0.;m_to_lift=0.;
+        return {};
+    }
+    const double safe=curved_travel_height(target);
+    if(!std::isfinite(safe)) throw RuntimeError("Curved travel height is not finite");
     const double xy_speed=this->travel_xy_speed(false)*60.;
     double configured_z=this->config.travel_speed_z.get_at(m_cached_extruder_idx);
     if (configured_z<=0.) configured_z=this->travel_xy_speed(false);
@@ -93,10 +134,12 @@ std::string GCodeWriter::curved_travel(const Vec3d& target, const std::string& c
     lift.emit_z(safe); lift.emit_f(z_speed);
     lift.emit_comment(GCodeWriter::full_gcode_comment,"curved blend: vertical departure");
     out+=lift.string();
-    GCodeG1Formatter across;
-    across.emit_xyz(Vec3d(target.x()-m_x_offset,target.y()-m_y_offset,safe)); across.emit_f(xy_speed);
-    across.emit_comment(GCodeWriter::full_gcode_comment,"curved blend: traverse above solid");
-    out+=across.string();
+    for(const auto& point:points) {
+        GCodeG1Formatter across;
+        across.emit_xyz(Vec3d(point.x()-m_x_offset,point.y()-m_y_offset,safe)); across.emit_f(xy_speed);
+        across.emit_comment(GCodeWriter::full_gcode_comment,"curved blend: traverse above printed material");
+        out+=across.string();
+    }
     GCodeG1Formatter descend;
     descend.emit_z(target.z()); descend.emit_f(z_speed);
     descend.emit_comment(GCodeWriter::full_gcode_comment,comment);
@@ -122,6 +165,8 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
     const int count=CurvedTransition::Ramp::chord_segments(length,m_curved_domain->slope());
     const double area0=CurvedTransition::Ramp::bead_area(m_curved_width,m_curved_height);
     Vec3d previous=m_pos;
+    // A descending first chord still deposits at its starting point.
+    m_max_extrusion_z=std::max(m_max_extrusion_z,previous.z());
     std::string out;
     for (int i=1;i<=count;++i) {
         const Vec3d logical=start+(target-start)*(double(i)/count);
@@ -213,6 +258,7 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 {
     m_curved_field.reset(); m_curved_domain.reset();
     m_curved_plate_safe_z=0.;
+    m_curved_travel_clearance=0.;m_curved_max_bead_rise=0.;
     m_curved_fixed_nozzle=-1;
     m_fixed_dual_enabled=print_config.nozzle_diameter.size()==2 && print_config.nonplanar_fixed_nozzle.value>0;
     this->config.apply(print_config, true);
@@ -1368,7 +1414,10 @@ std::string GCodeWriter::travel_to_z(double z, const std::string &comment, bool 
         m_lifted=0.; m_to_lift=0.;
         // A pure layer-change Z is a logical height, not the local physical
         // height at the previous seam. Leave descent to the next XYZ approach.
-        return _travel_to_z(std::max(m_curved_safe_z,m_pos.z()),comment);
+        // m_pos may already be a raised staging point. Do not add another
+        // clearance to it on empty/repeated layer changes.
+        Vec3d printed=m_pos;printed.z()=m_max_extrusion_z;
+        return _travel_to_z(curved_travel_height(printed),comment);
     }
     /*  If target Z is lower than current Z but higher than nominal Z
         we don't perform the move but we only adjust the nominal Z by

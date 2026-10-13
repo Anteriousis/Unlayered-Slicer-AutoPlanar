@@ -11024,6 +11024,19 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
 
     // use G1 because we rely on paths being straight (G0 may make round paths)
     if (travel.size() >= 2) {
+        if(m_writer.has_curved_blend()) {
+            std::vector<Vec3d> route;
+            route.reserve(travel.size()-1);
+            for(size_t i=1;i<travel.size();++i) {
+                const Vec2d xy=point_to_gcode(travel.points[i]);
+                route.emplace_back(xy.x(),xy.y(),
+                    i==travel.size()-1 && z!=DBL_MAX?z:m_nominal_z);
+            }
+            gcode+=m_writer.travel_to_curved_path(route,comment);
+            m_need_change_layer_lift_z=false;
+            set_last_pos(travel.points.back());
+            return gcode;
+        }
         // Orca: use `travel_to_xyz` to ensure we start at the correct z, in case we moved z in custom/filament change gcode
         if (false/*m_spiral_vase*/) {
             // No lazy z lift for spiral vase mode
@@ -11098,7 +11111,7 @@ LiftType GCode::to_lift_type(ZHopType z_hop_types) {
 bool GCode::needs_retraction(const Polyline &travel, ExtrusionRole role, LiftType& lift_type)
 {
     if (m_writer.has_curved_blend()) {
-        // A short XY gap still travels above the entire solid and back down.
+        // A short XY gap still travels above deposited material and back down.
         // The ordinary in-layer distance/inside-infill tests cannot describe
         // that physical path. Use the configured ordinary retraction on every
         // such approach, with a straight lift; do not replay a planar wipe.

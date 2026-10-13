@@ -292,7 +292,7 @@ TEST_CASE("Automatic slicing infers a bounded roof direction without changing th
     REQUIRE_FALSE(model.objects.front()->has_cut_planes());
     REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==vertices);
     REQUIRE(output.find("; layer_strategy: Automatic selection: curved.")!=std::string::npos);
-    REQUIRE(output.find("curved blend: traverse above solid")!=std::string::npos);
+    REQUIRE(output.find("curved blend: traverse above printed material")!=std::string::npos);
 }
 
 TEST_CASE("Automatic slicing keeps flat roofs planar and reselects after settings change", "[curved-engine][automatic]")
@@ -302,7 +302,7 @@ TEST_CASE("Automatic slicing keeps flat roofs planar and reselects after setting
     auto output=Test::gcode(print);
     REQUIRE_FALSE(print.objects().front()->curved_field());
     REQUIRE(output.find("Automatic selection: planar.")!=std::string::npos);
-    REQUIRE(output.find("curved blend: traverse above solid")==std::string::npos);
+    REQUIRE(output.find("curved blend: traverse above printed material")==std::string::npos);
     Print tilted;Model tilted_model;Test::init_print({ramp(2.)},tilted,tilted_model,config);
     REQUIRE_FALSE(Test::gcode(tilted).empty());REQUIRE(tilted.objects().front()->curved_field());
     config.set_deserialize_strict({{"nonplanar_virtual_max_angle","0.1"}});
@@ -568,8 +568,8 @@ TEST_CASE("Curved plane mesh mapping keeps a through hole and bounded facet erro
         if (move.type==EMoveType::Travel && actual_top>0. &&
             (move.position.head<2>()-prior.position.head<2>()).norm()>.001f) {
             ++traverses;
-            REQUIRE(move.position.z()>=bound+1.999);
-            REQUIRE(prior.position.z()>=bound+1.999);
+            REQUIRE(move.position.z()>=actual_top+1.999);
+            REQUIRE(prior.position.z()>=actual_top+1.999);
         }
     }
     // This flat CAD roof crosses tilted layer contours: midpoint sampling
@@ -610,7 +610,7 @@ TEST_CASE("Curved blend slices the flattened solid and writes physical paths", "
     REQUIRE(object->curved_ramp());
     REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==original_vertices);
     REQUIRE(std::abs(object->layers().back()->print_z-object->curved_field()->reference_top_mm())<1e-8);
-    REQUIRE(gcode.find("curved blend: traverse above solid")!=std::string::npos);
+    REQUIRE(gcode.find("curved blend: traverse above printed material")!=std::string::npos);
     REQUIRE(gcode.find("G2 ")==std::string::npos);
     REQUIRE(gcode.find("G3 ")==std::string::npos);
     // Verify every native deposition has XYZ, stays above the foundation and
@@ -654,7 +654,7 @@ TEST_CASE("Curved blend Preview receives the same physical deposition and bounde
     const auto& roof=*object->curved_ramp();
     const auto& field=*object->curved_field();
     const Vec2d shift=unscale(object->instances().front().shift);
-    size_t deposits=0, traverses=0; double maxz=0., minh=1e9, maxh=0.;
+    size_t deposits=0, traverses=0, lower_traverses=0; double maxz=0., minh=1e9, maxh=0.;
     for (size_t i=1;i<result.moves.size();++i) {
         const auto& move=result.moves[i];
         const auto& prior=result.moves[i-1];
@@ -676,13 +676,15 @@ TEST_CASE("Curved blend Preview receives the same physical deposition and bounde
             (move.position.head<2>()-prior.position.head<2>()).norm()>.001f &&
             deposits>0) {
             ++traverses;
-            REQUIRE(prior.position.z()>=roof.top_max+1.999);
-            REQUIRE(move.position.z()>=roof.top_max+1.999);
+            REQUIRE(prior.position.z()>=maxz+1.999);
+            REQUIRE(move.position.z()>=maxz+1.999);
             REQUIRE(std::abs(move.position.z()-prior.position.z())<.002);
+            if(move.position.z()<roof.top_max+1.9) ++lower_traverses;
         }
     }
     REQUIRE(deposits>1000);
     REQUIRE(traverses>0);
+    REQUIRE(lower_traverses>0);
     REQUIRE(minh>=print.config().min_layer_height.get_at(0)-.002);
     REQUIRE(maxh<=print.config().max_layer_height.get_at(0)+.002);
     REQUIRE(maxh-minh>.04); // physical spacing changes through the blend
@@ -747,7 +749,7 @@ TEST_CASE("Curved blend config round trip and disabling restores planar slices",
     p.apply(m,config);
     const auto planar=Test::gcode(p);
     REQUIRE_FALSE(p.objects().front()->curved_field());
-    REQUIRE(planar.find("curved blend: traverse above solid")==std::string::npos);
+    REQUIRE(planar.find("curved blend: traverse above printed material")==std::string::npos);
     Print fresh; fresh.apply(m,config);
     const auto clean=Test::gcode(fresh);
     auto moves=[](const std::string& text) {
@@ -831,4 +833,66 @@ TEST_CASE("Curved writer subdivides paths, compensates flow and avoids diagonal 
     REQUIRE_THROWS(writer.set_curved_path(2.,.02,.2));
     const auto layer_change=writer.travel_to_z(2.2);
     REQUIRE(layer_change.find("F300")!=std::string::npos);
+}
+
+TEST_CASE("Curved travel clears prior deposition and batches an XY detour", "[curved-engine][travel]")
+{
+    using namespace CurvedTransition;
+    Ramp r{0.,20.,0.,20.,3.,.08,0.,3.,4.6};
+    const auto field=r.field(.2);
+    GCodeWriter writer;
+    writer.set_extruders({0});writer.set_extruder(0);
+    writer.set_curved_plate_bound(30.);
+    writer.set_curved_blend(field,r.domain(),Vec2d::Zero(),2.,5.);
+    writer.set_curved_path(2.,.45,.2);
+    // A custom/unknown start still takes the full-plate route.
+    REQUIRE(writer.travel_to_xyz(Vec3d(0.,10.,2.)).find("Z30")!=std::string::npos);
+    writer.extrude_to_xy(Vec2d(20.,10.),1.);
+    const double printed=writer.max_extrusion_z();
+    REQUIRE(printed<r.top_max);
+    const std::string route=writer.travel_to_curved_path(
+        {Vec3d(20.,12.,2.),Vec3d(0.,12.,2.),Vec3d(0.,10.,2.)},"final approach");
+    size_t departures=0,traverses=0,approaches=0;
+    std::istringstream lines(route);std::string line;
+    const std::regex zword(R"( Z(-?\d*\.?\d+))");
+    while(std::getline(lines,line)) {
+        if(line.find("vertical departure")!=std::string::npos) ++departures;
+        if(line.find("final approach")!=std::string::npos) ++approaches;
+        if(line.find("traverse above printed material")!=std::string::npos) {
+            ++traverses;std::smatch z;REQUIRE(std::regex_search(line,z,zword));
+            const double height=std::stod(z[1]);
+            // Include the tilted bead edge and never use the unprinted roof.
+            REQUIRE(height>=printed+2.+.45*.5*r.slope()-1e-6);
+            REQUIRE(height<r.top_max+2.);
+        }
+    }
+    REQUIRE(departures==1);REQUIRE(traverses==3);REQUIRE(approaches==1);
+    REQUIRE(std::abs(writer.get_position().z()-field->world_z(0.,10.,2.))<1e-9);
+    REQUIRE(writer.travel_to_xyz(Vec3d(0.,10.,2.)).empty());
+    // Changing the mapping must retain material laid by another object/support.
+    writer.set_curved_blend(std::make_shared<Identity>(),{0.,20.,0.,20.,28.,0.},Vec2d::Zero(),2.,5.);
+    writer.set_curved_path(8.,.45,.2);
+    writer.travel_to_xyz(Vec3d(0.,10.,8.));writer.extrude_to_xy(Vec2d(20.,10.),1.);
+    writer.set_curved_blend(field,r.domain(),Vec2d::Zero(),2.,5.);
+    writer.set_curved_path(2.,.45,.2);
+    const auto reentry=writer.travel_to_xyz(Vec3d(0.,10.,2.));
+    std::smatch raised;REQUIRE(std::regex_search(reentry,raised,zword));
+    REQUIRE(std::stod(raised[1])>=10.018-1e-6);
+    REQUIRE(std::stod(raised[1])<10.020);
+    writer.travel_to_z(2.2);
+    const double staged=writer.get_position().z();
+    for(int i=0;i<5;++i) writer.travel_to_z(2.2+.2*i);
+    REQUIRE(writer.get_position().z()==staged);
+    writer.set_current_position_clear(false);
+    REQUIRE(writer.travel_to_xyz(Vec3d(0.,10.,2.)).find("Z30")!=std::string::npos);
+}
+
+TEST_CASE("Empty curved layers preserve an already rounded staging height", "[curved-engine][travel]")
+{
+    GCodeWriter writer;writer.set_extruders({0});writer.set_extruder(0);
+    writer.set_curved_blend(std::make_shared<CurvedTransition::Identity>(),
+        {0.,20.,0.,20.,28.,0.},Vec2d::Zero(),2.,5.);
+    writer.travel_to_xyz_direct(Vec3d(0.,0.,2.007));
+    for(int i=0;i<10;++i) writer.travel_to_z(.2+.2*i);
+    REQUIRE(writer.get_position().z()==2.007);
 }

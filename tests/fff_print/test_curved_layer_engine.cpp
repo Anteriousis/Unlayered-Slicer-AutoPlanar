@@ -912,7 +912,8 @@ TEST_CASE("Curved travel refuses heights above common or active-tip Z limits", "
     }
     SECTION("Active tip ceiling can be lower than the common ceiling") {
         PrintConfig config;config.apply(fixed_nozzle_config(1),true);
-        GCodeWriter writer;writer.apply_print_config(config);writer.set_extruders({0,1});writer.set_extruder(1);
+        // Filament 0 is routed to active tip 1 by this fixed-nozzle fixture.
+        GCodeWriter writer;writer.apply_print_config(config);writer.set_extruders({0});writer.set_extruder(0);
         writer.set_curved_blend(std::make_shared<CurvedTransition::Identity>(),
             {0.,20.,0.,20.,70.,0.},Vec2d::Zero(),2.,5.,1);
         REQUIRE_THROWS(writer.travel_to_curved_path({Vec3d(0.,0.,78.)}));

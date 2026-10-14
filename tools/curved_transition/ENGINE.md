@@ -227,6 +227,8 @@ unmodeled obstructions; firmware macros and material swelling are not inferred.
 An XY detour retains all planned waypoints at one raised height, with one
 departure and one final approach. Exact repeated destinations emit no motion.
 These changes do not reduce the configured clearance or raise motion limits.
+The writer refuses a computed height above the common machine/Virtual Z ceiling
+or the declared active tip's lower ceiling, including output precision padding.
 Every actual travel requests ordinary retraction, including
 short nominal XY gaps. XY and Z speed are separate; Z velocity and volumetric flow
 respect configured limits. This may be slow and does not establish string-free

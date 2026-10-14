@@ -13,6 +13,7 @@
 #include "GCode/CoolingBuffer.hpp"
 #include "GCode/MachineKinematics.hpp"
 #include <memory>
+#include <limits>
 
 namespace Slic3r {
 
@@ -255,6 +256,9 @@ public:
     Vec2d m_curved_origin = Vec2d::Zero(); // same placed frame as point_to_gcode, BEFORE plate offset
     double m_curved_safe_z=0., m_curved_plate_safe_z=0., m_curved_z_speed=0., m_curved_w=0., m_curved_width=0., m_curved_height=0.;
     double m_curved_travel_clearance=0., m_curved_max_bead_rise=0.;
+    double m_curved_common_max_z=std::numeric_limits<double>::infinity();
+    double m_curved_max_z=std::numeric_limits<double>::infinity();
+    std::vector<double> m_curved_nozzle_heights;
 	// Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_filament_extruders;
     bool            m_single_extruder_multi_material;

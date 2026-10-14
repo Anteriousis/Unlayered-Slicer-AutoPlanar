@@ -896,3 +896,25 @@ TEST_CASE("Empty curved layers preserve an already rounded staging height", "[cu
     for(int i=0;i<10;++i) writer.travel_to_z(.2+.2*i);
     REQUIRE(writer.get_position().z()==2.007);
 }
+
+TEST_CASE("Curved travel refuses heights above common or active-tip Z limits", "[curved-engine][travel]")
+{
+    SECTION("Common Virtual ceiling includes printed material and rounding") {
+        PrintConfig config;config.nonplanar_virtual_max_z.value=10.;config.printable_height.value=100.;
+        GCodeWriter writer;writer.apply_print_config(config);writer.set_extruders({0});writer.set_extruder(0);
+        writer.set_curved_blend(std::make_shared<CurvedTransition::Identity>(),
+            {0.,20.,0.,20.,8.,0.},Vec2d::Zero(),2.,5.);
+        writer.set_curved_path(8.,.45,.2);
+        writer.travel_to_xyz_direct(Vec3d(0.,0.,8.),"synthetic material start");
+        writer.extrude_to_xy(Vec2d(10.,0.),1.);
+        REQUIRE_THROWS(writer.travel_to_xyz(Vec3d(0.,0.,3.)));
+        REQUIRE_THROWS(writer.travel_to_z(3.));
+    }
+    SECTION("Active tip ceiling can be lower than the common ceiling") {
+        PrintConfig config;config.apply(fixed_nozzle_config(1),true);
+        GCodeWriter writer;writer.apply_print_config(config);writer.set_extruders({0,1});writer.set_extruder(1);
+        writer.set_curved_blend(std::make_shared<CurvedTransition::Identity>(),
+            {0.,20.,0.,20.,70.,0.},Vec2d::Zero(),2.,5.,1);
+        REQUIRE_THROWS(writer.travel_to_curved_path({Vec3d(0.,0.,78.)}));
+    }
+}

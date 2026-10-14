@@ -52,7 +52,7 @@
 #define TAB_ID_CALIBRATION   "calibration"
 // Unlayered: optional trailing tab hosting an embedded web application (WebAppPanel).
 #define TAB_ID_WEB_APP       "web_app"
-// Unlayered: the second WebAppPanel slot, home of the Unlayered Agent tab. Sits just before
+// Unlayered: the second WebAppPanel slot (off in release builds). Sits just before
 // TAB_ID_WEB_APP when both are present.
 #define TAB_ID_AGENT         "agent_app"
 // Unlayered: the third WebAppPanel slot, home of the Unlayered Universe tab.

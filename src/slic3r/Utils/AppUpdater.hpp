@@ -63,6 +63,12 @@ bool release_targets_platform(const std::vector<AppUpdateAsset> &assets, const s
 // current user's registry hive names this folder). A Program Files install, a portable copy, a
 // development build or another platform return nothing, and get the interactive path instead.
 std::optional<boost::filesystem::path> self_updatable_install_dir();
+// Why self_updatable_install_dir() refused this copy, for the updater's diagnostics; "" when it did
+// not. Windows: "no_uninstaller" (an unzipped or development copy), "all_users" (registered under
+// HKLM: a per-machine install), "registered_elsewhere" (the per-user registration points at a
+// different folder: a second copy), "not_registered". macOS: "not_in_applications". Linux:
+// "unsupported".
+std::string self_update_blocker();
 
 // True when another process is running this same executable. A silent install would fail on its
 // locked files, so the update waits until it is the last window.

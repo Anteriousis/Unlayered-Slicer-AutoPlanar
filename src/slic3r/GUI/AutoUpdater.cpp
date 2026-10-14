@@ -382,11 +382,11 @@ bool AutoUpdater::handle_new_version(const std::string &version, const std::stri
                                      const std::optional<AccountDownload> &download, bool by_user, bool skipped)
 {
     // Usage diagnostics: what happened when the update check found a newer version.
-    auto offered = [&](const char *action) {
-        UsageTelemetry::record("update_offered", {{"to", version},
-                                                  {"by_user", by_user},
-                                                  {"signed_in", m_account->signed_in()},
-                                                  {"action", action}});
+    auto offered = [&](const char *action, const std::string &why = {}) {
+        nlohmann::json props = {{"to", version}, {"by_user", by_user}, {"signed_in", m_account->signed_in()}, {"action", action}};
+        if (!why.empty())
+            props["why"] = why;
+        UsageTelemetry::record("update_offered", std::move(props));
     };
     if (!download) {
         offered("no_account_download"); // the site has no installer for this platform: download page
@@ -395,7 +395,7 @@ bool AutoUpdater::handle_new_version(const std::string &version, const std::stri
 
     m_install_dir = self_updatable_install_dir();
     if (!m_install_dir) {
-        offered("not_self_updatable");
+        offered("not_self_updatable", self_update_blocker());
         BOOST_LOG_TRIVIAL(info) << "updater: " << version
                                 << " is available with the account, but this copy is not a per-user installation "
                                    "that can replace itself; using the update dialog";

@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="max-age=7200" />
+<title>Slicer Privacy Policy</title>
+<link rel="stylesheet" type="text/css" href="../../include/global.css" />
+<link rel="stylesheet" type="text/css" href="../css/common.css" />
+<link rel="stylesheet" type="text/css" href="../css/dark.css" />
+<link rel="stylesheet" type="text/css" href="privacy.css" />
+<script type="text/javascript" src="../js/jquery-3.6.0.min.js"></script>
+<script type="text/javascript" src="../js/json2.js"></script>
+<script type="text/javascript" src="../../data/text.js"></script>
+<script type="text/javascript" src="../js/globalapi.js"></script>
+<script type="text/javascript" src="../js/common.js"></script>
+<script type="text/javascript" src="13.js"></script>
+</head>
+<!-- Unlayered 0.1.6: the privacy choice (notice 2026-10-v3, Alex 2026-10-14). Two answers: "Keep my data
+     private" / "Share usage diagnostics". Nothing is selected, except "Share" in a place whose rules allow a
+     preselection (the United States: PrivacyConsent::LegalApprovals); only there is it marked Recommended.
+     Under "Share", a separate "Slicing improvement program" box, never ticked in advance anywhere: the only
+     consent that lets diagnostics be used for AI training. Continue stays disabled until there is an
+     answer. The slicer saves the answer the moment Continue is pressed (PrivacyFlow), before anything
+     optional could start. Wording changes that need a new answer bump PrivacyConsent::NOTICE_VERSION. -->
+<body onLoad="OnInit()">
+<div id="Title">
+	<div id="PrivacyTitle">Help us build a better slicer</div>
+</div>
+<div id="Content">
+	<p class="Lead">Unlayered Slicer is free, and sharing data helps us fix bugs, improve print quality, and build new features.</p>
+
+	<div id="OrgNotice" class="Notice" hidden>Your organization has switched usage diagnostics off on this computer, so nothing is shared whatever you choose here.</div>
+
+	<p class="Question" id="ChoiceQuestion">Choose what you would like to share:</p>
+	<fieldset class="ChoiceGroup" aria-labelledby="ChoiceQuestion">
+		<label class="Choice">
+			<input type="radio" name="diagnostics" value="decline" aria-describedby="DeclineText">
+			<span><span class="ChoiceTitle">Keep my data private</span>
+			<span class="ChoiceText" id="DeclineText">No optional usage diagnostics or 3D model data is sent to Unlayered.</span></span>
+		</label>
+		<div class="Choice ShareChoice">
+			<label class="ChoiceMain">
+				<input type="radio" name="diagnostics" value="share" aria-describedby="ShareText">
+				<span><span class="ChoiceTitle">Share usage diagnostics <span id="Recommended" class="Badge" hidden>Recommended</span></span>
+				<span class="ChoiceText" id="ShareText">Help us improve reliability and features by sharing application usage, settings, and performance information. Never includes your name, email, account, or 3D models.</span></span>
+			</label>
+			<label class="ProgramBox" id="ProgramBox" hidden>
+				<input type="checkbox" id="Program" aria-describedby="ProgramText">
+				<span><span class="ChoiceTitle">Slicing improvement program</span>
+				<span class="ChoiceText" id="ProgramText">Get early access to new features. Your shared data, never linked to your name, email, or account, may be used to develop, train, test, evaluate, and improve AI, CAD, slicing, software, manufacturing, and hardware systems.</span></span>
+			</label>
+		</div>
+	</fieldset>
+
+	<p class="Notice">You can change your choice anytime in Preferences &gt; Online. We do not sell your models or diagnostic data.</p>
+	<p class="Notice"><button type="button" class="LinkButton" onclick="OpenPolicy()">Read Full Privacy Policy</button></p>
+	<div id="SaveError" class="Notice" role="alert" hidden>Your choice could not be saved. Go back and check where you live.</div>
+</div>
+<div id="AcceptArea">
+	<button type="button" class="ButtonStyleRegular ButtonTypeChoice trans" tid="t8" id="PreBtn" onclick="GoBack()">Back</button>
+	<button type="button" class="ButtonStyleConfirm ButtonTypeChoice" id="ContinueBtn" onclick="GoContinue()" disabled>Continue</button>
+</div>
+</body>
+</html>

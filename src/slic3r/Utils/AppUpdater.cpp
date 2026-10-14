@@ -122,10 +122,10 @@ bool same_path(const fs::path &a, const fs::path &b)
 constexpr const wchar_t *UNINSTALL_KEY  = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Unlayered Slicer";
 constexpr const char    *UNINSTALL_NAME = "Uninstall.exe";
 
-std::wstring read_hkcu_string(const wchar_t *key, const wchar_t *value)
+std::wstring read_reg_string(HKEY root, const wchar_t *key, const wchar_t *value)
 {
     HKEY h = nullptr;
-    if (::RegOpenKeyExW(HKEY_CURRENT_USER, key, 0, KEY_READ, &h) != ERROR_SUCCESS)
+    if (::RegOpenKeyExW(root, key, 0, KEY_READ, &h) != ERROR_SUCCESS)
         return {};
     std::wstring out;
     DWORD        type = 0, size = 0;
@@ -139,6 +139,19 @@ std::wstring read_hkcu_string(const wchar_t *key, const wchar_t *value)
     }
     ::RegCloseKey(h);
     return out;
+}
+
+std::wstring read_hkcu_string(const wchar_t *key, const wchar_t *value)
+{
+    return read_reg_string(HKEY_CURRENT_USER, key, value);
+}
+
+// An UninstallString's folder, without the quotes some CMake versions add.
+boost::filesystem::path uninstall_dir(std::wstring uninstall)
+{
+    if (uninstall.size() >= 2 && uninstall.front() == L'"' && uninstall.back() == L'"')
+        uninstall = uninstall.substr(1, uninstall.size() - 2);
+    return uninstall.empty() ? boost::filesystem::path() : boost::filesystem::path(uninstall).parent_path();
 }
 #endif
 
@@ -221,6 +234,30 @@ std::optional<AccountDownload> select_account_download(const std::vector<Account
     // read-only mount. Still the download page.
     (void) downloads;
     return std::nullopt;
+#endif
+}
+
+std::string self_update_blocker()
+{
+#if defined(_WIN32)
+    const fs::path exe = current_exe_path();
+    if (exe.empty())
+        return "unknown";
+    const fs::path dir = exe.parent_path();
+    boost::system::error_code ec;
+    if (!fs::exists(dir / UNINSTALL_NAME, ec))
+        return "no_uninstaller";
+    const fs::path user_dir = uninstall_dir(read_hkcu_string(UNINSTALL_KEY, L"UninstallString"));
+    if (!user_dir.empty() && same_path(user_dir, dir))
+        return {};
+    const fs::path machine_dir = uninstall_dir(read_reg_string(HKEY_LOCAL_MACHINE, UNINSTALL_KEY, L"UninstallString"));
+    if (!machine_dir.empty() && same_path(machine_dir, dir))
+        return "all_users";
+    return user_dir.empty() ? "not_registered" : "registered_elsewhere";
+#elif defined(__APPLE__)
+    return self_updatable_install_dir() ? std::string() : std::string("not_in_applications");
+#else
+    return "unsupported";
 #endif
 }
 

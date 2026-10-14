@@ -1,6 +1,7 @@
 #ifndef slic3r_Utils_UsageTelemetry_hpp_
 #define slic3r_Utils_UsageTelemetry_hpp_
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -12,19 +13,29 @@ class AppConfig;
 class Preset;
 class PresetCollection;
 
-// Anonymous usage diagnostics: what people use, which machines they run on, what fails.
+// Usage diagnostics: what people use, which machines they run on, what fails.
 //
 // Events are batched in memory and POSTed as JSON to https://unlayered3d.com/api/slicer/telemetry
 // (the site's app/lib/slicerTelemetry.ts validates and aggregates them; /admin/telemetry shows
-// them). On by default, switched off in Preferences > Online > "Send anonymous usage diagnostics",
-// and forced off on a machine by setting the environment variable UNLAYERED_NO_TELEMETRY to
-// anything non-empty, for sites that deploy the slicer centrally.
+// them).
 //
-// The one rule every caller keeps: nothing that comes from the person's work leaves the machine.
-// No model geometry or G-code, no file, object, project or user-preset names, no paths, no setting
-// VALUES typed in by hand (setting NAMES are fine), no account. A batch carries a random
-// per-install id, a random per-session id, the app version and platform, and named events whose
-// properties are short strings, numbers, booleans and lists of short strings.
+// OPTIONAL, and off until the person has said yes (0.1.6). Whether they may run is decided by the
+// privacy choice record, never by this module: PrivacyConsent::diagnostics_permitted() (the setup
+// wizard's privacy page, the privacy dialog after an update, Preferences > Online). Before a
+// choice, after a "no", and whenever the record is unreadable, nothing is collected, queued, kept
+// or sent. The environment variable UNLAYERED_NO_TELEMETRY (anything non-empty) switches them off
+// on a machine whatever anyone chose, for organisations that deploy the slicer centrally.
+//
+// What an event may carry is enforced by DiagnosticsAllowlist: unknown events and properties are
+// dropped, and every string must look like a value rather than a path, file name or address.
+//
+// The rule every caller keeps: the person's work itself never leaves the machine. No model
+// geometry, meshes, thumbnails or G-code, no file, object, project or user-preset names, no paths,
+// no free text, no account. Since 0.1.6 the values of changed settings are sent (custom G-code,
+// notes, hosts, credentials, paths and multi-line values excluded: Plater usage_private_key) and
+// coarse per-part measurements (rounded sizes and volumes, never the shape). A batch carries a
+// random per-install id, a random per-session id, the app version and platform, and named events
+// whose properties are short strings, numbers, booleans and lists of short strings.
 //
 // Crashes are detected on the next launch: each running session keeps a small marker file with
 // its process id, deleted on a clean exit; a marker whose process is gone means that session died.
@@ -41,7 +52,7 @@ class PresetCollection;
 // kill -9), or the power went. A session the operating system ended (log off, shut down, and on
 // macOS an ordinary Quit, which never reaches shutdown()) is not reported as a crash.
 //
-// Thread safety: record()/count() may be called from any thread. start(), set_enabled() and
+// Thread safety: record()/count() may be called from any thread. start(), refresh() and
 // shutdown() run on the main thread (they touch AppConfig).
 namespace UsageTelemetry {
 
@@ -50,15 +61,17 @@ namespace UsageTelemetry {
 void start(AppConfig &config, bool first_run);
 
 bool enabled();
-// From Preferences. Switching off drops everything queued and on disk.
-void set_enabled(AppConfig &config, bool on);
+// Reads the privacy choice again and applies it at once: called after every change to it. Turning
+// off (a withdrawal, a "no", an organisation opt-out) drops everything queued, kept on disk or not
+// yet answered by the site; turning on starts collecting from now on (nothing from before).
+void refresh(AppConfig &config);
 // True when UNLAYERED_NO_TELEMETRY switched it off, so Preferences can say why the box is locked.
 bool disabled_by_environment();
 
 bool is_first_run();
 
-// The random per-install id, only while diagnostics run and are on; empty otherwise (switched off,
-// UNLAYERED_NO_TELEMETRY, or not started yet). The update check sends it so the site can count
+// The random per-install id, only while diagnostics run and are permitted; empty otherwise (no
+// choice yet, declined, UNLAYERED_NO_TELEMETRY, or not started yet). The update check sends it so the site can count
 // different installs; switching diagnostics off stops that too.
 std::string install_id();
 
@@ -73,9 +86,10 @@ bool is_internal_copy();
 // alpha/beta/rc version, else "release". Pure, for tests; the app passes is_internal_copy().
 std::string channel_for(const std::string &version, bool internal);
 
-// Queues one event. `props` must be a JSON object of short strings, numbers, booleans and lists.
-// `counts` (optional) is an object of non-negative integer tallies the site adds into its feature
-// totals, e.g. {"parts:zaa_enabled": 4}.
+// Queues one event, if diagnostics are permitted. `props` must be a JSON object of short strings,
+// numbers, booleans and lists. `counts` (optional) is an object of non-negative integer tallies the
+// site adds into its feature totals, e.g. {"parts:zaa_enabled": 4}. Both pass through
+// DiagnosticsAllowlist::filter first; an event that is not on the allowlist is not queued.
 void record(const std::string &name, nlohmann::json props = nlohmann::json::object(), nlohmann::json counts = nlohmann::json());
 
 // Bumps a per-session tally (sent once, with session_end): "tab:preview", "gizmo:cut", ...
@@ -111,6 +125,14 @@ std::string preset_base_name(const PresetCollection &collection, const Preset &p
 // A slicing error message made safe to send: its first line, without quoted text, paths, or any
 // of `names` (the model's object and volume names), cut to 160 characters.
 std::string redact_message(const std::string &message, const std::vector<std::string> &names);
+
+// One Windows Application-log event as XML (EvtRenderEventXml): if it is "Application Error" (1000)
+// or "Application Hang" (1002) for `exe_name`, process `pid`, started at `started_ms` (Unix ms; 0 =
+// do not check), sets `exception` ("0xC0000409", or "hang_closed") and `at` ("module.dll+0x2a53fd")
+// and returns true. Public for the tests; start() uses it on Windows for a session marker that has
+// no exception of its own.
+bool match_crash_event(const std::string &event_xml, long pid, int64_t started_ms, const std::string &exe_name,
+                       std::string &exception, std::string &at);
 
 } // namespace UsageTelemetry
 } // namespace Slic3r

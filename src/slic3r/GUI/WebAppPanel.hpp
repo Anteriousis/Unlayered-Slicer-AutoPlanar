@@ -32,8 +32,8 @@ class WebAppBridge;
 // Fluidd, Mainsail) the same way.
 //
 // A panel is instantiated over a WebAppSlot: the AppConfig keys, environment overrides and seed
-// file it is configured from (WebAppSlot.hpp). Two slots ship -- the generic web application tab
-// and the Unlayered Agent tab -- and everything in this class is written once, per slot.
+// file it is configured from (WebAppSlot.hpp). Every slot shares this class, and everything in it
+// is written once, per slot.
 class WebAppPanel : public wxPanel
 {
 public:

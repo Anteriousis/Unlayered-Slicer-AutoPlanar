@@ -2,6 +2,58 @@
 
 All notable changes to Unlayered Slicer are listed here, newest first.
 
+## 0.1.6 — 2026-10-14
+
+Changes since **0.1.5** (2026-10-13).
+
+### Changed
+
+- **No Orca Cloud.** The home page no longer shows an Orca Cloud or Bambu Lab account panel, and
+  Preferences no longer has a login region or login side panel. Nothing in the slicer signs in to
+  Orca Cloud.
+- **The Bambu Lab network plug-in is off by default** on the first-run setup page; tick it there,
+  in the installer, or later in Preferences if you print to Bambu Lab printers over the network.
+- **Usage diagnostics are off until you choose to share them.** Setup now asks where you live, in
+  one click (United States, Canada, Mexico, Central America & Caribbean, European Union / EEA,
+  United Kingdom, Switzerland, Asia-Pacific, China, Rest of the world), then asks **Help us build a
+  better slicer**: **Keep my data private** or **Share usage diagnostics**. Outside the United
+  States neither is selected; in the United States, Share starts selected and can be changed before
+  continuing. Your answer is saved before anything optional starts. Updating from 0.1.5 or earlier
+  (where diagnostics were on by default) asks the same question once the app has started; nothing
+  is collected or sent until you answer. If you had switched diagnostics off, that is kept.
+- **Slicing improvement program**: an optional, separate box under Share, never ticked in advance.
+  Members get early access to new features, and their shared data may be used to develop, train,
+  test, evaluate, and improve AI, CAD, slicing, software, manufacturing, and hardware systems.
+  Ordinary usage diagnostics are not used for that. Join or leave any time in Preferences > Online.
+- Shared diagnostics now include the values of the settings you change (never custom G-code, names,
+  paths, file references or credentials) and coarse measurements of each part (never its shape).
+  After you export or send a print, a notification asks once how it came out (only while
+  diagnostics are on). See [USAGE_DIAGNOSTICS.md](USAGE_DIAGNOSTICS.md).
+- **The installation id is created only when you choose to share diagnostics**, not at first launch.
+  It is kept if you later switch them off, so you can quote it in a privacy request, but no longer sent.
+- **Privacy policy 2026-10-v3** (draft for legal review) is bundled, with the consent wording it sets
+  out. Anyone who answered the earlier wording is asked again.
+- **Preferences > Online > Privacy** shows your choice and where you live, switches diagnostics on or off at
+  once (switching off deletes anything not yet sent), lets you join or leave the Slicing improvement
+  program, lets you choose where you live again, and opens the full privacy policy.
+- **Sharing a project to Unlayered Universe asks first, every time**, saying exactly what is
+  uploaded, why, to whom and for how long, with a separate, unticked box for AI training. Usage
+  diagnostics never upload models.
+- Diagnostics carry only allowlisted fields; error messages hide paths with spaces in them and model
+  file names; part measurements are rounded.
+- **Crash reports on Windows say how the session ended**, read from the Windows event log at the
+  next launch (the faulting module and offset, or that the app stopped responding), when
+  diagnostics are shared.
+- When a copy cannot update itself (for example, one unzipped or run from a build folder rather than
+  installed), shared diagnostics now say why.
+
+### Fixed
+
+- **macOS: "What's new" after an update was empty.** The changelog was missing from the macOS app.
+- Unlayered's own macOS builds are counted as internal copies in usage diagnostics, as on Windows.
+- Long sessions no longer build diagnostics batches too large for the site to accept: batches are
+  split by size as well as by number of events.
+
 ## 0.1.5 — 2026-10-13
 
 Changes since **0.1.4** (2026-10-12).

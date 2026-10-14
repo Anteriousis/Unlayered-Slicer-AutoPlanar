@@ -17,6 +17,7 @@
 #include <atomic>
 #include <mutex>
 #include <chrono>
+#include <random>
 #include <boost/algorithm/string.hpp>
 #include <boost/iterator/counting_iterator.hpp>
 #include <boost/optional.hpp>
@@ -12692,6 +12693,117 @@ static bool usage_ignored_key(const std::string &key)
     return ignored.count(key) > 0;
 }
 
+// ---- 0.1.6: slice settings, part measurements and print ratings (part of usage diagnostics) ---
+// Settings whose VALUES never leave the computer: custom G-code and scripts, notes, names of the
+// person's presets, file paths, printer hosts and credentials. Their names may still be listed.
+static bool usage_private_key(const std::string &key)
+{
+    static const char *const parts[] = {"gcode", "post_process", "notes", "host", "apikey", "api_key", "password",
+                                        "user", "_url", "filename_format", "_profile", "_settings_id",
+                                        "custom_texture", "custom_model", "printer_agent", "serial",
+                                        // 0.1.6 privacy review: file references (sparse_infill_svg_path,
+                                        // infill_mesh_path, ...) and free-text vendor names.
+                                        "_path", "_file", "vendor"};
+    for (const char *part : parts)
+        if (key.find(part) != std::string::npos)
+            return true;
+    return false;
+}
+
+// "key=value" for the slice record, or "" when the value must not leave (a path, several lines).
+static std::string usage_setting_item(const std::string &label, const ConfigOption *opt)
+{
+    if (!opt)
+        return {};
+    std::string value = opt->serialize();
+    if (value.find('\n') != std::string::npos || value.find(":\\") != std::string::npos || value.find(":/") != std::string::npos ||
+        value.find('\\') != std::string::npos || (!value.empty() && value.front() == '/'))
+        return {};
+    std::string item = label + "=" + value;
+    return item.size() > 80 ? item.substr(0, 80) : item;
+}
+
+// Numbers that describe a part, never its shape: instance 0's bounding box (mm), volume (mm3), surface
+// area (mm2), the share of that area facing down by more than 45 degrees above the bed (overhangs)
+// and on the bed itself (%), and the number of copies.
+static std::string usage_part_descriptor(const ModelObject &object)
+{
+    if (object.instances.empty())
+        return {};
+    const BoundingBoxf3 box  = object.instance_bounding_box(0);
+    const Transform3d   inst = object.instances.front()->get_transformation().get_matrix();
+    const double        zmin = box.min.z();
+    double              area = 0., volume = 0., overhang = 0., base = 0.;
+    for (const ModelVolume *v : object.volumes) {
+        if (!v->is_model_part())
+            continue;
+        const Transform3d             m   = inst * v->get_matrix();
+        const indexed_triangle_set   &its = v->mesh().its;
+        for (const stl_triangle_vertex_indices &f : its.indices) {
+            const Vec3d a = m * its.vertices[f[0]].cast<double>();
+            const Vec3d b = m * its.vertices[f[1]].cast<double>();
+            const Vec3d c = m * its.vertices[f[2]].cast<double>();
+            const Vec3d n = (b - a).cross(c - a);
+            const double len = n.norm();
+            if (len <= 0.)
+                continue;
+            const double tri = 0.5 * len;
+            area += tri;
+            volume += a.dot(b.cross(c)) / 6.;
+            if (n.z() / len < -0.7071) {
+                if (std::min({a.z(), b.z(), c.z()}) <= zmin + 0.05)
+                    base += tri;
+                else
+                    overhang += tri;
+            }
+        }
+    }
+    if (area <= 0.)
+        return {};
+    // 0.1.6 privacy review: coarse on purpose. Exact sizes, volume and area together would single out
+    // a published model; sizes to 5 mm, volume and area to two significant figures and the shares to
+    // 5 % still say what kind of part it is.
+    auto step = [](double v, double by) { return std::round(v / by) * by; };
+    auto two_figures = [](double v) {
+        if (v <= 0.)
+            return 0.;
+        const double scale = std::pow(10., std::floor(std::log10(v)) - 1.);
+        return std::round(v / scale) * scale;
+    };
+    const Vec3d size = box.size();
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "x=%.0f;y=%.0f;z=%.0f;vol=%.0f;area=%.0f;ovh=%.0f;base=%.0f;inst=%d", step(size.x(), 5.),
+                  step(size.y(), 5.), step(size.z(), 5.), two_figures(std::abs(volume)), two_figures(area),
+                  step(100. * overhang / area, 5.), step(100. * base / area, 5.), int(object.instances.size()));
+    return buf;
+}
+
+// The newest slice's id, so a print rating can say which slice it is about, and its time estimate.
+static std::string s_usage_last_slice_id;
+static int         s_usage_last_print_s = 0;
+
+static std::string usage_new_slice_id()
+{
+    static std::mt19937_64 rng{std::random_device{}()};
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%012llx", static_cast<unsigned long long>(rng() & 0xffffffffffffULL));
+    return buf;
+}
+
+// An export or send of the newest slice: remembered so the app can ask "How did it print?" once the
+// print should be done (GUI_App's usage timer, key "usage_print_pending"; same key there).
+static void usage_remember_print(const char *via)
+{
+    if (!UsageTelemetry::enabled() || s_usage_last_slice_id.empty())
+        return;
+    nlohmann::json pending = {{"slice_id", s_usage_last_slice_id},
+                              {"at", int64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                                 std::chrono::system_clock::now().time_since_epoch()).count())},
+                              {"print_s", s_usage_last_print_s},
+                              {"via", via}};
+    wxGetApp().app_config->set("usage_print_pending", pending.dump());
+}
+
 static void record_usage_slice(const Model &model, int plate_count, const SlicingProcessCompletedEvent &evt, const std::string &crash_site)
 {
     if (!UsageTelemetry::enabled())
@@ -12733,10 +12845,13 @@ static void record_usage_slice(const Model &model, int plate_count, const Slicin
     // Which settings differ from the system presets: in the presets themselves (saved or not) and
     // as per-object, per-part and per-height-range overrides.
     std::set<std::string> keys;
+    std::set<std::string> preset_keys; // their values come from the full config
     const PresetCollection *collections[] = {&bundle.prints, &bundle.printers, &bundle.filaments};
     for (const PresetCollection *collection : collections)
-        for (const std::string &key : collection->current_different_from_parent_options())
+        for (const std::string &key : collection->current_different_from_parent_options()) {
             keys.insert(key);
+            preset_keys.insert(key);
+        }
     // Features, and how many parts (copies on the plate) each one applied to: a setting counts for an
     // object when the object's own value says so, or it has none and the settings say so.
     std::map<std::string, int> parts;
@@ -12784,6 +12899,60 @@ static void record_usage_slice(const Model &model, int plate_count, const Slicin
         if (!usage_ignored_key(key) && modified.size() < 60)
             modified.push_back(key);
     props["modified_keys"] = modified;
+
+    // 0.1.6: the VALUES too (what changed, to what), not only which keys. Preset
+    // values as sliced; per-object overrides as "o<n>.key=value". Private values never leave
+    // (usage_private_key, usage_setting_item).
+    std::vector<std::string> values;
+    int                      values_more = 0;
+    auto add_value = [&](const std::string &label, const std::string &key, const ConfigOption *opt) {
+        if (usage_ignored_key(key) || usage_private_key(key))
+            return;
+        std::string item = usage_setting_item(label, opt);
+        if (item.empty())
+            return;
+        if (values.size() < 60)
+            values.push_back(std::move(item));
+        else
+            ++values_more;
+    };
+    for (const std::string &key : preset_keys)
+        add_value(key, key, config.option(key));
+    for (size_t i = 0; i < model.objects.size(); ++i)
+        for (const std::string &key : model.objects[i]->config.keys())
+            add_value("o" + std::to_string(i) + "." + key, key, model.objects[i]->config.option(key));
+    props["settings"] = values;
+    if (values_more > 0)
+        props["settings_more"] = values_more;
+
+    std::vector<std::string> part_rows;
+    for (const ModelObject *object : model.objects) {
+        if (part_rows.size() >= 20)
+            break;
+        std::string row = usage_part_descriptor(*object);
+        if (!row.empty())
+            part_rows.push_back(std::move(row));
+    }
+    props["parts"] = part_rows;
+
+    s_usage_last_slice_id = usage_new_slice_id();
+    s_usage_last_print_s  = 0;
+    props["slice_id"]     = s_usage_last_slice_id;
+    if (evt.success()) {
+        if (PartPlate *plate = wxGetApp().plater()->get_partplate_list().get_curr_plate())
+            if (const GCodeProcessorResult *result = plate->get_slice_result()) {
+                const auto &stats    = result->print_statistics;
+                s_usage_last_print_s = int(stats.modes[0].time);
+                props["print_s"]     = s_usage_last_print_s;
+                double model_mm3 = 0., support_mm3 = 0.;
+                for (const auto &[extruder, mm3] : stats.model_volumes_per_extruder)
+                    model_mm3 += mm3;
+                for (const auto &[extruder, mm3] : stats.support_volumes_per_extruder)
+                    support_mm3 += mm3;
+                props["model_mm3"]   = int64_t(model_mm3);
+                props["support_mm3"] = int64_t(support_mm3);
+            }
+    }
 
     std::vector<std::string> features;
     nlohmann::json           part_counts = nlohmann::json::object();
@@ -18617,6 +18786,7 @@ void Plater::export_gcode(bool prefer_removable)
         return;
 
     UsageTelemetry::record("export", {{"kind", "gcode"}, {"removable", prefer_removable}});
+    usage_remember_print("export");
 
     // If possible, remove accents from accented latin characters.
     // This function is useful for generating file names to be processed by legacy firmwares.
@@ -18722,6 +18892,7 @@ void Plater::export_gcode_3mf(bool export_all)
         return;
 
     UsageTelemetry::record("export", {{"kind", "gcode_3mf"}, {"all_plates", export_all}});
+    usage_remember_print("export");
 
     //calc default_output_file, get default output file from background process
     fs::path default_output_file;
@@ -20406,6 +20577,7 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
         return;
 
     UsageTelemetry::record("export", {{"kind", "send"}, {"host_type", physical_printer_config->opt_serialize("host_type")}});
+    usage_remember_print("send");
 
     // Orca: the use_3mf printer option makes us send a .gcode.3mf to the printer
     const auto* use_3mf_opt = physical_printer_config->option<ConfigOptionBool>("use_3mf");

@@ -12,9 +12,7 @@ namespace GUI {
 // Preferences all need to name a slot without pulling the panel's headers in.
 //
 // The three slots, of which two ship switched on:
-//   agent()    -- the "Agent" tab. Holds the print-settings permission, because changing settings
-//                 on the user's behalf is what it is for, and keeps its page across a theme
-//                 toggle (live_theme) because that page holds a conversation.
+//   agent()    -- the second slot. Off in release builds (development edition only).
 //   universe() -- the "Universe" tab: browse models and open one straight onto the plate, and
 //                 publish what is on the plate back. Holds the export permission, not settings.
 //   generic()  -- the "Web application" tab: application-agnostic, hosts whatever a developer

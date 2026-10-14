@@ -3,6 +3,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/Platform.hpp"
 #include "GUI_App.hpp"
+#include <wx/choicdlg.h>
 #include "GUI_Init.hpp"
 #include "GUI_ObjectList.hpp"
 #include "slic3r/GUI/UserManager.hpp"
@@ -151,6 +152,8 @@
 #include "ReleaseNote.hpp"
 #include "AutoUpdater.hpp"
 #include "slic3r/Utils/UsageTelemetry.hpp"
+#include "slic3r/Utils/PrivacyConsent.hpp"
+#include "PrivacySetupDialog.hpp"
 #include "ModelMall.hpp"
 #include "HintNotification.hpp"
 
@@ -891,6 +894,88 @@ void record_usage_app_start()
     UsageTelemetry::record("app_start", std::move(props));
 }
 
+
+// 0.1.6: "How did it print?" -- the outcome label for the slice it rates. Asked once per
+// exported or sent slice (Plater's usage_remember_print writes "usage_print_pending"; same key there)
+// when the print should be done: its estimated time plus 10 minutes, and no sooner than 20 minutes
+// after the export. A notification, never a popup; an unanswered one is forgotten after 3 days.
+void usage_rate_print(const nlohmann::json &pending)
+{
+    if (!wxGetApp().mainframe)
+        return;
+    MessageDialog dlg(wxGetApp().mainframe, _L("How did the print come out?"), _L("Rate this print"),
+                      wxYES_NO | wxCANCEL | wxICON_QUESTION);
+    dlg.SetButtonLabel(wxID_YES, _L("Good"));
+    dlg.SetButtonLabel(wxID_NO, _L("Had a problem"));
+    dlg.SetButtonLabel(wxID_CANCEL, _L("Skip"));
+    const int answer = dlg.ShowModal();
+    wxGetApp().app_config->set("usage_print_pending", "");
+    if (answer != wxID_YES && answer != wxID_NO)
+        return;
+    nlohmann::json props = {{"slice_id", pending.value("slice_id", std::string())},
+                            {"rating", answer == wxID_YES ? "good" : "problem"},
+                            {"via", pending.value("via", std::string())}};
+    if (answer == wxID_NO) {
+        const std::vector<std::pair<std::string, wxString>> problems = {
+            {"warping", _L("Warping or corners lifting")},  {"adhesion", _L("Did not stick to the bed")},
+            {"stringing", _L("Stringing or blobs")},         {"layer_shift", _L("Layer shift")},
+            {"supports", _L("Supports failed or hard to remove")},
+            {"under_extrusion", _L("Gaps or under-extrusion")}, {"over_extrusion", _L("Too much plastic")},
+            {"surface", _L("Poor surface or overhangs")},    {"failed", _L("Print failed part-way")},
+            {"other", _L("Something else")}};
+        wxArrayString labels;
+        for (const auto &p : problems)
+            labels.Add(p.second);
+        wxMultiChoiceDialog choice(wxGetApp().mainframe, _L("What went wrong? Choose all that apply."), _L("Rate this print"),
+                                   labels);
+        std::vector<std::string> chosen;
+        if (choice.ShowModal() == wxID_OK)
+            for (int i : choice.GetSelections())
+                if (i >= 0 && size_t(i) < problems.size())
+                    chosen.push_back(problems[size_t(i)].first);
+        props["problems"] = chosen;
+    }
+    UsageTelemetry::record("print_rating", std::move(props));
+}
+
+void usage_maybe_ask_print_rating(GUI_App &app)
+{
+    if (!app.app_config)
+        return;
+    const std::string raw = app.app_config->get("usage_print_pending");
+    if (raw.empty())
+        return;
+    // Diagnostics switched off since the export: the answer could not be sent, so do not ask
+    // (policy 2026-10-v2, section 3.7: feedback is collected only while diagnostics are on).
+    if (!UsageTelemetry::enabled()) {
+        app.app_config->set("usage_print_pending", "");
+        return;
+    }
+    nlohmann::json pending = nlohmann::json::parse(raw, nullptr, false);
+    const int64_t  now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const int64_t  at  = pending.is_object() ? pending.value("at", int64_t(0)) : 0;
+    if (!pending.is_object() || now - at > 3 * 24 * 3600) {
+        app.app_config->set("usage_print_pending", "");
+        return;
+    }
+    if (pending.value("asked", false))
+        return;
+    if (now < at + std::max<int64_t>(pending.value("print_s", int64_t(0)) + 600, 1200))
+        return;
+    Plater *plater = app.plater();
+    if (!plater)
+        return;
+    pending["asked"] = true;
+    app.app_config->set("usage_print_pending", pending.dump());
+    plater->get_notification_manager()->push_notification(
+        NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
+        _u8L("How did your last print come out? Your answer helps us improve print quality."),
+        _u8L("Rate it"), [pending](wxEvtHandler *) {
+            wxGetApp().CallAfter([pending]() { usage_rate_print(pending); });
+            return true;
+        });
+}
+
 void start_usage_diagnostics(GUI_App &app)
 {
     UsageTelemetry::start(*app.app_config, s_usage_first_run);
@@ -903,9 +988,12 @@ void start_usage_diagnostics(GUI_App &app)
     app.Bind(wxEVT_TIMER, [](wxTimerEvent &) {
         static int ticks = 0;
         ++ticks;
-        // Nothing to do mid-shutdown; stop_usage_diagnostics() sends what is left.
-        if (!UsageTelemetry::enabled() || wxGetApp().is_closing())
+        // Nothing to do mid-shutdown; stop_usage_diagnostics() sends what is left. Nothing goes out
+        // while the setup wizard is open either: its last page asks about diagnostics, and an answer
+        // of "don't send" must mean nothing was ever sent (WebGuideDialog applies it on Finish).
+        if (!UsageTelemetry::enabled() || wxGetApp().is_closing() || wxGetApp().is_running_wizard())
             return;
+        usage_maybe_ask_print_rating(wxGetApp());
         if (!s_usage_app_start_sent) {
             record_usage_app_start();
             UsageTelemetry::flush();
@@ -922,24 +1010,39 @@ void start_usage_diagnostics(GUI_App &app)
     s_usage_heartbeat->Start(5 * 1000);
     UsageTelemetry::heartbeat();
 
-    // Said once, where it can be switched off. On by default, so the person is told rather than asked.
-    if (UsageTelemetry::enabled() && !app.app_config->get_bool("usage_diagnostics_notice_shown")) {
-        app.app_config->set_bool("usage_diagnostics_notice_shown", true);
-        app.CallAfter([]() {
-            Plater *plater = wxGetApp().plater();
-            if (!plater)
-                return;
-            plater->get_notification_manager()->push_notification(
-                NotificationType::CustomNotification, NotificationManager::NotificationLevel::ImportantNotificationLevel,
-                _u8L("Unlayered Slicer sends anonymous usage diagnostics to help us improve it: the features you use, "
-                     "slicing results, crashes and system details. Never your models, files or names."),
-                _u8L("Turn off in Preferences"), [](wxEvtHandler *) {
-                    // Online is the fifth Preferences tab.
-                    wxGetApp().open_preferences(4, "usage_diagnostics");
-                    return true;
-                });
-        });
-    }
+    // Nothing is collected until the person has made a privacy choice: the setup wizard's privacy
+    // page, or for an installation that never saw it (an update from 0.1.5 or earlier, a setup
+    // closed early) the privacy dialog ask_privacy_choice_once() opens after start-up.
+    // UsageTelemetry::start() has already applied whatever choice exists.
+}
+
+// The privacy question for an installation without a valid choice: updated from 0.1.5 or earlier
+// (whose "on by default" was never a choice), a setup closed before its privacy page, or a choice
+// made for an older notice. After the setup wizard (which asks itself) and What's new. Closing the
+// dialog chooses nothing and diagnostics stay off; it is offered again on the next launch, three
+// times at most, and after that only from Preferences > Online. Never asked when the organisation
+// has switched diagnostics off (UNLAYERED_NO_TELEMETRY): there is nothing to choose.
+void ask_privacy_choice_once(GUI_App &app, bool wizard_showed)
+{
+    if (wizard_showed || !app.app_config || PrivacyConsent::organization_opt_out())
+        return;
+    const PrivacyConsent::Status status = PrivacyConsent::status(PrivacyConsent::load(*app.app_config), PrivacyConsent::legal_approvals());
+    if (status == PrivacyConsent::Status::Granted || status == PrivacyConsent::Status::Declined)
+        return;
+    int dismissed = 0;
+    try {
+        dismissed = std::stoi(app.app_config->get("privacy_prompt_dismissed"));
+    } catch (...) {}
+    if (dismissed >= 3)
+        return;
+    app.CallAfter([&app, dismissed]() {
+        if (!app.mainframe || app.is_closing())
+            return;
+        if (!run_privacy_setup(app.mainframe, "update_prompt")) {
+            app.app_config->set("privacy_prompt_dismissed", std::to_string(dismissed + 1));
+            app.app_config->save();
+        }
+    });
 }
 
 void stop_usage_diagnostics()
@@ -1175,6 +1278,7 @@ void GUI_App::post_init()
             m_auto_updater = std::make_unique<AutoUpdater>(*this);
             m_auto_updater->on_startup();
             m_auto_updater->show_whats_new(cw_showed);
+            ask_privacy_choice_once(*this, cw_showed);
             this->check_new_version_sf();
             const auto cloud_provider = get_printer_cloud_provider();
             if (is_user_login(cloud_provider) && !app_config->get_stealth_mode()) {
@@ -5627,41 +5731,28 @@ std::string GUI_App::handle_web_request(std::string cmd)
         boost::optional<std::string> command = root.get_optional<std::string>("command");
         if (command.has_value()) {
             std::string command_str = command.value();
-            // Unlayered: Bambu login commands removed with the account surface.
-            static const std::unordered_set<std::string> stealth_blocked_info_commands = {
+            // Unlayered: there is no cloud account to sign in to (no Orca Cloud, no Bambu cloud; see
+            // WebViewPanel::SendCloudProvidersInfo), stealth mode or not. The home page's account
+            // queries get the empty provider list, which keeps its panel hidden, and the login
+            // buttons do nothing. Before 0.1.6 this applied only in stealth mode, and its dialog
+            // even offered to leave stealth mode and carry on into an Orca Cloud login.
+            static const std::unordered_set<std::string> cloud_info_commands = {
                 "get_login_info",
                 "get_orca_login_info",
             };
-            static const std::unordered_set<std::string> stealth_blocked_login_commands = {
+            static const std::unordered_set<std::string> cloud_login_commands = {
                 "homepage_login_or_register",
                 "homepage_orca_login_or_register",
             };
-            if (app_config->get_stealth_mode() && stealth_blocked_info_commands.count(command_str)) {
+            if (cloud_info_commands.count(command_str)) {
                 CallAfter([this] {
                     if (mainframe && mainframe->m_webview)
                         mainframe->m_webview->SendCloudProvidersInfo();
                 });
                 return "";
             }
-            if (app_config->get_stealth_mode() && stealth_blocked_login_commands.count(command_str)) {
-                CallAfter([this, command_str] {
-                    MessageDialog dlg(mainframe,
-                        _L("You are currently in Stealth Mode. To log into the Cloud, you need to disable Stealth Mode first."),
-                        _L("Stealth Mode"),
-                        wxOK | wxCANCEL | wxCENTRE);
-                    dlg.SetButtonLabel(wxID_OK, _L("Quit Stealth Mode"));
-                    if (dlg.ShowModal() == wxID_OK) {
-                        app_config->set_bool("stealth_mode", false);
-                        app_config->save();
-                        if (mainframe && mainframe->m_webview)
-                            mainframe->m_webview->SendCloudProvidersInfo();
-                        // Continue with login
-                        if (command_str == "homepage_login_or_register")
-                            this->request_login(true);
-                        else if (command_str == "homepage_orca_login_or_register")
-                            this->request_login(true, ORCA_CLOUD_PROVIDER);
-                    }
-                });
+            if (cloud_login_commands.count(command_str)) {
+                BOOST_LOG_TRIVIAL(info) << "handle_web_request: ignoring " << command_str << " (no cloud account in this build)";
                 return "";
             }
             if (command_str.compare("request_project_download") == 0) {
@@ -6272,8 +6363,10 @@ namespace
 {
 
 // Unlayered: the update check used to sign every request with an HMAC key and carry a persistent
-// installation UUID, the OS description and the CPU architecture. All of that is gone. The check is
-// now a plain GET of a static JSON file, with no query string and nothing identifying the machine.
+// installation UUID, the OS description and the CPU architecture. That is gone. The check is now a
+// GET of a static JSON file with only ?platform=&arch= (which installer to offer). The diagnostics
+// install id goes along in X-Unlayered-Install only while the person's privacy choice permits
+// diagnostics (UsageTelemetry::install_id()); see docs/privacy/NETWORK_TRAFFIC.md.
 
 // Identifies the build to the update host, so its access log can be filtered. Matches the token
 // used by FirmwareBundle and AppUpdater.

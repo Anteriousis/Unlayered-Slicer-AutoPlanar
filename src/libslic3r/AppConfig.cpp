@@ -491,11 +491,11 @@ void AppConfig::set_defaults()
     if (get("hide_login_side_panel").empty()) {
         set_bool("hide_login_side_panel", false);
     }
-    // Unlayered: anonymous usage diagnostics, on unless switched off (slic3r/Utils/UsageTelemetry).
-    // Its own setting, NOT part of stealth mode: stealth mode is on for everyone by default.
-    if (get("usage_diagnostics").empty()) {
-        set_bool("usage_diagnostics", true);
-    }
+    // Unlayered: usage diagnostics (slic3r/Utils/UsageTelemetry). Since 0.1.6 "usage_diagnostics"
+    // is only a mirror of the privacy choice record "privacy_consent" (slic3r/Utils/PrivacyConsent),
+    // written with it; permission is never read from it. No default is written here: an explicit
+    // "false" in a config from before 0.1.6 is an opt-out that PrivacyConsent::migrate_legacy_setting
+    // keeps, and a default written by this function would look exactly like one.
     if (get("allow_abnormal_storage").empty()) {
         set_bool("allow_abnormal_storage", false);
     }
@@ -524,8 +524,8 @@ void AppConfig::set_defaults()
     if (get(SETTING_WEB_APP_ALLOW_SETTINGS).empty())
         set_bool(SETTING_WEB_APP_ALLOW_SETTINGS, false);
 
-    // Unlayered: the second slot, the Unlayered Agent tab, seeded once from
-    // resources/web/webapp/agent.json. Same defaults as the generic slot above.
+    // Unlayered: the second web-application slot (off in release builds), seeded once from its
+    // development overlay file. Same defaults as the generic slot above.
     if (get(SETTING_AGENT_APP_ENABLED).empty())
         set_bool(SETTING_AGENT_APP_ENABLED, false);
     if (!has(SETTING_AGENT_APP_URL))

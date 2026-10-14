@@ -570,6 +570,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/WebDownPluginDlg.hpp
     GUI/WebGuideDialog.cpp
     GUI/WebGuideDialog.hpp
+    GUI/PrivacySetupDialog.cpp
+    GUI/PrivacySetupDialog.hpp
+    GUI/ModelUploadConsentDialog.cpp
+    GUI/ModelUploadConsentDialog.hpp
     GUI/WebUserLoginDialog.cpp
     GUI/WebUserLoginDialog.hpp
     GUI/WebViewDialog.cpp
@@ -719,6 +723,12 @@ set(SLIC3R_GUI_SOURCES
     Utils/UnlayeredAccount.hpp
     Utils/UsageTelemetry.cpp
     Utils/UsageTelemetry.hpp
+    Utils/PrivacyConsent.cpp
+    Utils/PrivacyConsent.hpp
+    Utils/PrivacyChoiceStats.cpp
+    Utils/PrivacyChoiceStats.hpp
+    Utils/DiagnosticsAllowlist.cpp
+    Utils/DiagnosticsAllowlist.hpp
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp

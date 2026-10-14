@@ -74,9 +74,9 @@ using namespace nlohmann;
 // twice and the user's own choice afterwards sticks. Named for the switch-off it did first.
 #define SETTING_WEB_APP_DISABLE_ONCE "web_app_disable_once"
 
-// Second web-application slot, home of the Unlayered Agent tab (WebAppSlot::agent()). Same panel,
-// same bridge, its own keys so the two tabs are configured independently; seeded once from
-// resources/web/webapp/agent.json. Mirrors the web_app_* family above key for key.
+// Second web-application slot (WebAppSlot::agent(); off in release builds). Same panel, same
+// bridge, its own keys so the two tabs are configured independently; seeded once from its
+// development overlay file. Mirrors the web_app_* family above key for key.
 #define SETTING_AGENT_APP_ENABLED        "agent_app_enabled"
 #define SETTING_AGENT_APP_URL            "agent_app_url"
 #define SETTING_AGENT_APP_TITLE          "agent_app_title"

@@ -16,21 +16,25 @@
 <script type="text/javascript" src="4unlayered.js"></script>
 </head>
 <!-- Unlayered 2026-10-09 (Alex): the last first-run page. ONE page for both questions, like the
-     OrcaSlicer setup guide - stealth mode UNTICKED by default, the Bambu Lab network plug-in TICKED.
+     OrcaSlicer setup guide - stealth mode UNTICKED by default. The Bambu Lab network plug-in was
+     TICKED until 0.1.6; Alex 2026-10-13: UNTICKED by default (it is Bambu's closed-source DLL, and
+     its crashes show up in our diagnostics on machines with no Bambu printer). No Orca Cloud text:
+     this build has no cloud profile syncing or backup.
+     Usage diagnostics are NOT asked here since 0.1.6: the privacy page (guide 13, after the region)
+     asks for an explicit choice before anything else in setup.
      WebGuideDialog writes stealth_mode only because this page reported it, and GUI_App::run_wizard
      starts the plug-in download when the wizard closes with the box ticked. Text without a tid is
      shown as written (no translation entry yet). -->
 <body onLoad="OnInit()">
 <div id="Title">
-	<div>Privacy and printer connections</div>
+	<div>Online features and printer connections</div>
 </div>
 <div id="Content">
 
 	<div class="Section">
 		<div class="SectionTitle trans" tid="orca3">Stealth Mode</div>
 		<div class="FeatureText">
-			<div><a tid="orca4" class="trans TextS1">This disables all cloud features, including cloud profile syncing. Users who prefer to work entirely offline can enable this option.</a></div>
-			<div><a tid="orca12" class="trans TextS2">Note: When Stealth Mode is enabled, your user profiles will not be backed up to the cloud.</a></div>
+			<div><a class="TextS1">Stealth Mode turns off the slicer's optional online features. The check for new versions of Unlayered Slicer still runs, and printers on your own network keep working.</a></div>
 		</div>
 		<!-- ORCA use label tag to allow checkbox to toggle when user clicked to text -->
 		<label class="CheckArea"><input id="StealthMode" onClick="SendStealthModeCheck()" type="checkbox"><a tid="orca5" class="trans TextS1">Enable Stealth Mode.</a></label>
@@ -40,9 +44,9 @@
 		<div class="SectionTitle">Bambu Lab printers</div>
 		<div class="FeatureText">
 			<div><a class="TextS1">The Bambu Lab network plug-in is required for wireless communication with Bambu Lab 3D printers: sending prints over Wi-Fi or LAN and seeing the printer's status and camera.</a></div>
-			<div><a class="TextS2">It is made by Bambu Lab, not Unlayered, and is downloaded when you press Finish. It works with Stealth Mode on. Not using a Bambu Lab printer? Untick it - you can install it later from Preferences.</a></div>
+			<div><a class="TextS2">It is made by Bambu Lab, not Unlayered, and is downloaded when you press Finish. It works with Stealth Mode on. Using a Bambu Lab printer? Tick the box - you can also install it later from Preferences.</a></div>
 		</div>
-		<label class="CheckArea"><input id="InstallCheck" onClick="SendInstallPluginCheck()" type="checkbox" checked><a class="TextS1">Install the Bambu Lab network plug-in.</a></label>
+		<label class="CheckArea"><input id="InstallCheck" onClick="SendInstallPluginCheck()" type="checkbox"><a class="TextS1">Install the Bambu Lab network plug-in.</a></label>
 	</div>
 
 	<div id="RestartText" tid="t70" class="trans" ></div>

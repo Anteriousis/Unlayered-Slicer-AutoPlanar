@@ -1,4 +1,5 @@
 #include "WebGuideDialog.hpp"
+#include "slic3r/Utils/UsageTelemetry.hpp"
 #include "libslic3r/libslic3r.h"
 #include "ConfigWizard.hpp"
 
@@ -121,6 +122,8 @@ GuideFrame::GuideFrame(GUI_App *pGUI, long style)
     InstallNetplugin = false;
 
     m_MainPtr = pGUI;
+    // A first setup, or the wizard opened again from the menu (which counts as changing the choice).
+    m_privacy = std::make_unique<PrivacyFlow>(false, pGUI->app_config->get("firstguide", "finish") == "1" ? "preferences" : "initial_setup");
 
     // set the frame icon
     wxBoxSizer *topsizer = new wxBoxSizer(wxVERTICAL);
@@ -432,6 +435,19 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
 
         wxString strCmd = j["command"];
         BOOST_LOG_TRIVIAL(trace) << "GuideFrame::OnScriptMessage;Command:" << strCmd;
+
+        // The privacy pages (guide 11 / 12 / 13) talk to the privacy flow.
+        std::string privacy_reply;
+        if (m_privacy && m_privacy->handle(j, privacy_reply)) {
+            // The region page names a place; its printer-profile region is the wizard's region.
+            if (const std::string region = m_privacy->guide_region(); !region.empty())
+                m_Region = region;
+            if (!privacy_reply.empty()) {
+                const wxString js = wxString::FromUTF8(privacy_reply);
+                wxGetApp().CallAfter([this, js] { RunScript(js); });
+            }
+            return;
+        }
 
         if (strCmd == "close_page") {
             this->EndModal(wxID_CANCEL);
@@ -754,6 +770,8 @@ int GuideFrame::SaveProfile()
     // already run by the time the wizard shows, so an "off" written here sticks.
     if (m_stealth_answered)
         m_MainPtr->app_config->set_bool("stealth_mode", StealthMode);
+    // Usage diagnostics are not decided here: the privacy page saved the person's choice the moment
+    // they pressed Continue (PrivacyFlow), and nothing is sent while the wizard is open.
 
     //finish
     m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "finish", "1");

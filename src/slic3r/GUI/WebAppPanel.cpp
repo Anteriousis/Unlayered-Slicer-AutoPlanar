@@ -298,11 +298,6 @@ const WebAppSlot& WebAppSlot::agent()
         // withdrawal cleared it.
         s.visibility_once        = FORWARD_EDITION_TAG;
         s.visibility_once_enable = true;
-        s.default_url            = "https://unlayered3d.com/agent?host=unlayered-slicer";
-        s.default_title          = "Agent";
-        // The agent's whole purpose is to change print settings on the user's behalf, so the
-        // settings family of the bridge is on for this tab and off for the other two.
-        s.default_allow_settings = true;
         s.default_allow_export   = false;
         s.download_hosts     = nullptr;
         s.legacy_url         = nullptr; // no build ever seeded this slot with a dead address
@@ -395,7 +390,7 @@ bool WebAppPanel::is_enabled(const WebAppSlot& slot)
 {
     // Not in a release build, whatever the config or the ORCA_*_APP_URL environment says:
     // - the generic slot is a developer harness, not part of the product;
-    // - the Agent tab is not part of this release.
+    // - the second slot is not part of this release.
     // The dev edition keeps both.
     if (std::string(slot.id) == WebAppSlot::generic().id || std::string(slot.id) == WebAppSlot::agent().id)
         return false;

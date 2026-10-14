@@ -30,6 +30,9 @@
 #include "slic3r/Utils/bambu_networking.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "slic3r/Utils/UsageTelemetry.hpp"
+#include "slic3r/Utils/PrivacyConsent.hpp"
+#include "slic3r/Utils/PrivacyChoiceStats.hpp"
+#include "PrivacySetupDialog.hpp"
 #include "NetworkPluginDialog.hpp"
 #include "DownloadProgressDialog.hpp"
 
@@ -1030,6 +1033,96 @@ wxBoxSizer *PreferencesDialog::create_item_auto_reslice(wxString title, wxString
     return m_sizer;
 }
 
+// Unlayered 0.1.6: the "Send usage diagnostics" switch. Switching off is a decline, saved and
+// applied at once (queued diagnostics are discarded). Switching on is an explicit choice for the
+// region and country already chosen; without one, the privacy steps ask for them first.
+void PreferencesDialog::on_usage_diagnostics_toggled(bool on)
+{
+    namespace pc = PrivacyConsent;
+    const std::optional<pc::Record> current = pc::load(*app_config);
+    const std::string region  = current ? current->region : std::string();
+    const std::string country = current ? current->country : std::string();
+    const bool        placed  = pc::is_region_code(region);
+    if (on && !placed) {
+        run_privacy_setup(this, "preferences");
+    } else {
+        const pc::Record record = pc::make_choice(region, country, on, false, "preferences", pc::iso8601_now(), pc::legal_approvals());
+        pc::save(*app_config, record);
+        app_config->save();
+        UsageTelemetry::refresh(*app_config);
+
+        PrivacyChoiceStats::Event e;
+        e.event_type       = "privacy_preference_changed";
+        e.region           = region;
+        e.country          = country;
+        e.page_version     = "preferences-v1";
+        e.notice_version   = pc::NOTICE_VERSION;
+        e.choice           = on ? "accepted" : "declined";
+        e.choice_source    = "preferences";
+        e.selection_method = "explicit";
+        if (std::optional<nlohmann::json> body = PrivacyChoiceStats::to_body(e))
+            PrivacyChoiceStats::submit(*body);
+    }
+    // The generic checkbox handler wrote the box's state into the mirror key before calling this;
+    // put back what the record actually says (a privacy dialog closed without a choice stays off).
+    app_config->set_bool("usage_diagnostics", pc::diagnostics_permitted(*app_config));
+    app_config->save();
+    update_privacy_controls();
+}
+
+// Unlayered 0.1.6 (notice 2026-10-v3): the "Slicing improvement program" box. Only usable while
+// diagnostics are shared; joining or leaving is an explicit choice for the place already chosen, saved
+// and applied at once (what was queued under the other answer is discarded, UsageTelemetry::refresh).
+void PreferencesDialog::on_improvement_program_toggled(bool on)
+{
+    namespace pc = PrivacyConsent;
+    const std::optional<pc::Record> current = pc::load(*app_config);
+    if (current && pc::diagnostics_permitted(*app_config)) {
+        const pc::Record record = pc::make_choice(current->region, current->country, true, false, "preferences", pc::iso8601_now(),
+                                                  pc::legal_approvals(), on);
+        pc::save(*app_config, record);
+        app_config->save();
+        UsageTelemetry::refresh(*app_config);
+    }
+    app_config->set_bool("usage_improvement_program", pc::program_permitted(*app_config));
+    app_config->save();
+    update_privacy_controls();
+}
+
+void PreferencesDialog::update_privacy_controls()
+{
+    namespace pc = PrivacyConsent;
+    const std::optional<pc::Record> record = pc::load(*app_config);
+    if (m_usage_diagnostics_checkbox)
+        m_usage_diagnostics_checkbox->SetValue(pc::diagnostics_permitted(*app_config));
+    if (m_improvement_program_checkbox) {
+        m_improvement_program_checkbox->SetValue(pc::program_permitted(*app_config));
+        m_improvement_program_checkbox->Enable(pc::diagnostics_permitted(*app_config));
+    }
+    if (!m_privacy_status)
+        return;
+
+    wxString text;
+    if (pc::organization_opt_out())
+        text = _L("Switched off on this computer by your organization.");
+    else
+        switch (pc::status(record, pc::legal_approvals())) {
+        case pc::Status::Granted:
+            text = pc::program_permitted(*app_config) ? _L("Your choice: share usage diagnostics, as a member of the Slicing improvement program.") :
+                                                        _L("Your choice: share usage diagnostics.");
+            break;
+        case pc::Status::Declined: text = _L("Your choice: keep my data private."); break;
+        case pc::Status::NeedsNewChoice: text = _L("Not shared. The privacy notice has changed since your last choice; please choose again."); break;
+        case pc::Status::NotAsked: text = _L("Not shared. You have not made a choice yet."); break;
+        }
+    if (record)
+        if (const pc::Place *where = pc::place_of(record->region, record->country))
+            text += " " + wxString::Format(_L("Where you live: %s."), wxString::FromUTF8(where->label));
+    m_privacy_status->SetLabel(text);
+    m_privacy_status->Wrap(FromDIP(560));
+    m_parent->Layout();
+}
+
 void PreferencesDialog::set_dark_mode()
 {
 #ifdef __WINDOWS__
@@ -1054,6 +1147,18 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
     checkbox->SetToolTip(tip);
 
     if (param == "sync_user_preset") { m_sync_user_preset_checkbox = checkbox; }
+    if (param == "usage_diagnostics") {
+        // The privacy choice decides, not the mirror key.
+        m_usage_diagnostics_checkbox = checkbox;
+        checkbox->SetValue(PrivacyConsent::diagnostics_permitted(*app_config));
+        checkbox->Enable(!PrivacyConsent::organization_opt_out());
+    }
+    if (param == "usage_improvement_program") {
+        // Membership follows the privacy record too; only offered while diagnostics are shared.
+        m_improvement_program_checkbox = checkbox;
+        checkbox->SetValue(PrivacyConsent::program_permitted(*app_config));
+        checkbox->Enable(PrivacyConsent::diagnostics_permitted(*app_config));
+    }
 
     m_sizer->Add(checkbox, 0, wxALIGN_CENTER);
 
@@ -1077,7 +1182,10 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
         // }
 
         if (param == "usage_diagnostics") {
-            UsageTelemetry::set_enabled(*app_config, checkbox->GetValue());
+            on_usage_diagnostics_toggled(checkbox->GetValue());
+        }
+        else if (param == "usage_improvement_program") {
+            on_improvement_program_toggled(checkbox->GetValue());
         }
         else if (param == "sync_user_preset") {
             bool sync = app_config->get("sync_user_preset") == "true" ? true : false;
@@ -1879,9 +1987,8 @@ void PreferencesDialog::create_items()
     g_sizer->Add(item_multi_machine);
 
     //// GENERAL > Web application
-    // Unlayered: the embedded web-application tabs (Agent, Universe, and the generic Web
-    // application slot behind them) deliberately have no Preferences UI. Agent and Universe are
-    // shipped features with one sensible address each, so a switch would only offer the user a
+    // Unlayered: the embedded web-application tabs deliberately have no Preferences UI. The
+    // shipped ones have one sensible address each, so a switch would only offer the user a
     // way to break them; the generic slot is a developer harness a customer should not find.
     //
     // What a tab is, where it points and what it may do through the bridge are fields on its
@@ -2475,19 +2582,19 @@ void PreferencesDialog::create_items()
     //// ONLINE > Connection
     g_sizer->Add(create_item_title(_L("Connection")), 1, wxEXPAND);
 
-    // Unlayered: the cloud-account settings are HIDDEN, not greyed out, while stealth mode is
-    // on -- an account panel you cannot use is still an account panel, and greying it out only
-    // advertises a service this build does not talk to. The Stealth mode checkbox itself stays
-    // put, so this is always recoverable: switch it off and reopen Preferences (the widgets
-    // below are not created while it is on, so they do not appear until the dialog is rebuilt).
-    const bool show_cloud_ui = !app_config->get_stealth_mode();
+    // Unlayered: the cloud-account settings (login region, the home page's login panel) are never
+    // shown. This build has no Orca Cloud and no Bambu cloud account, so they could only advertise
+    // a service it does not talk to. Until 0.1.6 they were hidden only while stealth mode was on,
+    // which stopped covering everyone once the first-run page asked about stealth mode with the
+    // box unticked. The saved login region is kept as it is.
+    const bool show_cloud_ui = false;
 
     if (show_cloud_ui) {
         auto item_region = create_item_region_combobox(_L("Login region"), "");
         g_sizer->Add(item_region);
     }
 
-    auto item_stealth_mode     = create_item_checkbox(_L("Stealth mode"), _L("Disables all outbound cloud features. Enabled by default.\nThe check for new versions of Unlayered Slicer still runs, and connections to printers on your own network are unaffected. Usage diagnostics have their own setting below."), "stealth_mode");
+    auto item_stealth_mode     = create_item_checkbox(_L("Stealth mode"), _L("Disables all outbound cloud features.\nThe check for new versions of Unlayered Slicer still runs, and connections to printers on your own network are unaffected. Usage diagnostics have their own setting below."), "stealth_mode");
     g_sizer->Add(item_stealth_mode);
 
     if (show_cloud_ui) {
@@ -2502,13 +2609,42 @@ void PreferencesDialog::create_items()
     });
     g_sizer->Add(item_network_test);
 
-    // Unlayered: anonymous usage diagnostics (slic3r/Utils/UsageTelemetry.hpp). Its own switch, NOT
-    // part of stealth mode, which is on for everyone by default.
-    wxString diagnostics_tip = _L("Sends which features are used, slicing results and errors, crashes, and this computer's system details (operating system, processor cores, memory) to Unlayered 3D, with a random id that is not linked to you or your account.\nModels, G-code, file and object names, and the names of your own presets never leave this computer.");
-    if (UsageTelemetry::disabled_by_environment())
-        diagnostics_tip += "\n" + _L("Switched off on this computer by the UNLAYERED_NO_TELEMETRY environment variable.");
-    auto item_usage_diagnostics = create_item_checkbox(_L("Send anonymous usage diagnostics"), diagnostics_tip, "usage_diagnostics");
+    // Unlayered 0.1.6: usage diagnostics follow the privacy choice (slic3r/Utils/PrivacyConsent.hpp),
+    // made in setup or here. Its own switch, NOT part of stealth mode. Changes apply at once.
+    g_sizer->Add(create_item_title(_L("Privacy")), 1, wxEXPAND);
+    wxString diagnostics_tip = _L("Help us improve reliability and features by sharing application usage, settings, and performance information. Never includes your name, email, account, or 3D models.");
+    if (PrivacyConsent::organization_opt_out())
+        diagnostics_tip += "\n" + _L("Switched off on this computer by your organization (the UNLAYERED_NO_TELEMETRY environment variable).");
+    auto item_usage_diagnostics = create_item_checkbox(_L("Send usage diagnostics"), diagnostics_tip, "usage_diagnostics");
     g_sizer->Add(item_usage_diagnostics);
+    const wxString program_tip = _L("Get early access to new features. Your shared data, never linked to your name, email, or account, may be used to develop, train, test, evaluate, and improve AI, CAD, slicing, software, manufacturing, and hardware systems.");
+    auto item_improvement_program = create_item_checkbox(_L("Slicing improvement program"), program_tip, "usage_improvement_program");
+    g_sizer->Add(item_improvement_program);
+    {
+        auto add_note = [this, g_sizer](const wxString &text, wxStaticText **out) {
+            auto *line = new wxBoxSizer(wxHORIZONTAL);
+            line->AddSpacer(FromDIP(DESIGN_LEFT_MARGIN));
+            auto *label = new wxStaticText(m_parent, wxID_ANY, text);
+            label->SetFont(::Label::Body_13);
+            label->SetForegroundColour(DESIGN_GRAY600_COLOR);
+            label->Wrap(FromDIP(560));
+            line->Add(label, 0, wxTOP | wxBOTTOM, FromDIP(2));
+            g_sizer->Add(line);
+            if (out)
+                *out = label;
+        };
+        add_note(diagnostics_tip, nullptr);
+        add_note(wxEmptyString, &m_privacy_status);
+        g_sizer->Add(create_item_button(_L("Where you live"), _L("Change") + " " + dots,
+                                        _L("Choose where you live again. You then make your privacy choice again for it."), "",
+                                        [this]() {
+                                            run_privacy_setup(this, "preferences");
+                                            update_privacy_controls();
+                                        }));
+        g_sizer->Add(create_item_button(_L("Privacy policy"), _L("Read Full Privacy Policy"), "", "", []() { PrivacyFlow::open_policy(); }));
+        add_note(_L("Your 3D models, CAD files, and project geometry are not uploaded through usage diagnostics. Unlayered asks you separately, for each model, before uploading one."), nullptr);
+        update_privacy_controls();
+    }
 
     // Unlayered: the "Enable Bambu Cloud" option was removed with the Bambu account surface.
     // Bambu printers are used over LAN only; there is no Bambu cloud to opt into.

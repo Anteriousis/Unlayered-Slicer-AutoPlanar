@@ -11,6 +11,8 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Tab.hpp"
 #include "slic3r/GUI/Widgets/WebView.hpp"
+#include "slic3r/GUI/ModelUploadConsentDialog.hpp"
+#include "slic3r/Utils/PrivacyConsent.hpp"
 #include "slic3r/Utils/FirmwareBundle.hpp" // sha256_hex
 #include "libslic3r/GCode/Thumbnails.hpp"     // compress_thumbnail
 #include "libslic3r/GCode/ThumbnailData.hpp" // ThumbnailData
@@ -1597,6 +1599,26 @@ void WebAppBridge::Impl::handle_export_project(const std::string& id, const json
     const std::string handle   = make_session_token().substr(0, 16);
     const fs::path    out_path = webapp_cache_dir() / path_from_utf8(stem + "-" + handle + ".3mf");
 
+    // 0.1.6 privacy: handing the project to a web page is a model upload, so it is asked every time,
+    // for this file, with what / why / to whom / how long (PrivacyConsent::ModelUploadRequest). Usage
+    // diagnostics consent never covers it, and a "no" changes nothing else in the slicer. The page
+    // learns whether AI training was allowed for this upload and must keep to it.
+    PrivacyConsent::ModelUploadRequest upload;
+    upload.file_label    = stem + ".3mf";
+    upload.file_id       = handle;
+    upload.included_data = plate_idx < 0 ? _u8L("The whole project as a 3MF file: every model's geometry, the settings, and plate thumbnails.")
+                                         : _u8L("This plate as a 3MF file: its models' geometry, the settings, and the plate thumbnail.");
+    upload.purpose       = _u8L("Sharing or publishing it on Unlayered Universe, as you asked in the Universe tab.");
+    upload.ai_training_proposed = true;
+    upload.recipients    = _u8L("Unlayered 3D, Inc., through Unlayered Universe (unlayered3d.com).");
+    upload.retention     = _u8L("As set out in the Unlayered Universe terms and privacy policy; you can delete what you publish there.");
+    PrivacyConsent::ModelUploadAuthorization authorization = ModelUploadConsentDialog::ask(wxGetApp().mainframe, upload);
+    const bool ai_training = authorization.ai_training_allowed();
+    if (!authorization.consume(handle)) {
+        send_response(id, METHOD, WAB_CAPABILITY_DISABLED, "the user declined to upload this project");
+        return;
+    }
+
     boost::system::error_code ec;
     fs::create_directories(out_path.parent_path(), ec);
 
@@ -1626,7 +1648,9 @@ void WebAppBridge::Impl::handle_export_project(const std::string& id, const json
                   {{"handle", handle},
                    {"filename", stem + ".3mf"},
                    {"sizeBytes", size},
-                   {"chunkBytes", WAB_EXPORT_CHUNK_BYTES}});
+                   {"chunkBytes", WAB_EXPORT_CHUNK_BYTES},
+                   // The person's answer for this upload; false unless they ticked the box.
+                   {"aiTrainingAllowed", ai_training}});
 }
 
 void WebAppBridge::Impl::handle_read_export_chunk(const std::string& id, const json& params)

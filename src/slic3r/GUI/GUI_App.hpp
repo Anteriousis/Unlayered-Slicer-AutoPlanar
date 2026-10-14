@@ -411,6 +411,8 @@ public:
     std::string logo_name() const { return is_editor() ? "UnlayeredSlicer" : "UnlayeredSlicer-gcodeviewer"; }
 
     bool is_closing() const { return m_is_closing.load(std::memory_order_acquire); }
+    // The setup wizard is open (run_wizard). Usage diagnostics hold every send meanwhile.
+    bool is_running_wizard() const { return m_running_wizard != nullptr; }
     void set_closing(bool closing) { m_is_closing.store(closing, std::memory_order_release); }
     
     // SoftFever

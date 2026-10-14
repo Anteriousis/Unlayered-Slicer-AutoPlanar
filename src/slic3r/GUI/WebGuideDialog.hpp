@@ -29,6 +29,7 @@
 #include "GUI_App.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/PresetUpdater.hpp"
+#include "PrivacySetupDialog.hpp"
 
 #include <unordered_map>
 #include <mutex>
@@ -142,6 +143,9 @@ private:
     // Set only by the page itself: an answer the user never saw must not be written back.
     bool m_stealth_answered {false};
     bool m_netplugin_answered {false};
+    // The privacy steps (region, North America country, "Slicer Privacy Policy"): 0.1.6. The choice
+    // is saved by the flow itself when the person presses Continue on the privacy page.
+    std::unique_ptr<PrivacyFlow> m_privacy;
 
     json m_OrcaFilaList;
     std::string m_OrcaFilaLibPath;

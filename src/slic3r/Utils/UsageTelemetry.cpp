@@ -18,6 +18,7 @@
 #include <cstring>
 #include <exception>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/dll/runtime_symbol_info.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
@@ -29,10 +30,14 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r_version.h"
+#include "DiagnosticsAllowlist.hpp"
 #include "Http.hpp"
+#include "PrivacyConsent.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
+#include <winevt.h>
+#pragma comment(lib, "wevtapi.lib")
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -63,6 +68,9 @@ const char *DEFAULT_URL = "https://unlayered3d.com/api/slicer/telemetry";
 
 constexpr size_t FLUSH_AT_EVENTS      = 50;
 constexpr size_t MAX_EVENTS_PER_BATCH = 100; // the site rejects more
+// The site also rejects a body over 64 KB. Since 0.1.6 a slice event carries setting values and part
+// measurements (up to ~7 KB), so a batch is cut by size as well, with room left for the envelope.
+constexpr size_t MAX_BATCH_EVENT_BYTES = 48 * 1024;
 constexpr size_t MAX_QUEUED           = 400; // offline for a long session: drop, never grow
 constexpr size_t MAX_PENDING_BATCHES  = 20;  // unsent batches kept on disk between launches
 constexpr double EXIT_BUDGET_S        = 6.0; // the longest shutdown() may hold up closing the app
@@ -76,7 +84,10 @@ struct State
 {
     std::mutex        mutex;
     bool              started{false};
-    std::atomic<bool> on{false};
+    std::atomic<bool> on{false}; // the privacy choice permits diagnostics (refresh())
+    // Slicing improvement program member (PrivacyConsent::program_permitted): stamped into every batch
+    // as it is built, so the site keeps AI-training records only from members (notice 2026-10-v3).
+    bool              program{false};
     bool              env_off{false};
     bool              first_run{false};
 
@@ -168,10 +179,18 @@ bool runs_installed()
     // The NSIS installer (per-user or per-machine) puts Uninstall.exe beside the executable.
     return boost::filesystem::exists(exe.parent_path() / "Uninstall.exe", ec);
 #elif defined(__APPLE__)
-    for (boost::filesystem::path p = exe.parent_path(); ! p.empty() && p != p.root_path(); p = p.parent_path())
+    // Inside an .app, but not one in a build or source tree: a Mac build makes .app bundles too
+    // (build/<arch>/src/Release/UnlayeredSlicer.app, build/universal/..., the slic3rutils_tests
+    // test host), and those sit below a CMakeCache.txt or CMakeLists.txt, which no customer's
+    // copy does.
+    bool in_bundle = false;
+    for (boost::filesystem::path p = exe.parent_path(); ! p.empty() && p != p.root_path(); p = p.parent_path()) {
         if (p.extension() == ".app")
-            return true;
-    return false;
+            in_bundle = true;
+        if (boost::filesystem::exists(p / "CMakeCache.txt", ec) || boost::filesystem::exists(p / "CMakeLists.txt", ec))
+            return false;
+    }
+    return in_bundle;
 #else
     const char *appimage = std::getenv("APPIMAGE");
     const char *flatpak  = std::getenv("FLATPAK_ID");
@@ -212,6 +231,60 @@ std::string read_file(const fs::path &path)
     return ss.str();
 }
 
+#ifdef _WIN32
+std::string narrow_utf8(const wchar_t *w)
+{
+    const int n = ::WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1)
+        return {};
+    std::string out(size_t(n), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), n, nullptr, nullptr);
+    out.resize(size_t(n) - 1);
+    return out;
+}
+
+// Windows' own record of how an earlier copy of this app ended, from the Application event log:
+// "Application Error" (1000, written by Windows Error Reporting for any crash, including the
+// fast-fail and stack-overflow kinds that never reach our crash filter) or "Application Hang"
+// (1002, the person closed it while it was not responding). Looked up only for a session marker
+// that has no exception of its own. Reads the newest few hundred entries of the last 14 days.
+bool windows_crash_record(long pid, int64_t started_ms, std::string &exception, std::string &at)
+{
+    wchar_t exe[MAX_PATH] = {0};
+    ::GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const std::string exe_name = fs::path(exe).filename().string();
+
+    const wchar_t *query = L"*[System[Provider[@Name='Application Error' or @Name='Application Hang'] and "
+                           L"(EventID=1000 or EventID=1002) and TimeCreated[timediff(@SystemTime) <= 1209600000]]]";
+    EVT_HANDLE results = ::EvtQuery(nullptr, L"Application", query, EvtQueryChannelPath | EvtQueryReverseDirection);
+    if (!results)
+        return false;
+    bool              found   = false;
+    int               scanned = 0;
+    EVT_HANDLE        events[16];
+    DWORD             returned = 0;
+    std::vector<wchar_t> buffer;
+    while (!found && scanned < 400 && ::EvtNext(results, 16, events, 1000, 0, &returned)) {
+        for (DWORD i = 0; i < returned; ++i) {
+            if (!found) {
+                DWORD used = 0, count = 0;
+                if (!::EvtRender(nullptr, events[i], EvtRenderEventXml, 0, nullptr, &used, &count) &&
+                    ::GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                    buffer.assign(used / sizeof(wchar_t) + 1, L'\0');
+                    if (::EvtRender(nullptr, events[i], EvtRenderEventXml, DWORD(buffer.size() * sizeof(wchar_t)),
+                                    buffer.data(), &used, &count))
+                        found = match_crash_event(narrow_utf8(buffer.data()), pid, started_ms, exe_name, exception, at);
+                }
+            }
+            ::EvtClose(events[i]);
+        }
+        scanned += int(returned);
+    }
+    ::EvtClose(results);
+    return found;
+}
+#endif
+
 void write_file(const fs::path &path, const std::string &content)
 {
     boost::system::error_code ec;
@@ -235,6 +308,7 @@ struct CrashMarker
     char phase[32]    = {0};
     long long started = 0;
     long long alive   = 0;
+    bool consented    = false; // see write_marker_locked()
 };
 CrashMarker g_crash_marker;
 
@@ -247,7 +321,10 @@ void copy_cstr(char *dst, size_t size, const std::string &src)
 void write_marker_locked(State &s)
 {
     const int64_t alive = now_ms();
-    json marker = {{"pid", current_pid()}, {"version", s.version}, {"started", s.started_ms}, {"alive", alive}, {"phase", s.phase}};
+    // "consented": diagnostics were permitted while this session ran. Only such a session's crash is
+    // ever reported; one that ran before the person said yes stays theirs.
+    json marker = {{"pid", current_pid()}, {"version", s.version}, {"started", s.started_ms},
+                   {"alive", alive},       {"phase", s.phase},     {"consented", s.on.load()}};
     // A session that dies while frozen (typically force-quit) is a hang, not a crash. A crash
     // handler that runs later rewrites the marker with the signal or exception instead.
     if (s.hung)
@@ -259,6 +336,7 @@ void write_marker_locked(State &s)
     copy_cstr(g_crash_marker.phase, sizeof(g_crash_marker.phase), s.phase);
     g_crash_marker.started = s.started_ms;
     g_crash_marker.alive   = alive;
+    g_crash_marker.consented = s.on.load();
 }
 
 // Marks the marker "hang" while the main thread has not called heartbeat() for HANG_AFTER_S, and
@@ -306,9 +384,9 @@ void write_crash_marker(const char *exception, const char *at)
     char body[768];
     const int n = std::snprintf(body, sizeof(body),
                                 "{\"pid\":%ld,\"version\":\"%s\",\"started\":%lld,\"alive\":%lld,\"phase\":\"%s\","
-                                "\"exception\":\"%s\",\"at\":\"%s\"}",
+                                "\"exception\":\"%s\",\"at\":\"%s\",\"consented\":%s}",
                                 current_pid(), g_crash_marker.version, g_crash_marker.started, g_crash_marker.alive,
-                                g_crash_marker.phase, exc, where);
+                                g_crash_marker.phase, exc, where, g_crash_marker.consented ? "true" : "false");
     if (n <= 0)
         return;
     const size_t len = std::min<size_t>(size_t(n), sizeof(body) - 1);
@@ -659,6 +737,7 @@ std::string batch_body(const State &s, std::vector<json> events)
                  {"install", s.install},
                  {"session", s.session},
                  {"app", {{"version", s.version}, {"channel", s.channel}, {"os", s.os}}},
+                 {"program", s.program},
                  {"events", std::move(events)}};
     return body.dump();
 }
@@ -666,7 +745,15 @@ std::string batch_body(const State &s, std::vector<json> events)
 // Moves up to one batch's worth of queued events into a body. Caller holds the mutex.
 std::string take_batch_locked(State &s)
 {
-    size_t n = std::min(s.queue.size(), MAX_EVENTS_PER_BATCH);
+    // As many events as fit, and always at least one.
+    size_t n = 0, bytes = 0;
+    while (n < s.queue.size() && n < MAX_EVENTS_PER_BATCH) {
+        const size_t size = s.queue[n].dump().size();
+        if (n > 0 && bytes + size > MAX_BATCH_EVENT_BYTES)
+            break;
+        bytes += size;
+        ++n;
+    }
     std::vector<json> events(std::make_move_iterator(s.queue.begin()), std::make_move_iterator(s.queue.begin() + n));
     s.queue.erase(s.queue.begin(), s.queue.begin() + n);
     return batch_body(s, std::move(events));
@@ -706,6 +793,10 @@ bool send(const std::string &body, bool sync)
     std::string url;
     {
         std::lock_guard<std::mutex> lock(s.mutex);
+        // Asked again for every request, not once at start-up: a withdrawal between queueing and
+        // sending stops the send.
+        if (!s.on)
+            return false;
         id = s.next_id++;
         s.in_flight[id] = body;
         url = s.url;
@@ -738,6 +829,105 @@ bool send(const std::string &body, bool sync)
 
 } // namespace
 
+namespace {
+// Event data fields as (Name, value), in order. Older Windows writes them without names.
+std::vector<std::pair<std::string, std::string>> event_data_fields(const std::string &xml)
+{
+    std::vector<std::pair<std::string, std::string>> fields;
+    static const std::regex data_re(R"(<Data(?:\s+Name=['"]([^'"]*)['"])?\s*>([^<]*)</Data>)");
+    for (std::sregex_iterator it(xml.begin(), xml.end(), data_re), end; it != end; ++it)
+        fields.emplace_back((*it)[1].str(), (*it)[2].str());
+    return fields;
+}
+
+// A field by name, or by position when the event carries no names.
+std::string event_field(const std::vector<std::pair<std::string, std::string>> &fields, const char *name, size_t position)
+{
+    bool named = false;
+    for (const auto &f : fields) {
+        if (!f.first.empty())
+            named = true;
+        if (boost::iequals(f.first, name))
+            return f.second;
+    }
+    return !named && position < fields.size() ? fields[position].second : std::string();
+}
+
+// "0x1a2c", "1a2c" or "00001a2c" -> 0x1a2c; false when it is not hex.
+bool parse_hex(std::string s, unsigned long long &out)
+{
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        s = s.substr(2);
+    if (s.empty() || s.size() > 16 || s.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+        return false;
+    out = std::stoull(s, nullptr, 16);
+    return true;
+}
+} // namespace
+
+bool match_crash_event(const std::string &event_xml, long pid, int64_t started_ms, const std::string &exe_name,
+                       std::string &exception, std::string &at)
+{
+    std::smatch m;
+    static const std::regex id_re(R"(<EventID[^>]*>\s*(\d+)\s*</EventID>)");
+    if (pid <= 0 || !std::regex_search(event_xml, m, id_re))
+        return false;
+    const int  id    = std::stoi(m[1].str());
+    const bool crash = id == 1000;
+    if (!crash && id != 1002)
+        return false;
+    const auto fields = event_data_fields(event_xml);
+    if (!boost::iequals(event_field(fields, "AppName", 0), exe_name))
+        return false;
+
+    // The same process: its id, and (when the marker knows it) the same start time, so a later
+    // process that happened to reuse the id is never taken for it.
+    unsigned long long value = 0;
+    if (!parse_hex(event_field(fields, crash ? "ProcessId" : "ProcessID", crash ? 8 : 2), value) ||
+        value != static_cast<unsigned long long>(pid))
+        return false;
+    if (started_ms > 0) {
+        unsigned long long filetime = 0;
+        if (!parse_hex(event_field(fields, crash ? "ProcessCreationTime" : "StartTime", crash ? 9 : 3), filetime))
+            return false;
+        // FILETIME: 100 ns ticks since 1601-01-01.
+        const int64_t start_ms = int64_t(filetime / 10000ULL) - 11644473600000LL;
+        if (std::llabs(start_ms - started_ms) > 10000)
+            return false;
+    }
+
+    if (!crash) {
+        exception = "hang_closed";
+        at.clear();
+        return true;
+    }
+    unsigned long long code = 0, offset = 0;
+    if (!parse_hex(event_field(fields, "ExceptionCode", 6), code))
+        return false;
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "0x%08llX", code);
+    exception = buf;
+    const std::string module = event_field(fields, "ModuleName", 3);
+    if (!module.empty() && parse_hex(event_field(fields, "FaultingOffset", 7), offset)) {
+        std::snprintf(buf, sizeof(buf), "+0x%llx", offset);
+        at = module + buf;
+    } else
+        at = module;
+    return true;
+}
+
+// The random per-install id exists only once diagnostics have been permitted (policy 2026-10-v2,
+// section 7): it is created the first time they are, and then kept in the app config, also after a
+// withdrawal, so the person can still quote it in a privacy request. Never created while they are off.
+static void load_install_id_locked(State &s, AppConfig &config)
+{
+    s.install = config.get("usage_diagnostics_id");
+    if (s.on && !is_uuid(s.install)) {
+        s.install = new_uuid();
+        config.set("usage_diagnostics_id", s.install);
+    }
+}
+
 void start(AppConfig &config, bool first_run)
 {
     State &s = state();
@@ -768,12 +958,12 @@ void start(AppConfig &config, bool first_run)
             s.hang_after_ms = int64_t(std::stoi(hang_s)) * 1000;
     } catch (...) {}
 
-    s.install = config.get("usage_diagnostics_id");
-    if (!is_uuid(s.install)) {
-        s.install = new_uuid();
-        config.set("usage_diagnostics_id", s.install);
-    }
-    s.on = !s.env_off && config.get_bool("usage_diagnostics");
+    // A config from before 0.1.6 keeps an explicit "off" as a declined choice; the old default "on"
+    // is not a choice, so those installations are asked (GUI_App) and send nothing until then.
+    PrivacyConsent::migrate_legacy_setting(config);
+    s.on      = PrivacyConsent::diagnostics_permitted(PrivacyConsent::load(config), s.env_off, PrivacyConsent::legal_approvals());
+    s.program = s.on && PrivacyConsent::program_permitted(PrivacyConsent::load(config), s.env_off, PrivacyConsent::legal_approvals());
+    load_install_id_locked(s, config);
 
     boost::system::error_code ec;
     fs::create_directories(usage_dir(), ec);
@@ -792,18 +982,33 @@ void start(AppConfig &config, bool first_run)
         if (pid != 0 && pid != current_pid() && process_alive(pid))
             continue;
         // The operating system ended that session (end_session_by_os): not a crash.
-        const bool os_ended = marker.is_object() && marker.value("phase", std::string()) == "os_session_end";
-        if (s.on && marker.is_object() && !os_ended) {
+        const bool os_ended  = marker.is_object() && marker.value("phase", std::string()) == "os_session_end";
+        const bool consented = marker.is_object() && marker.value("consented", false);
+        if (s.on && consented && !os_ended) {
+#ifdef _WIN32
+            // Our crash filter never ran (a fast fail, a stack overflow, heap corruption, or the
+            // person ended it while it hung): ask Windows how that process ended.
+            if (marker.value("exception", std::string()).empty() && pid > 0) {
+                std::string exception, where;
+                if (windows_crash_record(pid, marker.value("started", int64_t(0)), exception, where)) {
+                    marker["exception"]   = exception;
+                    marker["at"]          = where;
+                    marker["recorded_by"] = "windows";
+                }
+            }
+#endif
             json props = {{"version", marker.value("version", std::string())}};
             // Where it was and what ended it (older markers have neither).
-            for (const char *key : {"phase", "exception", "at"})
+            for (const char *key : {"phase", "exception", "at", "recorded_by"})
                 if (marker.contains(key) && marker[key].is_string() && !marker[key].get<std::string>().empty())
                     props[key] = marker[key].get<std::string>().substr(0, 190);
             // "alive" is refreshed by every flush, so this is the uptime to within a few minutes.
             int64_t started = marker.value("started", int64_t(0)), alive = marker.value("alive", started);
             if (started > 0 && alive >= started)
                 props["uptime_s"] = (alive - started) / 1000;
-            s.queue.push_back(make_event("crash", std::move(props)));
+            json clean, no_counts;
+            if (DiagnosticsAllowlist::filter("crash", props, json(), clean, no_counts))
+                s.queue.push_back(make_event("crash", std::move(clean)));
         }
         boost::system::error_code rm_ec;
         fs::remove(marker_file, rm_ec);
@@ -906,19 +1111,49 @@ std::string channel_for(const std::string &version, bool internal)
     return internal ? std::string("dev") : channel_of(version);
 }
 
-void set_enabled(AppConfig &config, bool on)
+void refresh(AppConfig &config)
 {
     State &s = state();
-    config.set_bool("usage_diagnostics", on);
-    std::lock_guard<std::mutex> lock(s.mutex);
-    s.on = on && !s.env_off;
-    if (!s.on) {
-        s.queue.clear();
-        s.counts.clear();
-        s.pending.clear();
-        save_pending_locked(s);
+    const bool on = PrivacyConsent::diagnostics_permitted(PrivacyConsent::load(config), PrivacyConsent::organization_opt_out(),
+                                                          PrivacyConsent::legal_approvals());
+    const bool program = on && PrivacyConsent::program_permitted(PrivacyConsent::load(config), PrivacyConsent::organization_opt_out(),
+                                                                 PrivacyConsent::legal_approvals());
+    bool install_handlers = false, remove_handlers = false;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        const bool was = s.on.load();
+        s.on           = on && !s.env_off;
+        remove_handlers = was && !s.on && s.started;
+        if (s.on && s.program != program) {
+            // Joined or left the improvement program: what was collected under the other answer is
+            // stamped with it, so none of it may leave now (a failed send of it is not kept either).
+            s.queue.clear();
+            s.counts.clear();
+            s.pending.clear();
+            s.in_flight.clear();
+            save_pending_locked(s);
+        }
+        s.program = s.on && program;
+        if (!s.on) {
+            // Withdrawn (or never given): nothing collected so far may leave. Requests already
+            // under way cannot be recalled; finish() no longer keeps their bodies for a retry.
+            s.queue.clear();
+            s.counts.clear();
+            s.pending.clear();
+            save_pending_locked(s);
+        } else if (!was && s.started) {
+            load_install_id_locked(s, config);
+            install_handlers = true;
+            s.started_at     = std::chrono::steady_clock::now(); // session_end counts from consent
+        }
+        if (s.started)
+            write_marker_locked(s);
     }
-    BOOST_LOG_TRIVIAL(info) << "usage diagnostics switched " << (s.on ? "on" : "off");
+    if (install_handlers)
+        install_crash_handlers();
+    else if (remove_handlers)
+        uninstall_crash_handlers(); // a crash after a withdrawal is never marked as consented
+    BOOST_LOG_TRIVIAL(info) << "usage diagnostics " << (s.on ? "permitted" : "not permitted") << " by the privacy choice";
 }
 
 void record(const std::string &name, json props, json counts)
@@ -926,9 +1161,12 @@ void record(const std::string &name, json props, json counts)
     State &s = state();
     if (!s.on)
         return;
-    json event = make_event(name, std::move(props));
-    if (counts.is_object() && !counts.empty())
-        event["counts"] = std::move(counts);
+    json clean_props, clean_counts;
+    if (!DiagnosticsAllowlist::filter(name, props, counts, clean_props, clean_counts))
+        return;
+    json event = make_event(name, std::move(clean_props));
+    if (!clean_counts.empty())
+        event["counts"] = std::move(clean_counts);
     bool full;
     {
         std::lock_guard<std::mutex> lock(s.mutex);
@@ -944,7 +1182,7 @@ void record(const std::string &name, json props, json counts)
 void count(const std::string &feature, int by)
 {
     State &s = state();
-    if (!s.on || feature.empty())
+    if (!s.on || !DiagnosticsAllowlist::allowed_count_key(feature))
         return;
     std::lock_guard<std::mutex> lock(s.mutex);
     // The site takes at most 200 tallies per event; past that only known ones keep counting.
@@ -1051,8 +1289,13 @@ std::string redact_message(const std::string &message, const std::vector<std::st
 
     static const std::regex quoted(R"("[^"]*"|'[^']*'|\xE2\x80\x9C.*?\xE2\x80\x9D|\xC2\xAB.*?\xC2\xBB)");
     out = std::regex_replace(out, quoted, "<...>");
-    static const std::regex path(R"([A-Za-z]:[\\/]\S*|\\\\\S+|(^|\s)/(?:[^\s/]+/)+\S*)");
+    // A path runs on through directory names with spaces in them (C:\Users\Alex Smith\...): every
+    // part followed by a separator is still the path. Hiding too much is the safe direction.
+    static const std::regex path(R"([A-Za-z]:[\\/](?:[^\\/\n]*[\\/])*\S*|\\\\(?:[^\\/\n]*[\\/])*\S*|(^|\s)/(?:[^/\n]*/)+\S*)");
     out = std::regex_replace(out, path, "$1<path>");
+    // A model, project or G-code file named without a path.
+    static const std::regex file(R"(\S*\.(?:stl|3mf|obj|step|stp|amf|ply|gcode|bgcode|gco|svg|drc|zip)\b)", std::regex::icase);
+    out = std::regex_replace(out, file, "<file>");
 
     // Trim, then cut on a UTF-8 character boundary.
     auto not_space = [](unsigned char c) { return !std::isspace(c); };

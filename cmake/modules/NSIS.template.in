@@ -598,7 +598,7 @@ Function BambuPluginPage
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 0 100% 72u "Sending prints to Bambu Lab printers, over your network or Bambu Cloud, needs Bambu Lab's network plug-in.$\r$\n$\r$\nThe plug-in is closed-source software from Bambu Lab. If you tick the box below, Unlayered Slicer downloads it from Bambu Lab's servers the first time it starts.$\r$\n$\r$\nYou can turn it on or off later in Preferences > Online."
+  ${NSD_CreateLabel} 0 0 100% 72u "Sending prints to Bambu Lab printers over your network needs Bambu Lab's network plug-in.$\r$\n$\r$\nThe plug-in is closed-source software from Bambu Lab. If you tick the box below, Unlayered Slicer downloads it from Bambu Lab's servers the first time it starts.$\r$\n$\r$\nYou can turn it on or off later in Preferences > Online."
   Pop $0
 
   ${NSD_CreateCheckbox} 0 80u 100% 12u "Install the Bambu Lab network plug-in"

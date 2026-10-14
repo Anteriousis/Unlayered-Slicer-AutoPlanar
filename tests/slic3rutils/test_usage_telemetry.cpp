@@ -12,6 +12,7 @@
 
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Utils.hpp"
+#include "slic3r/Utils/PrivacyConsent.hpp"
 #include "slic3r/Utils/UsageTelemetry.hpp"
 
 using namespace Slic3r;
@@ -19,6 +20,15 @@ namespace fs = boost::filesystem;
 using json   = nlohmann::json;
 
 namespace {
+
+// 0.1.6: diagnostics run only on a saved privacy choice, never on the old "usage_diagnostics" key.
+void choose(AppConfig &config, bool share)
+{
+    PrivacyConsent::save(config, PrivacyConsent::make_choice("north_america", "CA", share, false, "initial_setup",
+                                                             "2026-10-13T12:00:00Z", PrivacyConsent::legal_approvals()));
+}
+void grant(AppConfig &config) { choose(config, true); }
+void decline(AppConfig &config) { choose(config, false); }
 
 std::string slurp(const fs::path &path)
 {
@@ -78,7 +88,7 @@ TEST_CASE("Usage diagnostics keep batches and find crashes offline", "[UsageTele
     AppConfig config;
     // Nothing listens on the discard port, so every send fails fast and is kept for later.
     config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
-    config.set_bool("usage_diagnostics", true);
+    grant(config);
 
     UsageTelemetry::start(config, true);
     if (UsageTelemetry::disabled_by_environment()) {
@@ -107,7 +117,7 @@ TEST_CASE("Usage diagnostics keep batches and find crashes offline", "[UsageTele
     // A marker from a process that is gone: that session crashed.
     {
         std::ofstream marker((dir / "usage" / "session-dead.json").string());
-        marker << json{{"pid", 0x7ffffff0}, {"version", "0.1.1"}, {"started", 1000}, {"alive", 61000}}.dump();
+        marker << json{{"pid", 0x7ffffff0}, {"version", "0.1.1"}, {"started", 1000}, {"alive", 61000}, {"consented", true}}.dump();
     }
     UsageTelemetry::start(config, false);
     UsageTelemetry::shutdown();
@@ -122,7 +132,8 @@ TEST_CASE("Usage diagnostics keep batches and find crashes offline", "[UsageTele
 
     // Switching off forgets everything queued.
     UsageTelemetry::start(config, false);
-    UsageTelemetry::set_enabled(config, false);
+    decline(config);
+    UsageTelemetry::refresh(config);
     CHECK(!fs::exists(dir / "usage" / "pending.json"));
     UsageTelemetry::shutdown();
 
@@ -143,7 +154,7 @@ TEST_CASE("Usage diagnostics report a crash's phase, exception and location, and
 
     AppConfig config;
     config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
-    config.set_bool("usage_diagnostics", true);
+    grant(config);
 
     // Two dead sessions: one crashed while slicing, one the operating system ended.
     auto write_marker = [&](const std::string &name, const json &body) {
@@ -151,9 +162,10 @@ TEST_CASE("Usage diagnostics report a crash's phase, exception and location, and
         out << body.dump();
     };
     write_marker("session-crashed.json", {{"pid", 0x7ffffff0}, {"version", "0.1.4"}, {"started", 1000}, {"alive", 31000},
-                                          {"phase", "slicing"}, {"exception", "0xC0000005"}, {"at", "UnlayeredSlicer.dll+0x1a2b3c"}});
+                                          {"phase", "slicing"}, {"exception", "0xC0000005"}, {"at", "UnlayeredSlicer.dll+0x1a2b3c"},
+                                          {"consented", true}});
     write_marker("session-logoff.json", {{"pid", 0x7ffffff1}, {"version", "0.1.4"}, {"started", 1000}, {"alive", 31000},
-                                         {"phase", "os_session_end"}});
+                                         {"phase", "os_session_end"}, {"consented", true}});
 
     UsageTelemetry::start(config, false);
     if (UsageTelemetry::disabled_by_environment()) {
@@ -221,7 +233,7 @@ TEST_CASE("Usage diagnostics give the install id out only while on", "[UsageTele
 
     AppConfig config;
     config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
-    config.set_bool("usage_diagnostics", true);
+    grant(config);
 
     CHECK(UsageTelemetry::install_id().empty()); // not started yet
     UsageTelemetry::start(config, true);
@@ -234,10 +246,95 @@ TEST_CASE("Usage diagnostics give the install id out only while on", "[UsageTele
     CHECK(UsageTelemetry::install_id() == config.get("usage_diagnostics_id"));
     CHECK(UsageTelemetry::install_id().size() == 36);
 
-    UsageTelemetry::set_enabled(config, false);
+    decline(config);
+    UsageTelemetry::refresh(config);
     CHECK(UsageTelemetry::install_id().empty());
     UsageTelemetry::shutdown();
     CHECK(UsageTelemetry::install_id().empty());
+
+    set_data_dir(old_data_dir);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+// Consent given while the app runs (setup, the update question, Preferences) creates the id then.
+TEST_CASE("Usage diagnostics create the install id only when permitted", "[UsageTelemetry]")
+{
+    const std::string old_data_dir = data_dir();
+    fs::path dir = fs::temp_directory_path() / fs::unique_path("usage-telemetry-%%%%-%%%%");
+    fs::create_directories(dir);
+    set_data_dir(dir.string());
+
+    AppConfig config;
+    config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
+    UsageTelemetry::start(config, true);
+    if (UsageTelemetry::disabled_by_environment()) {
+        UsageTelemetry::shutdown();
+        set_data_dir(old_data_dir);
+        SKIP("UNLAYERED_NO_TELEMETRY is set on this machine");
+    }
+    CHECK(config.get("usage_diagnostics_id").empty());
+
+    grant(config);
+    UsageTelemetry::refresh(config);
+    CHECK(UsageTelemetry::install_id().size() == 36);
+    CHECK(config.get("usage_diagnostics_id") == UsageTelemetry::install_id());
+    UsageTelemetry::shutdown();
+
+    set_data_dir(old_data_dir);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+// Only Slicing improvement program members' batches say program:true (the site trains on nothing
+// else), and nothing collected under the other answer leaves after a change.
+TEST_CASE("Usage diagnostics stamp program membership and drop what was queued under the other answer", "[UsageTelemetry]")
+{
+    const std::string old_data_dir = data_dir();
+    fs::path dir = fs::temp_directory_path() / fs::unique_path("usage-telemetry-%%%%-%%%%");
+    fs::create_directories(dir);
+    set_data_dir(dir.string());
+
+    AppConfig config;
+    config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
+    grant(config);
+    UsageTelemetry::start(config, false);
+    if (UsageTelemetry::disabled_by_environment()) {
+        UsageTelemetry::shutdown();
+        set_data_dir(old_data_dir);
+        SKIP("UNLAYERED_NO_TELEMETRY is set on this machine");
+    }
+    UsageTelemetry::record("slice", {{"result", "ok"}});
+    UsageTelemetry::shutdown();
+    {
+        json batch = json::parse(json::parse(slurp(dir / "usage" / "pending.json"))[0].get<std::string>());
+        CHECK(batch["program"] == false);
+    }
+
+    // Joined: the batch waiting from before (program:false) and anything queued are dropped.
+    UsageTelemetry::start(config, false);
+    UsageTelemetry::record("slice", {{"result", "queued before joining"}});
+    PrivacyConsent::save(config, PrivacyConsent::make_choice("north_america", "CA", true, false, "preferences", "2026-10-14T12:00:00Z",
+                                                             PrivacyConsent::legal_approvals(), true));
+    UsageTelemetry::refresh(config);
+    CHECK(!fs::exists(dir / "usage" / "pending.json"));
+    UsageTelemetry::record("slice", {{"result", "ok"}});
+    UsageTelemetry::shutdown();
+    {
+        const json pending = json::parse(slurp(dir / "usage" / "pending.json"));
+        REQUIRE(pending.size() == 1);
+        json batch = json::parse(pending[0].get<std::string>());
+        CHECK(batch["program"] == true);
+        for (const auto &e : batch["events"])
+            CHECK(e["props"].value("result", "") != "queued before joining");
+    }
+
+    // Left again: what was stamped program:true never goes out as anything else.
+    UsageTelemetry::start(config, false);
+    grant(config);
+    UsageTelemetry::refresh(config);
+    CHECK(!fs::exists(dir / "usage" / "pending.json"));
+    UsageTelemetry::shutdown();
 
     set_data_dir(old_data_dir);
     boost::system::error_code ec;
@@ -276,7 +373,7 @@ TEST_CASE("Usage diagnostics crash child", "[.CrashChild]")
     set_data_dir(dir);
     AppConfig config;
     config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
-    config.set_bool("usage_diagnostics", true);
+    grant(config);
     UsageTelemetry::start(config, false);
     UsageTelemetry::set_phase("slicing");
     crash_level_one(nullptr);
@@ -314,6 +411,7 @@ TEST_CASE("Usage diagnostics crash marker names the callers", "[UsageTelemetry]"
     INFO(marker.dump());
     CHECK(marker["exception"] == "0xC0000005");
     CHECK(marker["phase"] == "slicing");
+    CHECK(marker["consented"] == true);
     const std::string at = marker["at"].get<std::string>();
     // The faulting frame, then its callers: all inside this test program, 3+ frames deep.
     size_t frames = 0;
@@ -325,3 +423,221 @@ TEST_CASE("Usage diagnostics crash marker names the callers", "[UsageTelemetry]"
     fs::remove_all(dir, ec);
 }
 #endif
+
+// Real Application-log events (EvtRenderEventXml) from a Windows 11 machine, paths shortened.
+TEST_CASE("Usage diagnostics read how a process ended from the Windows event log", "[UsageTelemetry]")
+{
+    const std::string crash_xml =
+        "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Application Error'/>"
+        "<EventID>1000</EventID></System><EventData><Data Name='AppName'>unlayered-slicer.exe</Data>"
+        "<Data Name='AppVersion'>2.0.0.0</Data><Data Name='AppTimeStamp'>6ab0bc35</Data>"
+        "<Data Name='ModuleName'>MSVCP140.dll</Data><Data Name='ModuleVersion'>14.50.35719.0</Data>"
+        "<Data Name='ModuleTimeStamp'>a3a3015d</Data><Data Name='ExceptionCode'>c0000005</Data>"
+        "<Data Name='FaultingOffset'>000000000004bce1</Data><Data Name='ProcessId'>0x670c</Data>"
+        "<Data Name='ProcessCreationTime'>0x1dd59ef17b4e6e1</Data><Data Name='AppPath'>C:\\app\\unlayered-slicer.exe</Data>"
+        "<Data Name='ModulePath'>C:\\WINDOWS\\SYSTEM32\\MSVCP140.dll</Data><Data Name='IntegratorReportId'>x</Data>"
+        "<Data Name='PackageFullName'></Data><Data Name='PackageRelativeAppId'></Data></EventData></Event>";
+    const std::string hang_xml =
+        "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Application Hang'/>"
+        "<EventID Qualifiers='0'>1002</EventID></System><EventData><Data Name='AppName'>unlayered-slicer.exe</Data>"
+        "<Data Name='AppVersion'>2.0.0.0</Data><Data Name='ProcessId'>0x48e0</Data><Data Name='StartTime'>0x1dd4d247101f42c</Data>"
+        "<Data Name='TerminationTime'>309</Data><Data Name='ExeFileName'>C:\\app\\unlayered-slicer.exe</Data>"
+        "<Data Name='ReportId'>y</Data><Data Name='PackageFullName'></Data><Data Name='PackageRelativeAppId'></Data>"
+        "<Data Name='HangType'>Unknown</Data></EventData></Event>";
+    const int64_t crash_started = 1791771132077LL; // 0x1dd59ef17b4e6e1 as Unix ms
+    const int64_t hang_started  = 1790364680109LL; // 0x1dd4d247101f42c
+
+    std::string exception, at;
+    SECTION("a crash: code and module+offset, for the same process")
+    {
+        REQUIRE(UsageTelemetry::match_crash_event(crash_xml, 0x670c, crash_started + 800, "unlayered-slicer.exe", exception, at));
+        CHECK(exception == "0xC0000005");
+        CHECK(at == "MSVCP140.dll+0x4bce1");
+        // The app name is compared without case; no start time known = id only.
+        CHECK(UsageTelemetry::match_crash_event(crash_xml, 0x670c, 0, "Unlayered-Slicer.EXE", exception, at));
+    }
+    SECTION("a hang the person closed")
+    {
+        REQUIRE(UsageTelemetry::match_crash_event(hang_xml, 0x48e0, hang_started, "unlayered-slicer.exe", exception, at));
+        CHECK(exception == "hang_closed");
+        CHECK(at.empty());
+    }
+    SECTION("never another process")
+    {
+        // Same id, but a process started an hour later reused it.
+        CHECK_FALSE(UsageTelemetry::match_crash_event(crash_xml, 0x670c, crash_started + 3600 * 1000, "unlayered-slicer.exe", exception, at));
+        CHECK_FALSE(UsageTelemetry::match_crash_event(crash_xml, 0x670d, crash_started, "unlayered-slicer.exe", exception, at));
+        CHECK_FALSE(UsageTelemetry::match_crash_event(crash_xml, 0x670c, crash_started, "other.exe", exception, at));
+        CHECK_FALSE(UsageTelemetry::match_crash_event("<Event><System><EventID>1001</EventID></System></Event>", 1, 0,
+                                                      "unlayered-slicer.exe", exception, at));
+    }
+}
+// 0.1.6: nothing is collected, queued or kept before a privacy choice, and a withdrawal discards
+// whatever was waiting. (Replaces 0.1.6's earlier "held until answered", which collected first.)
+TEST_CASE("Usage diagnostics collect nothing before a choice and drop everything on withdrawal", "[UsageTelemetry]")
+{
+    const std::string old_data_dir = data_dir();
+    fs::path dir = fs::temp_directory_path() / fs::unique_path("usage-telemetry-%%%%-%%%%");
+    fs::create_directories(dir);
+    set_data_dir(dir.string());
+
+    AppConfig config;
+    config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
+    // An old config's default "on" is not a choice.
+    config.set_bool("usage_diagnostics", true);
+
+    UsageTelemetry::start(config, false);
+    if (UsageTelemetry::disabled_by_environment()) {
+        UsageTelemetry::shutdown();
+        set_data_dir(old_data_dir);
+        SKIP("UNLAYERED_NO_TELEMETRY is set on this machine");
+    }
+    CHECK(!UsageTelemetry::enabled());
+    CHECK(UsageTelemetry::install_id().empty());
+    CHECK(!config.get_bool("usage_diagnostics")); // the mirror follows the (missing) choice
+    // No installation id exists before diagnostics are permitted.
+    CHECK(config.get("usage_diagnostics_id").empty());
+    UsageTelemetry::record("slice", {{"result", "ok"}});
+    UsageTelemetry::count("tab:preview");
+    UsageTelemetry::flush();
+    UsageTelemetry::shutdown();
+    CHECK(!fs::exists(dir / "usage" / "pending.json"));
+    CHECK(config.get("usage_diagnostics_id").empty());
+
+    // A crash in a session that never had consent is not reported once consent is given.
+    {
+        std::ofstream marker((dir / "usage" / "session-before.json").string());
+        marker << json{{"pid", 0x7ffffff0}, {"version", "0.1.5"}, {"started", 1000}, {"alive", 61000}, {"phase", "slicing"}}.dump();
+    }
+    grant(config);
+    UsageTelemetry::start(config, false);
+    CHECK(UsageTelemetry::enabled());
+    CHECK(UsageTelemetry::install_id().size() == 36);
+    const std::string install = config.get("usage_diagnostics_id"); // created by the consent
+    CHECK(install == UsageTelemetry::install_id());
+    UsageTelemetry::record("slice", {{"result", "ok"}});
+    UsageTelemetry::shutdown(); // nothing listens: kept for the next launch
+    CHECK(pending_event_names(dir) == std::vector<std::string>{"slice", "session_end"});
+
+    // Withdrawn on the next launch: everything waiting is gone and nothing new is queued.
+    UsageTelemetry::start(config, false);
+    decline(config);
+    UsageTelemetry::refresh(config);
+    CHECK(!UsageTelemetry::enabled());
+    CHECK(!fs::exists(dir / "usage" / "pending.json"));
+    UsageTelemetry::record("slice", {{"result", "ok"}});
+    UsageTelemetry::shutdown();
+    CHECK(!fs::exists(dir / "usage" / "pending.json"));
+    CHECK(!config.get_bool("usage_diagnostics"));
+    // The id is kept after a withdrawal (for a privacy request) but no longer given out.
+    CHECK(config.get("usage_diagnostics_id") == install);
+    CHECK(UsageTelemetry::install_id().empty());
+
+    // A decline survives a restart (and an update: the record does not depend on the version).
+    UsageTelemetry::start(config, false);
+    CHECK(!UsageTelemetry::enabled());
+    UsageTelemetry::shutdown();
+
+    set_data_dir(old_data_dir);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+// The organisation-wide switch wins over any choice.
+TEST_CASE("Usage diagnostics obey UNLAYERED_NO_TELEMETRY over a granted choice", "[UsageTelemetry]")
+{
+    AppConfig config;
+    grant(config);
+    CHECK(!PrivacyConsent::diagnostics_permitted(PrivacyConsent::load(config), true, PrivacyConsent::legal_approvals()));
+    CHECK(PrivacyConsent::diagnostics_permitted(config) == !PrivacyConsent::organization_opt_out());
+}
+
+// Events and properties not on the allowlist never reach a batch.
+TEST_CASE("Usage diagnostics send only allowlisted events and properties", "[UsageTelemetry]")
+{
+    const std::string old_data_dir = data_dir();
+    fs::path dir = fs::temp_directory_path() / fs::unique_path("usage-telemetry-%%%%-%%%%");
+    fs::create_directories(dir);
+    set_data_dir(dir.string());
+
+    AppConfig config;
+    config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
+    grant(config);
+    UsageTelemetry::start(config, false);
+    if (UsageTelemetry::disabled_by_environment()) {
+        UsageTelemetry::shutdown();
+        set_data_dir(old_data_dir);
+        SKIP("UNLAYERED_NO_TELEMETRY is set on this machine");
+    }
+    UsageTelemetry::record("model_upload", {{"file", "bracket.stl"}});
+    UsageTelemetry::record("slice", {{"result", "ok"},
+                                     {"project", "Secret bracket"},
+                                     {"printer", "C:/Users/alex/my.3mf"},
+                                     {"settings", std::vector<std::string>{"layer_height=0.2", "sparse_infill_svg_path=logo.svg"}}});
+    UsageTelemetry::count("file:bracket.stl");
+    UsageTelemetry::shutdown();
+
+    std::vector<json> events;
+    const json batches = json::parse(slurp(dir / "usage" / "pending.json"));
+    for (const auto &body : batches) {
+        // Named, not iterated as a temporary: operator[] on a temporary would dangle.
+        const json batch = json::parse(body.get<std::string>());
+        for (const auto &e : batch["events"])
+            events.push_back(e);
+    }
+    REQUIRE(events.size() == 2); // slice, session_end
+    const json &slice = events[0];
+    CHECK(slice["name"] == "slice");
+    CHECK(slice["props"]["result"] == "ok");
+    CHECK(!slice["props"].contains("project"));
+    CHECK(!slice["props"].contains("printer"));
+    CHECK(slice["props"]["settings"] == json::array({"layer_height=0.2"}));
+    CHECK(events[1]["counts"].empty());
+
+    set_data_dir(old_data_dir);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+// 0.1.6: slice events carry setting values and part measurements, so batches are cut by size too:
+// the site rejects a body over 64 KB (and the whole batch with it).
+TEST_CASE("Usage diagnostics keep every batch under the site's size limit", "[UsageTelemetry]")
+{
+    const std::string old_data_dir = data_dir();
+    fs::path dir = fs::temp_directory_path() / fs::unique_path("usage-telemetry-%%%%-%%%%");
+    fs::create_directories(dir);
+    set_data_dir(dir.string());
+
+    AppConfig config;
+    config.set("usage_diagnostics_url", "http://127.0.0.1:9/api/slicer/telemetry");
+    grant(config);
+    UsageTelemetry::start(config, false);
+    if (UsageTelemetry::disabled_by_environment()) {
+        UsageTelemetry::shutdown();
+        set_data_dir(old_data_dir);
+        SKIP("UNLAYERED_NO_TELEMETRY is set on this machine");
+    }
+    std::vector<std::string> settings, parts;
+    for (int i = 0; i < 60; ++i)
+        settings.push_back("setting_with_a_long_name_" + std::to_string(i) + "=" + std::string(40, 'v'));
+    for (int i = 0; i < 20; ++i)
+        parts.push_back("x=123.4;y=123.4;z=123.4;vol=1234567;area=123456;ovh=12.5;base=34.0;inst=20");
+    for (int i = 0; i < 30; ++i)
+        UsageTelemetry::record("slice", {{"result", "ok"}, {"settings", settings}, {"parts", parts}});
+    // Nothing listens: every batch is kept on disk, so the test can read them back.
+    UsageTelemetry::shutdown();
+
+    json batches = json::parse(slurp(dir / "usage" / "pending.json"), nullptr, false);
+    REQUIRE(batches.is_array());
+    CHECK(batches.size() > 1);
+    size_t events = 0;
+    for (const auto &body : batches) {
+        CHECK(body.get<std::string>().size() < 64 * 1024);
+        events += json::parse(body.get<std::string>())["events"].size();
+    }
+    CHECK(events == 31); // and session_end
+
+    set_data_dir(old_data_dir);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}

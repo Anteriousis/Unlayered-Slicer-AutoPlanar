@@ -37,6 +37,7 @@
 // #include "RemovableDriveManager.hpp"
 
 #include "slic3r/GUI/Plater.hpp"
+#include "slic3r/Utils/UsageTelemetry.hpp"
 
 namespace Slic3r {
 
@@ -429,13 +430,23 @@ static void rethrow_seh_exception(unsigned long win32_seh_catched)
     }
 }
 
+// The __except filter: handles the hardware exceptions above, and keeps where it happened.
+static int seh_hardware_filter(EXCEPTION_POINTERS *info, const void **address) throw()
+{
+    if (!info || !info->ExceptionRecord || !is_win32_seh_harware_exception(info->ExceptionRecord->ExceptionCode))
+        return EXCEPTION_CONTINUE_SEARCH;
+    *address = info->ExceptionRecord->ExceptionAddress;
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 // Wrapper for Win32 structured exceptions. Win32 structured exception blocks and C++ exception blocks cannot be mixed in the same function.
 unsigned long BackgroundSlicingProcess::call_process_seh(std::exception_ptr& ex) throw()
 {
     unsigned long win32_seh_catched = 0;
+    m_seh_crash_address = nullptr;
     __try {
         this->call_process(ex);
-    } __except (is_win32_seh_harware_exception(GetExceptionCode())) {
+    } __except (seh_hardware_filter(GetExceptionInformation(), &m_seh_crash_address)) {
         win32_seh_catched = GetExceptionCode();
     }
     return win32_seh_catched;
@@ -453,6 +464,15 @@ void BackgroundSlicingProcess::call_process_seh_throw(std::exception_ptr& ex) th
     }
 }
 #endif // _WIN32
+
+std::string BackgroundSlicingProcess::hard_crash_site() const
+{
+#ifdef _WIN32
+    return m_seh_crash_address ? UsageTelemetry::code_location(m_seh_crash_address) : std::string();
+#else
+    return {}; // hardware exceptions are only caught (and located) on Windows
+#endif
+}
 
 void BackgroundSlicingProcess::call_process(std::exception_ptr& ex) throw()
 {

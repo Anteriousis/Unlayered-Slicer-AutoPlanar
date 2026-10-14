@@ -341,6 +341,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/ProgressIndicator.hpp
     GUI/Jobs/RotoptimizeJob.cpp
     GUI/Jobs/RotoptimizeJob.hpp
+    GUI/Jobs/AutoPlanesJob.cpp
+    GUI/Jobs/AutoPlanesJob.hpp
     GUI/Jobs/SkeletonJob.cpp
     GUI/Jobs/SkeletonJob.hpp
     GUI/Jobs/SendJob.cpp
@@ -717,6 +719,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/AppUpdater.hpp
     Utils/UnlayeredAccount.cpp
     Utils/UnlayeredAccount.hpp
+    Utils/UsageTelemetry.cpp
+    Utils/UsageTelemetry.hpp
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp

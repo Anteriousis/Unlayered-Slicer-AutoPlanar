@@ -491,6 +491,11 @@ void AppConfig::set_defaults()
     if (get("hide_login_side_panel").empty()) {
         set_bool("hide_login_side_panel", false);
     }
+    // Unlayered: anonymous usage diagnostics, on unless switched off (slic3r/Utils/UsageTelemetry).
+    // Its own setting, NOT part of stealth mode: stealth mode is on for everyone by default.
+    if (get("usage_diagnostics").empty()) {
+        set_bool("usage_diagnostics", true);
+    }
     if (get("allow_abnormal_storage").empty()) {
         set_bool("allow_abnormal_storage", false);
     }

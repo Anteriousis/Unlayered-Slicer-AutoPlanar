@@ -130,6 +130,20 @@ std::optional<ConflictResult> check_hotend_collisions(const GCodeProcessorResult
     // preview draws the same shape): at height h no part of it stands further out than the sphere's
     // half-chord sqrt(H^2 - h^2), however shallow a face is. So each face's reach is capped there,
     // and a hit the rectangle query finds is confirmed against the true distance (below).
+    std::vector<Eigen::Matrix3d> ac_frames;
+    if (params.ac) {
+        std::vector<TrunnionAC::Vec3> axes;
+        axes.reserve(episodes.size());
+        for (const Episode &e : episodes)
+            axes.push_back({ e.axis.x(), e.axis.y(), e.axis.z() });
+        for (const TrunnionAC::Orientation &o : TrunnionAC::solve_sequence(*params.ac, axes)) {
+            const std::array<double, 9> r = TrunnionAC::rotation(*params.ac, o);
+            Eigen::Matrix3d R;
+            R << r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8];
+            ac_frames.push_back(R);
+        }
+    }
+
     const double H    = env.height;
     const double band = 0.2;
     const double sp[4] = { env.spread(HotendEnvelope::XPos), env.spread(HotendEnvelope::XNeg),
@@ -152,7 +166,8 @@ std::optional<ConflictResult> check_hotend_collisions(const GCodeProcessorResult
         const Episode &e = episodes[ei];
         if (ei > 0 && ! earlier.empty() && ! e.tips.empty()) {
             // head frame: (u, v, a) = R * p, with u / v along the head's own +X / +Y faces
-            const Eigen::Matrix3d R = params.upright ? Eigen::Matrix3d::Identity() : Eigen::Matrix3d(tool_head_frame(e.axis));
+            const Eigen::Matrix3d R = params.upright ? Eigen::Matrix3d::Identity() :
+                                      ! ac_frames.empty() ? ac_frames[ei] : Eigen::Matrix3d(tool_head_frame(e.axis));
             std::vector<Vec3d> T(e.tips.size()), M(earlier.size());
             for (size_t i = 0; i < T.size(); ++ i) T[i] = R * e.tips[i].p;
             for (size_t i = 0; i < M.size(); ++ i) M[i] = R * earlier[i].p;

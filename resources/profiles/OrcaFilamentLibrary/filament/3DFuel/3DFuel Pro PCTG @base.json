@@ -3,7 +3,7 @@
 	"name": "3DFuel Pro PCTG @base",
 	"inherits": "fdm_filament_pctg",
 	"from": "system",
-	"filament_id": "OGF3DF01",
+	"filament_id": "OFjSKlce",
 	"instantiation": "false",
 	"filament_vendor": [
 		"3DFuel"

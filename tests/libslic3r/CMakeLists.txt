@@ -15,6 +15,10 @@ add_executable(${_TEST_NAME}_tests
     test_clipper_utils.cpp
     test_config.cpp
     test_cut_plane_segmentation.cpp
+    test_curved_transition.cpp
+    test_curved_ramp.cpp
+    test_curved_plane_program.cpp
+    test_curved_regions.cpp
     test_segment_support_bounds.cpp
     test_config_variant_expansion.cpp
     test_toolordering_nozzle_group.cpp
@@ -28,6 +32,7 @@ add_executable(${_TEST_NAME}_tests
     test_filament_mixer.cpp
     test_fill_plane_path.cpp
     test_fill_svg.cpp
+    test_trunnion.cpp
     test_infill_mesh_tiling.cpp
     test_geometry.cpp
     test_multimaterial_segmentation.cpp

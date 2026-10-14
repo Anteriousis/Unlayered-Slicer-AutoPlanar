@@ -37,6 +37,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <sstream>
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/trim.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
@@ -297,6 +299,15 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
     bool invalidated = false;
 
     for (const t_config_option_key &opt_key : opt_keys) {
+        // Curved geometry/schedule feasibility depends on these printer limits.
+        // Keep ordinary prints on their existing export-only invalidation path.
+        if (std::any_of(m_objects.begin(),m_objects.end(),[](const PrintObject* o){return o->config().curved_layer_blend.value || o->config().automatic_layer_strategy.value;}) &&
+            (opt_key.rfind("nonplanar_",0)==0 || opt_key=="virtual_5axis" || opt_key=="min_layer_height" ||
+             opt_key=="max_layer_height" || opt_key=="printable_height" || opt_key=="extruder_offset" ||
+             opt_key=="extruder_printable_area" || opt_key=="extruder_printable_height" ||
+             opt_key=="nozzle_diameter" || opt_key=="filament_map" || opt_key=="filament_map_mode" ||
+             opt_key=="enable_filament_dynamic_map" || opt_key=="physical_extruder_map" || opt_key=="machine_max_speed_z"))
+            osteps.emplace_back(posSlice);
         if (steps_gcode.find(opt_key) != steps_gcode.end()) {
             // These options only affect G-code export or they are just notes without influence on the generated G-code,
             // so there is nothing to invalidate.
@@ -344,6 +355,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             // to invalidate posSlice: the generic fallback below only calls invalidate_all_steps(),
             // which touches Print-level steps and leaves every PrintObject's slices stale.
             || opt_key == "enable_nonplanar"
+            || opt_key == "min_layer_height"
+            || opt_key == "max_layer_height"
             // BELT_MOD -- the belt tilt is every un-cut object's slicing rotation.
             || opt_key == "belt_printer"
             || opt_key == "belt_slice_rotation"
@@ -1422,6 +1435,22 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
+    for (const PrintObject* object : m_objects) {
+        if (object->config().automatic_layer_strategy.value) {
+            if (std::abs(object->config().layer_rotation_b.value)>EPSILON || std::abs(object->config().layer_rotation_c.value)>EPSILON ||
+                object_has_directed_parts(*object->model_object()))
+                return {L("Automatic layer selection requires layer rotations B/C at zero and no per-part build directions. Disable automatic selection to use manual build directions."),object->model_object(),"automatic_layer_strategy"};
+            warn(L("Automatic layer selection will choose curved or planar during slicing. It preserves supports and process settings, and does not certify the real toolhead clearance or print quality."),
+                 "automatic_layer_strategy",object->model_object());
+            continue;
+        }
+        const std::string error = object->curved_blend_error();
+        if (!error.empty()) return {error,object->model_object(),"curved_layer_blend"};
+        if (object->config().curved_layer_blend.value)
+            warn(L("Curved layer blend is experimental. Its limits use the configured envelope and layer-height range; successful slicing does not establish physical clearance or bonding."),
+                 "curved_layer_blend",object->model_object());
+    }
+
     // Orca: a gradient mixed filament only renders its gradient with "Mixed color sublayer" on;
     // without it ToolOrdering::resolve_mixed_filaments prints one whole component per layer and
     // the gradient is dropped silently. extruders() already covers painting, height ranges,
@@ -1580,10 +1609,10 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             }
             const double reach   = object->effective_build_reach();
             const double derived = virtual_tilt_limit_deg(envelope, m_config.nonplanar_gantry_height.value, reach, azimuth);
-            // Whichever is stricter, ignoring the ones that are switched off (0 = not applied).
-            double limit = 0.;
-            if (derived > 0. && manual > 0.) limit = std::min(derived, manual);
-            else                             limit = std::max(derived, manual);
+            // Whichever is stricter, ignoring the ones that are switched off (0 = not applied). The one
+            // shared definition, also used by the GUI drag limit and the automatic plane planner.
+            const double limit = virtual_tilt_limit_enforced_deg(envelope, m_config.nonplanar_gantry_height.value,
+                                                                 manual, reach, azimuth);
             if (limit <= 0. || tilt <= limit + EPSILON)
                 continue;
 
@@ -2607,19 +2636,42 @@ SegmentFootprint segment_support_footprint(const PrintObject *child)
     Polygons     body;
     const double lh = std::max(0.01, child->config().layer_height.value);
 
+    // UNLAYERED_MOD -- a floor that is TILTED in the child's slice frame (a cut plane whose build
+    // direction is overridden, e.g. a horizontal cut under 5-degree layers) rises across the child's
+    // layers, so the child's support reaches it in a different layer at every XY. The fixed window
+    // above the lowest layer then sees only the strip where the floor is lowest: on a 10 mm overhang
+    // at 5 degrees the floor climbs ~0.9 mm (4-5 layers) and everything landing on the higher part
+    // was never handed down -- the parent printed no column under it and the child's support started
+    // in mid-air (measured: 533 unfounded support samples, gaps to 2.5 mm, on a saved Centauri
+    // project; 84 / 0.075 mm planar). Collect, in addition, whatever lies in each layer's floor band:
+    // where the floor actually passes through that layer. For a floor parallel to the layers the band
+    // is the lowest slab only, so this adds nothing there.
+    const SegmentSupportBounds bounds(*child);
+    const bool                 floor_bands = bounds.is_active() && child->is_segment() && ! child->is_root_segment();
+    auto                       band_of     = [&bounds, lh](coordf_t bottom_z, coordf_t print_z) {
+        return bounds.floor_band(bottom_z - lh, print_z + lh);
+    };
+
     const ConstSupportLayerPtrsAdaptor support_layers = child->support_layers();
     if (! support_layers.empty()) {
         coordf_t z_lo = support_layers.front()->print_z;
         for (const SupportLayer *sl : support_layers)
             z_lo = std::min(z_lo, sl->print_z);
         const coordf_t z_threshold = z_lo + coordf_t(2. * lh);
-        for (const SupportLayer *sl : support_layers)
+        for (const SupportLayer *sl : support_layers) {
+            // Normal/grid support records its footprint in support_islands; classic tree
+            // leaves that empty and uses base_areas. Take both so either style cascades.
             if (sl->print_z <= z_threshold) {
-                // Normal/grid support records its footprint in support_islands; classic tree
-                // leaves that empty and uses base_areas. Take both so either style cascades.
                 append(out,       to_polygons(sl->support_islands));
                 append(tree_base, to_polygons(sl->base_areas));
+            } else if (floor_bands) {
+                const Polygons band = band_of(sl->bottom_z(), sl->print_z);
+                if (! band.empty()) {
+                    append(out,       intersection(to_polygons(sl->support_islands), band));
+                    append(tree_base, intersection(to_polygons(sl->base_areas), band));
+                }
             }
+        }
     }
 
     // A tree roots in a wide base pad. Handing the full pad down makes the parent mirror it as a
@@ -2639,9 +2691,15 @@ SegmentFootprint segment_support_footprint(const PrintObject *child)
         const coordf_t z_lo = child->get_layer(0)->print_z;
         for (size_t i = 0; i < child->layer_count(); ++ i) {
             const Layer *layer = child->get_layer(int(i));
-            if (layer->print_z > z_lo + coordf_t(2. * lh))
+            if (layer->print_z <= z_lo + coordf_t(2. * lh)) {
+                append(body, to_polygons(layer->lslices));
+            } else if (floor_bands) {
+                // Same reason as above: on a tilted floor the body rests on it layer by layer.
+                const Polygons band = band_of(layer->bottom_z(), layer->print_z);
+                if (! band.empty())
+                    append(body, intersection(to_polygons(layer->lslices), band));
+            } else
                 break;              // layers are sorted by print_z
-            append(body, to_polygons(layer->lslices));
         }
     }
 
@@ -3311,6 +3369,17 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
 
 
+    // Support and bridge roles are only known after native fill/support planning.
+    // Remove conflicting local patches and re-slice the original solid. This is
+    // a bounded geometry retry, not a G-code patch or a changed user preset.
+    for(PrintObject* obj:m_objects) {
+        for(size_t retry=0;obj->refine_curved_regions_for_paths();++retry) {
+            if(retry>=64) throw SlicingError("Regional bridge/support planning did not converge");
+            this->throw_if_canceled();
+            obj->make_perimeters();obj->infill();obj->ironing();
+            obj->generate_support_material();obj->detect_overhangs_for_lift();obj->estimate_curled_extrusions();
+        }
+    }
     if (this->set_started(psWipeTower)) {
         {
             std::vector<std::set<int>> geometric_unprintables(m_config.nozzle_diameter.size());
@@ -3708,11 +3777,19 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
         // it (the check returns immediately). Reported through the same ConflictResult plumbing as
         // the G-code path conflicts: sidebar warning in the GUI, exit -101 in the CLI.
         // BELT_MOD: the belt machine frame shears the emitted coordinates, which this check reads as bed-frame.
-        if (! m_conflict_result && ! m_no_check && m_config.enable_nonplanar.value && ! m_config.belt_printer.value && result->tool_axes.size() > 1) {
+        // Curved bead normals vary within a single deposition pass. The legacy
+        // checker groups normal changes into independent print episodes, which
+        // is not a valid partition of a curved pass. This restricted ramp mode
+        // instead certifies every layer's directional slope and whole-solid
+        // travel against the configured envelope in PrintObject::slice().
+        const bool curved_blend=std::any_of(m_objects.begin(),m_objects.end(),[](const PrintObject* object){return bool(object->curved_field());});
+        if (! curved_blend && ! m_conflict_result && ! m_no_check && m_config.enable_nonplanar.value && ! m_config.belt_printer.value && result->tool_axes.size() > 1) {
             HotendCollisionParams hp;
             hp.envelope = HotendEnvelope::from_config(m_config);
             // A 3-axis printer never tilts its nozzle, whatever axis the chunk was tagged with.
             hp.upright  = m_config.virtual_5axis.value;
+            if (trunnion_ac_enabled(this->full_print_config()))
+                hp.ac = trunnion_ac_machine(this->full_print_config());
             const auto t0 = std::chrono::high_resolution_clock::now();
             m_conflict_result = check_hotend_collisions(*result, hp);
             BOOST_LOG_TRIVIAL(info) << "hotend collision check took "
@@ -3727,16 +3804,40 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
         // including the apex of each transition hop, which is normally the highest point in the
         // whole print. Post-processing scripts have also already run by this point, so this sees
         // exactly what the printer gets.
+        //
+        // Except the printer's own G-code: the machine start/end G-code (and filament change and
+        // other custom blocks) is written under a ";TYPE:Custom" role tag, and an end G-code that
+        // lifts the head and presents the print (Prusa MK3S: Z up, then X0 Y200) is not the
+        // toolpath climbing into the gantry. Refusing every print over it was most of the slice
+        // errors 0.1.3 reported. Transition hops carry no role tag of their own, so they keep the
+        // role of the extrusion before them and stay counted.
+        //
+        // The same scan refuses a toolpath that goes BELOW the plate (Z < 0). On a 3-axis printer that
+        // is the nozzle driven into the bed: a customer's A1 scraped its plate on 0.1.x. Nothing
+        // upstream should produce it any more (tilted objects are clipped at the plate in
+        // slice_volumes), so this is the last line of defence, not the fix.
         bool height_limit_exceeded = false;
-        if (m_config.enable_nonplanar.value && m_config.virtual_5axis.value && ! m_config.belt_printer.value &&
-            m_config.nonplanar_virtual_max_z.value > 0.) {
+        bool below_plate           = false;
+        const bool check_height = m_config.enable_nonplanar.value && m_config.virtual_5axis.value && ! m_config.belt_printer.value &&
+                                  m_config.nonplanar_virtual_max_z.value > 0.;
+        const bool check_floor  = m_config.enable_nonplanar.value && m_config.virtual_5axis.value && ! m_config.belt_printer.value;
+        if (check_height || check_floor) {
             const double limit   = m_config.nonplanar_virtual_max_z.value;
             double       worst_z = 0., worst_x = 0., worst_y = 0.;
+            double       low_z   = std::numeric_limits<double>::max(), low_x = 0., low_y = 0.;
             double       cur_x   = 0., cur_y   = 0.;
             {
                 boost::nowide::ifstream in(path);
                 std::string             line;
+                const std::string       role_tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+                bool                    in_custom = false;
                 while (std::getline(in, line)) {
+                    if (boost::starts_with(line, role_tag)) {
+                        std::string role = line.substr(role_tag.size());
+                        boost::trim(role);
+                        in_custom = role == ExtrusionEntity::role_to_string(erCustom);
+                        continue;
+                    }
                     if (line.size() < 2 || (line[0] != 'G' && line[0] != 'g'))
                         continue;
                     // G0/G1 only: arcs carry I/J/R and never change Z on this path.
@@ -3761,24 +3862,51 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
                         else { z = v; have_z = true; }
                         i = size_t(endp - line.c_str()) - 1;
                     }
-                    if (have_z && z > worst_z) {
+                    if (have_z && ! in_custom && z > worst_z) {
                         worst_z = z;
                         worst_x = cur_x;
                         worst_y = cur_y;
                     }
+                    if (have_z && ! in_custom && z < low_z) {
+                        low_z = z;
+                        low_x = cur_x;
+                        low_y = cur_y;
+                    }
                 }
             }
-            height_limit_exceeded = worst_z > limit + EPSILON;
+            height_limit_exceeded = check_height && worst_z > limit + EPSILON;
+            below_plate           = check_floor && low_z < - EPSILON;
+            if (below_plate) {
+                ConflictResult cr(_u8L("toolpath"), _u8L("the build plate"), low_z, nullptr, nullptr);
+                cr.message = (boost::format(_u8L("Virtual 5-axis: the toolpath goes below the build plate, to Z%1% mm (near "
+                                                 "X%2% Y%3%), which would drive the nozzle into the bed. Part of the object "
+                                                 "is probably sunk below the plate: drop it onto the plate and slice again."))
+                              % (boost::format("%.2f") % low_z).str()
+                              % (boost::format("%.1f") % low_x).str()
+                              % (boost::format("%.1f") % low_y).str()).str();
+                if (m_conflict_result) {
+                    if (! m_conflict_result->message.empty())
+                        cr.message += " " + m_conflict_result->message;
+                    cr._obj1 = m_conflict_result->_obj1;
+                    cr._obj2 = m_conflict_result->_obj2;
+                }
+                m_conflict_result = cr;
+                BOOST_LOG_TRIVIAL(error) << "virtual 5-axis below the plate: " << cr.message;
+            }
             if (height_limit_exceeded) {
                 ConflictResult cr(_u8L("toolpath"), _u8L("the gantry"), worst_z, nullptr, nullptr);
-                cr.message = (boost::format(_u8L("Virtual 5-axis: the toolpath reaches Z%1% mm in the G-code, "
-                                                 "above the %2% mm total height this printer allows (worst near "
-                                                 "X%3% Y%4%). Lower the part, reduce the cut plane angle, or "
-                                                 "raise \"Max total height\" in the printer settings."))
+                cr.message = (boost::format(_u8L("Virtual 5-axis: the toolpath reaches Z%1% mm (near X%3% Y%4%), above "
+                                                 "the %2% mm set in Printer settings > Motion ability > Non-planar "
+                                                 "Printing > \"Max print height (from the bed)\". Lower the part, reduce "
+                                                 "the cut plane angle, or raise that limit (0 means no limit)."))
                               % (boost::format("%.1f") % worst_z).str()
                               % (boost::format("%.1f") % limit).str()
                               % (boost::format("%.1f") % worst_x).str()
                               % (boost::format("%.1f") % worst_y).str()).str();
+                // Day one of 0.1.3 saw limits of 4, 5 and 7 mm: read as a clearance, not a height.
+                if (limit < 30.)
+                    cr.message += " " + _u8L("Note: this limit is measured from the bed, so it is usually close to the "
+                                             "printer's build height; a few millimetres refuses almost every print.");
                 // Only ONE ConflictResult survives into result->conflict_result and the GUI renders
                 // exactly one message, so fold anything already found into this one rather than
                 // dropping it: a print can both collide and exceed the height.
@@ -3805,7 +3933,7 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
         // G-code stays exportable and sendable (only the CLI blocks on it). This limit exists to
         // refuse, so raise a real slicing error -- after the assignment above, so the preview still
         // carries the marker. BackgroundSlicingProcess reports it and never finalizes the export.
-        if (height_limit_exceeded && m_conflict_result)
+        if ((height_limit_exceeded || below_plate) && m_conflict_result)
             throw Slic3r::SlicingError(m_conflict_result->message);
     }
     return path.c_str();

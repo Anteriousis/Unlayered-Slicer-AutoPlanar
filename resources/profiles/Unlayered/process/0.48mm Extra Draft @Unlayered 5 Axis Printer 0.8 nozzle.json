@@ -3,7 +3,7 @@
     "name": "0.48mm Extra Draft @Unlayered 5 Axis Printer 0.8 nozzle",
     "inherits": "fdm_process_unlayered_0.8_nozzle_common",
     "from": "system",
-    "setting_id": "GP129",
+    "setting_id": "X2vkPvuu7kY3a2RQ",
     "instantiation": "true",
     "layer_height": "0.48",
     "outer_wall_speed": "65",

@@ -8,11 +8,13 @@
   :root {
     --bg: #ffffff; --fg: #262626; --muted: #6b6b6b; --line: #d9d9d9;
     --card: #f5f5f5; --accent: #262626; --warn-bg: #f3f3f3; --code-bg: #ececec;
+    --plane: #d9480f; --support: #a3a3a3;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #1e1e1e; --fg: #e5e5e5; --muted: #9a9a9a; --line: #3c3c3c;
       --card: #2a2a2a; --accent: #e5e5e5; --warn-bg: #2f2f2f; --code-bg: #333333;
+      --plane: #ff8a50; --support: #6b6b6b;
     }
   }
   * { box-sizing: border-box; }
@@ -26,16 +28,18 @@
   h2 { font-size: 19px; margin: 36px 0 10px; padding-top: 14px; border-top: 1px solid var(--line); }
   h3 { font-size: 15px; margin: 18px 0 6px; }
   p, li { color: var(--fg); }
+  a { color: inherit; }
   ol.steps > li { margin-bottom: 10px; }
   kbd, .ui {
     background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px;
-    padding: 1px 6px; font-size: 13px; white-space: nowrap;
+    padding: 1px 6px; font-size: 13px;
   }
   .card {
     background: var(--card); border: 1px solid var(--line); border-radius: 8px;
     padding: 14px 16px; margin: 14px 0;
   }
-  .card b { display: block; margin-bottom: 4px; }
+  .card > b:first-child { display: block; margin-bottom: 4px; }
+  .card p, .card ul { margin: 4px 0; }
   .note { background: var(--warn-bg); border-left: 3px solid var(--accent);
           padding: 10px 14px; margin: 14px 0; border-radius: 0 6px 6px 0; }
   .diagram {
@@ -43,117 +47,329 @@
     background: var(--card); border: 1px solid var(--line); border-radius: 8px;
     padding: 14px 18px; overflow-x: auto; white-space: pre; color: var(--fg);
   }
+  figure { margin: 16px 0; }
+  figure svg { display: block; width: 100%; height: auto; }
+  .compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
+  figure img.shot { display: block; max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; }
+  figcaption { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .compare { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  .compare text { fill: var(--fg); font: 14px "Segoe UI", system-ui, sans-serif;
+                  stroke: var(--card); stroke-width: 5px; stroke-linejoin: round; paint-order: stroke; }
+  .compare .body { fill: var(--bg); stroke: var(--fg); stroke-width: 2; }
+  .compare .layer { stroke: var(--muted); stroke-width: 1; }
+  .compare .support { stroke: var(--support); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .compare .plane { stroke: var(--plane); stroke-width: 3; stroke-dasharray: 7 4; }
+  .compare .arrow { stroke: var(--plane); stroke-width: 2; fill: none; }
+  .compare .arrowhead { fill: var(--plane); }
+  .compare .bed { stroke: var(--fg); stroke-width: 3; }
+  .icon { height: 1.9em; width: auto; vertical-align: middle; margin: 0 2px;
+          background: #ffffff; border: 1px solid var(--line); border-radius: 6px; padding: 2px; }
+  @media (prefers-color-scheme: dark) { .icon { background: #2b2b2b; } }
   table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; font-size: 14px; vertical-align: top; }
   th { background: var(--card); }
+  .table-wrap { overflow-x: auto; }
   .muted { color: var(--muted); }
+  nav.toc { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px; margin: 18px 0; }
+  nav.toc ol { margin: 4px 0; padding-left: 22px; }
+  @media (max-width: 560px) {
+    main { padding: 20px 16px 48px; }
+    h1 { font-size: 22px; }
+  }
 </style>
 </head>
 <body>
 <main>
   <h1>Multiplanar Printing</h1>
-  <p class="sub">Unlayered Slicer — printing one object in several build directions, without splitting it.</p>
+  <p class="sub">Unlayered Slicer: printing different parts of one object in different directions.</p>
 
-  <p>On a 5-axis printer the bed can tilt under the nozzle, so different parts of one object can be
-  printed in different directions — an overhanging arm can be built <i>along its own axis</i>, with
-  no support at all. In Unlayered Slicer you describe this with <b>cut planes</b>: non-destructive
-  planes stored on the object. The object is never split in your project; the printable segments,
-  their orientations, and their print order are all derived at slice time and stay editable.</p>
+  <p>An ordinary slicer prints every layer flat, so anything that overhangs needs support. Multiplanar
+  printing lets you choose a different build direction for each part of the object. An arm sticking
+  out sideways can be printed <i>along its own length</i>, with no support under it.</p>
 
-  <h2>1 &nbsp;Quick start</h2>
+  <figure>
+    <div class="compare">
+    <svg viewBox="0 0 350 250" role="img" aria-label="An L-shaped part printed flat: the arm's layers are flat and it needs support under it.">
+      <g>
+        <rect class="body" x="60" y="50" width="60" height="160"/>
+        <rect class="body" x="120" y="50" width="170" height="40"/>
+        <g class="layer">
+          <line x1="60" y1="60" x2="290" y2="60"/><line x1="60" y1="70" x2="290" y2="70"/>
+          <line x1="60" y1="80" x2="290" y2="80"/>
+          <line x1="60" y1="100" x2="120" y2="100"/><line x1="60" y1="110" x2="120" y2="110"/>
+          <line x1="60" y1="120" x2="120" y2="120"/><line x1="60" y1="130" x2="120" y2="130"/>
+          <line x1="60" y1="140" x2="120" y2="140"/><line x1="60" y1="150" x2="120" y2="150"/>
+          <line x1="60" y1="160" x2="120" y2="160"/><line x1="60" y1="170" x2="120" y2="170"/>
+          <line x1="60" y1="180" x2="120" y2="180"/><line x1="60" y1="190" x2="120" y2="190"/>
+          <line x1="60" y1="200" x2="120" y2="200"/>
+        </g>
+        <g class="support">
+          <line x1="135" y1="94" x2="135" y2="208"/><line x1="155" y1="94" x2="155" y2="208"/>
+          <line x1="175" y1="94" x2="175" y2="208"/><line x1="195" y1="94" x2="195" y2="208"/>
+          <line x1="215" y1="94" x2="215" y2="208"/><line x1="235" y1="94" x2="235" y2="208"/>
+          <line x1="255" y1="94" x2="255" y2="208"/><line x1="275" y1="94" x2="275" y2="208"/>
+        </g>
+        <line class="bed" x1="20" y1="211" x2="330" y2="211"/>
+        <text x="205" y="155" text-anchor="middle">support</text>
+        <text x="175" y="238" text-anchor="middle">Printed flat: the arm needs support</text>
+      </g>
+    </svg>
+    <svg viewBox="0 0 350 250" role="img" aria-label="The same part with one cut plane where the arm meets the post: the arm's layers run across the arm and no support is needed.">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path class="arrowhead" d="M0,0 L10,5 L0,10 z"/>
+        </marker>
+      </defs>
+      <g>
+        <rect class="body" x="60" y="50" width="60" height="160"/>
+        <rect class="body" x="120" y="50" width="170" height="40"/>
+        <g class="layer">
+          <line x1="60" y1="60" x2="120" y2="60"/><line x1="60" y1="70" x2="120" y2="70"/>
+          <line x1="60" y1="80" x2="120" y2="80"/><line x1="60" y1="90" x2="120" y2="90"/>
+          <line x1="60" y1="100" x2="120" y2="100"/><line x1="60" y1="110" x2="120" y2="110"/>
+          <line x1="60" y1="120" x2="120" y2="120"/><line x1="60" y1="130" x2="120" y2="130"/>
+          <line x1="60" y1="140" x2="120" y2="140"/><line x1="60" y1="150" x2="120" y2="150"/>
+          <line x1="60" y1="160" x2="120" y2="160"/><line x1="60" y1="170" x2="120" y2="170"/>
+          <line x1="60" y1="180" x2="120" y2="180"/><line x1="60" y1="190" x2="120" y2="190"/>
+          <line x1="60" y1="200" x2="120" y2="200"/>
+          <line x1="132" y1="50" x2="132" y2="90"/><line x1="144" y1="50" x2="144" y2="90"/>
+          <line x1="156" y1="50" x2="156" y2="90"/><line x1="168" y1="50" x2="168" y2="90"/>
+          <line x1="180" y1="50" x2="180" y2="90"/><line x1="192" y1="50" x2="192" y2="90"/>
+          <line x1="204" y1="50" x2="204" y2="90"/><line x1="216" y1="50" x2="216" y2="90"/>
+          <line x1="228" y1="50" x2="228" y2="90"/><line x1="240" y1="50" x2="240" y2="90"/>
+          <line x1="252" y1="50" x2="252" y2="90"/><line x1="264" y1="50" x2="264" y2="90"/>
+          <line x1="276" y1="50" x2="276" y2="90"/>
+        </g>
+        <line class="plane" x1="120" y1="32" x2="120" y2="112"/>
+        <line class="arrow" x1="140" y1="30" x2="250" y2="30" marker-end="url(#ah)"/>
+        <text x="128" y="118" text-anchor="start">cut plane</text>
+        <text x="195" y="20" text-anchor="middle">arm's build direction</text>
+        <line class="bed" x1="20" y1="211" x2="330" y2="211"/>
+        <text x="175" y="238" text-anchor="middle">One cut plane: the arm prints along its length</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>Thin lines are layers. With the cut plane, the post prints flat as usual; then the
+    arm is built outward from the post's side, one layer at a time.</figcaption>
+  </figure>
+
+  <p>You tell the slicer where to change direction with <b>cut planes</b>. A cut plane is a
+  marker you place on the model that means: <i>"divide the part here, and print everything beyond
+  this plane in the direction the plane faces."</i></p>
+  <ul>
+    <li>The part in your project is <b>never actually cut</b>. The planes are stored on the object;
+      the pieces (called <b>segments</b>), their directions and their print order are worked out
+      when you slice, and you can edit the planes at any time.</li>
+    <li>The segment sitting on the bed prints first, flat, like a normal print. Each other segment
+      is then printed on top of the one below it, in its own direction.</li>
+    <li>On an <b>Unlayered 5-axis printer</b> the bed tilts and turns under the nozzle, so a segment
+      can lean any way, even fully sideways like the arm above.</li>
+    <li>On an <b>ordinary 3-axis printer</b> (Printer type <span class="ui">Virtual</span>) the nozzle
+      stays upright, so a segment can only lean as far as your hotend allows before it would hit the
+      part: about 35–45° with the default hotend shape. The slicer refuses steeper ones.</li>
+  </ul>
+
+  <nav class="toc" aria-label="Contents">
+    <b>Contents</b>
+    <ol>
+      <li><a href="#before-you-start">Before you start</a></li>
+      <li><a href="#quick-start">Quick start</a></li>
+      <li><a href="#segments">How segments are worked out</a></li>
+      <li><a href="#plane-list">The plane list</a></li>
+      <li><a href="#pipe-cut">Pipe Cut</a></li>
+      <li><a href="#safety">Safety checks</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
+      <li><a href="#printer-settings">Settings reference</a></li>
+    </ol>
+  </nav>
+
+  <h2 id="before-you-start">1 &nbsp;Before you start</h2>
+  <p>Two settings must be right before the Cut Planes tool will work.</p>
+
+  <div class="card">
+    <b>Non-planar printing must be on for your printer</b>
+    <p>On an <b>Unlayered 5-axis printer</b> it is already on: skip this.</p>
+    <p>On <b>any other printer</b>, either:</p>
+    <ul>
+      <li>click the greyed-out Cut Planes icon and answer <span class="ui">Yes</span> to
+        <i>Turn on non-planar printing</i> (Unlayered Slicer 0.1.3 and later), <b>or</b></li>
+      <li>open the printer settings (the edit icon next to the printer name in the left sidebar),
+        go to the <span class="ui">Motion ability</span> tab, find the
+        <span class="ui">Non-planar Printing</span> section and tick
+        <span class="ui">Enable non-planar printing</span>. Then set
+        <span class="ui">Printer type</span> to <span class="ui">Virtual</span> for an ordinary
+        3-axis printer. Save the printer preset to keep the change.</li>
+    </ul>
+    <p class="muted">In Unlayered Slicer 0.1.2 and earlier these two settings are hidden in
+    <i>Simple</i> mode: switch the <span class="ui">Simple / Advanced / Expert</span> selector at the
+    top of the settings panel to <span class="ui">Advanced</span> to see them. From 0.1.3 they are
+    shown in every mode.</p>
+  </div>
+
+  <div class="card">
+    <b>Print sequence must be "By group"</b>
+    <p>Each segment is printed completely, one after another, so the job must print by group
+    rather than layer by layer across the whole plate. The setting is at
+    <span class="ui">Process &rarr; Others &rarr; Special mode &rarr; Print sequence</span>.
+    You don't have to find it: when you add your first cut plane the slicer asks to switch it for
+    you. Unlayered printer profiles already use <span class="ui">By group</span>.</p>
+  </div>
+
+  <h2 id="quick-start">2 &nbsp;Quick start</h2>
+  <p>Try it on a simple L-shaped part like the one above: an upright post with an arm sticking out
+  near the top.</p>
+  <div class="note"><b>On an ordinary 3-axis printer</b> (Printer type <span class="ui">Virtual</span>)
+  a fully sideways arm would need a 90° tilt, which an upright nozzle can't reach: the plane stops
+  at the tilt limit. Practise instead on a branch that leans out at about 45–60°, and tilt its plane
+  only as far as the panel allows (<i>Max tilt this way</i>).</div>
   <ol class="steps">
-    <li>In <span class="ui">Prepare</span>, select the object and open the
-        <span class="ui">Cut Planes</span> tool in the left toolbar.</li>
-    <li>Position the plane with the grabbers — drag to move it along its normal, rotate it with the
-        rings. The coloured chunk preview shows the segments you would get.</li>
-    <li>Click <span class="ui">Add cut plane</span>. The plane is recorded in the list; the gizmo
-        plane stays where it is so you can place the next one.</li>
-    <li>When asked, switch the print sequence to <span class="ui">By group</span> — multiplanar
-        printing requires it (you can also set it later in Process &rarr; Others).</li>
-    <li>Slice. Each segment is printed in its own orientation; the G-code preview shows the
-        tool-axis changes between segments.</li>
+    <li>In the <span class="ui">Prepare</span> tab, click the object to select it.</li>
+    <li>Click the <b>Cut Planes</b> icon
+      <picture>
+        <source srcset="../../images/toolbar_cut_planes_dark.svg" media="(prefers-color-scheme: dark)">
+        <img class="icon" src="../../images/toolbar_cut_planes.svg" alt="Cut Planes icon">
+      </picture>
+      in the toolbar along the <b>top</b> of the 3D view. If it is greyed out, non-planar printing
+      is off for this printer (see <a href="#before-you-start">Before you start</a>), or no single
+      object is selected.</li>
+    <li>A plane appears through the object, with a panel of controls beside it. Move the plane to
+      where the arm meets the post:
+      <ul>
+        <li>drag the arrow to slide the plane along the direction it faces, and drag the rings to
+          tilt it; or</li>
+        <li>click <span class="ui">Select face</span> and then click a face of the model, such as
+          the arm's flat end, to line the plane up with it.</li>
+      </ul>
+      The plane should face <i>along the arm</i>, pointing away from the post: that is the
+      direction the arm will be built in. Use <span class="ui">Flip cut plane</span> if it points
+      the wrong way. The coloured preview shows the segments you would get.</li>
+    <li>Click <span class="ui">Add cut plane</span>. The plane is saved in the list in the panel.
+      The editing plane stays where it is, so you can move it and add another.</li>
+    <li>When asked to switch the print sequence to <span class="ui">By group</span>, answer
+      <span class="ui">Yes</span>.</li>
+    <li>Click <span class="ui">Slice</span>. In the preview, the post prints flat first, then the
+      arm prints in its own direction. You can add more planes for more segments: each plane
+      starts a new one.</li>
   </ol>
+  <div class="note">The panel's <span class="ui">Tutorial</span> button and
+  <span class="ui">Help &rarr; Multiplanar Tutorial</span> open this page.</div>
 
-  <div class="note"><b>Requirements.</b> The printer profile must have non-planar printing enabled
-  (Printer settings &rarr; <span class="ui">Non-planar</span>). The Unlayered 5-axis profiles ship
-  with it on. Print sequence must be <span class="ui">By group</span>.</div>
-
-  <h2>2 &nbsp;How segments are derived</h2>
-  <p>The planes partition the object. The piece resting on the bed is the <b>root</b> and prints
-  flat, like any normal print. Every other segment sits on exactly one plane — its <b>base
-  plane</b> — and is printed <i>along that plane's normal</i>, on top of the segment across the
+  <h2 id="segments">3 &nbsp;How segments are worked out</h2>
+  <p>The planes divide the object into segments. The segment resting on the bed is the <b>root</b>
+  and prints flat. Every other segment sits on exactly one plane, its <b>base plane</b>, and is
+  printed <i>in the direction that plane faces</i>, on top of the segment on the other side of the
   plane. Arrows on each plane in the 3D view show that direction.</p>
 
   <div class="diagram">      ___________
-     |  arm  ⟋   |   plane 2 → the arm builds along plane 2's normal
+     |  arm  ⟋   |   plane 2 → the arm builds in plane 2's direction
      |___⟋⟍______|
-     |  tower    |   plane 1 → the tower builds along plane 1's normal
+     |  tower    |   plane 1 → the tower builds in plane 1's direction
   ___|___________|___
   |      root       |   printed flat on the bed, first
   |_________________|</div>
 
   <ul>
-    <li><b>Chain order is geometric.</b> A segment always prints after the segment it sits on —
-        root first, then outward. You cannot break a physical dependency by reordering planes.</li>
+    <li><b>Physical order always wins.</b> A segment always prints after the segment it sits on:
+        root first, then outward. Reordering planes cannot change that.</li>
     <li><b>Sibling order follows your plane list, in reverse.</b> When two segments sit on the same
         parent, the one from the <i>first</i> plane in the list prints <i>last</i>. Use the arrows
         in the plane list to reorder.</li>
-    <li><b>Build direction override.</b> Normally a segment builds along its base plane's normal.
-        To print it in a different direction without moving the plane, select the plane and use the
-        B/C angle fields in the panel (reset restores tracking the plane).</li>
+    <li><b>Build direction override.</b> To print a segment in a different direction without moving
+        its plane, select the plane and use the B/C angle fields in the panel.
+        <span class="ui">Reset direction</span> makes it follow the plane again.</li>
   </ul>
 
-  <h2>3 &nbsp;The plane list</h2>
+  <h2 id="plane-list">4 &nbsp;The plane list</h2>
+  <div class="table-wrap">
   <table>
     <tr><th>Control</th><th>What it does</th></tr>
-    <tr><td>▲ ▼ arrows</td><td>Reorder planes — affects sibling print order (first in the list prints last) and tie-breaking.</td></tr>
-    <tr><td>◉ radio</td><td>Bind the gizmo grabbers to this stored plane to move/rotate it. Click again to release.</td></tr>
-    <tr><td>☑ checkbox</td><td>Enable/disable one plane without deleting it.</td></tr>
+    <tr><td>▲ ▼ arrows</td><td>Reorder planes. Affects sibling print order (first in the list prints last) and switches <span class="ui">Automatic order</span> off.</td></tr>
+    <tr><td>◉ radio</td><td>Attach the grabbers to this saved plane to move or tilt it. Click again to release.</td></tr>
+    <tr><td>☑ checkbox</td><td>Use or ignore one plane without deleting it.</td></tr>
     <tr><td>✕</td><td>Delete the plane.</td></tr>
-    <tr><td>Top checkbox</td><td>Turns the whole feature on/off for the object — the planes are kept either way.</td></tr>
+    <tr><td><span class="ui">Enable cut planes</span></td><td>Turns the whole feature on or off for this object. The planes are kept either way.</td></tr>
   </table>
-  <p class="muted">A plane that does not actually split the object is listed but produces no cut.</p>
+  </div>
+  <p class="muted">A plane that doesn't actually divide the object is listed but has no effect.</p>
 
-  <h2>4 &nbsp;Pipe Cut</h2>
+  <h2 id="pipe-cut">5 &nbsp;Pipe Cut</h2>
   <p>For a bent pipe, duct or tube, the <span class="ui">Pipe Cut</span> tool places the planes
   for you. It finds the centreline of the bore and cuts the part into short chunks along it, so
-  each chunk prints square to the pipe. It is for hollow, tube-shaped parts only — a solid or
-  boxy model (a Benchy, a bracket) gets nothing useful from it.</p>
+  each chunk prints square to the pipe. It is for hollow, tube-shaped parts only. A solid or
+  boxy model (a Benchy, a bracket) gets nothing useful from it. Its icon sits next to Cut Planes
+  in <span class="ui">Advanced</span> and <span class="ui">Expert</span> mode.</p>
   <ol class="steps">
     <li>Open the <span class="ui">Pipe Cut</span> tool. The centreline is found automatically;
-        edit it if needed — move, delete, or connect nodes.</li>
+        edit it if needed: move, delete, or connect nodes.</li>
     <li>Click <span class="ui">Cut along pipe</span>: one cut plane is added per centreline step
         (at the step midpoint, facing along the pipe), and you land in the Cut Planes tool with
         the full list ready to review and edit.</li>
     <li>Prefer manual control? Use <span class="ui">Step</span> to walk the proposed cuts one by
         one and <span class="ui">Cut here</span> to add only the planes you want.</li>
   </ol>
-  <div class="note">The object is <b>not</b> split — skeleton cutting authors the same editable
-  plane list as the Cut Planes tool. At most 64 planes per object are supported.</div>
+  <div class="note">The object is <b>not</b> split: Pipe Cut fills in the same editable plane list
+  as the Cut Planes tool. At most 64 planes per object are supported.</div>
 
-  <h2>5 &nbsp;Safety checks</h2>
+  <h2 id="safety">6 &nbsp;Safety checks</h2>
   <ul>
-    <li><b>Hotend collision check.</b> After slicing, the hotend is modelled as a cone (default
-        90°, 40&nbsp;mm — Printer settings &rarr; Non-planar) and the whole toolpath is checked
-        against everything printed earlier. A collision blocks the print with a message naming the
-        chunks and G-code lines — re-orient the segment, add clearance, or shorten the cone to
-        match your actual hotend.</li>
-    <li><b>Thin segments.</b> If any derived segment would be thinner than the first layer, the
-        feature turns itself off for that object and the panel tells you why. This includes two
-        nearly-coplanar planes leaving a sliver between them.</li>
-    <li><b>Duplicate planes</b> (the same plane added twice, either facing) are ignored — the first
-        one wins.</li>
+    <li><b>Hotend collision check.</b> After slicing, the hotend is modelled as a four-sided pyramid
+        with its tip at the nozzle (by default 45° per side, reaching 40&nbsp;mm from the tip), and
+        the whole toolpath is checked against everything printed earlier. A collision stops the
+        print with a message naming the segments and G-code lines. Re-orient the segment, add
+        clearance, or set the pyramid to match your real hotend in the printer settings
+        (<a href="#printer-settings">Settings reference</a>).</li>
+    <li><b>Tilt limit on a 3-axis printer.</b> With Printer type <span class="ui">Virtual</span>,
+        a plane cannot be tilted further than the hotend shape allows. The panel shows the limit,
+        and the plane stops there when you drag it.</li>
+    <li><b>Thin segments.</b> If any segment would be thinner than the first layer, the feature
+        turns itself off for that object and the panel says why. This includes two nearly
+        parallel planes leaving a sliver between them.</li>
+    <li><b>Duplicate planes</b> (the same plane added twice, facing either way) are ignored; the
+        first one wins.</li>
   </ul>
 
-  <h2>6 &nbsp;Troubleshooting</h2>
+  <h2 id="troubleshooting">7 &nbsp;Troubleshooting</h2>
+  <div class="table-wrap">
   <table>
     <tr><th>Symptom</th><th>Cause / fix</th></tr>
-    <tr><td>Object slices as one flat piece</td><td>Feature disabled, no plane splits the mesh, or a segment is thinner than the first layer — the Cut Planes panel shows the reason.</td></tr>
-    <tr><td>"Requires By group" message</td><td>Set Process &rarr; Others &rarr; Print sequence to <span class="ui">By group</span>.</td></tr>
-    <tr><td>Slice refused with a hotend collision</td><td>Read the message: it names the two chunks and where they meet. Re-orient, add clearance, or adjust the cone in Printer settings &rarr; Non-planar.</td></tr>
-    <tr><td>A segment builds in an odd direction</td><td>Check which plane it sits on (it uses that plane's normal) and any B/C override on that plane.</td></tr>
-    <tr><td>Sibling segments print in the wrong order</td><td>Reorder the planes — the first plane in the list prints last among siblings.</td></tr>
+    <tr><td>The Cut Planes icon is greyed out</td><td>Non-planar printing is off for this printer: click the icon to turn it on (0.1.3 and later), or see <a href="#before-you-start">Before you start</a>. It is also greyed out when no single object is selected.</td></tr>
+    <tr><td>I can't find Enable non-planar printing</td><td>It is under <span class="ui">Printer settings &rarr; Motion ability &rarr; Non-planar Printing</span>. In 0.1.2 and earlier, switch the settings mode to <span class="ui">Advanced</span> first.</td></tr>
+    <tr><td>Object slices as one flat piece</td><td>The feature is off for the object, no plane divides the mesh, or a segment is thinner than the first layer. The Cut Planes panel shows the reason.</td></tr>
+    <tr><td>"Requires By group" message</td><td>Set <span class="ui">Process &rarr; Others &rarr; Special mode &rarr; Print sequence</span> to <span class="ui">By group</span>.</td></tr>
+    <tr><td>Slice refused with a hotend collision</td><td>Read the message: it names the two segments and where they meet. Re-orient, add clearance, or adjust the hotend shape (<a href="#printer-settings">Settings reference</a>).</td></tr>
+    <tr><td>Slice refused for a steep tilt (3-axis printer)</td><td>The segment leans further than the upright nozzle can reach. Tilt the plane less, or split the overhang into more, gentler steps.</td></tr>
+    <tr><td>A segment builds in an odd direction</td><td>Check which plane it sits on (it builds in that plane's direction) and any B/C override on that plane.</td></tr>
+    <tr><td>Sibling segments print in the wrong order</td><td>Reorder the planes: the first plane in the list prints last among siblings.</td></tr>
   </table>
+  </div>
+
+  <h2 id="printer-settings">8 &nbsp;Settings reference</h2>
+  <h3>Printer settings &rarr; Motion ability &rarr; Non-planar Printing</h3>
+  <p>The rest of this section only appears once <span class="ui">Enable non-planar printing</span>
+  is ticked. Unlayered printer profiles set all of it for you.</p>
+  <div class="table-wrap">
+  <table>
+    <tr><th>Setting</th><th>What it does</th></tr>
+    <tr><td>Enable non-planar printing</td><td>The master switch. Off: every object slices in one piece and the Cut Planes and Pipe Cut tools are greyed out.</td></tr>
+    <tr><td>Printer type</td><td>Which two rotary axes the machine has: A/B, B/C or A/C. <b>Virtual</b> is for an ordinary 3-axis printer: no rotary moves are written and the nozzle stays upright.</td></tr>
+    <tr><td>A / B / C axis limits</td><td>Rotation limits of each rotary axis, stored with the machine definition.</td></tr>
+    <tr><td>Chunk departure distance, Chunk approach height</td><td>How far the nozzle backs away from a finished segment, and how high above the next one it stops, when moving between segments.</td></tr>
+    <tr><td>Nozzle tip to B axis distance</td><td>For real 5-axis machines: the arm length between the nozzle tip and the B rotation axis.</td></tr>
+    <tr><td>Hotend envelope radius, Hotend side angles (+X, −X, +Y, −Y)</td><td>The hotend shape used by the collision check and the 3-axis tilt limit: a pyramid with these side angles, reaching this far from the tip. A radius of 0 switches the check off.</td></tr>
+    <tr><td>Gantry height above nozzle, Max tilt angle, Max print height (from the bed)</td><td>Virtual printer type only: extra limits on how far a segment may lean or climb before the print would hit the machine. Max print height is a height measured from the bed, usually close to the printer's build height, not a clearance. 0 means not used.</td></tr>
+  </table>
+  </div>
+
+  <h3 id="layer-rotation">Process &rarr; Others &rarr; Multiplanar</h3>
+  <p><span class="ui">Layer Rotation B</span> and <span class="ui">Layer Rotation C</span> tilt the
+  layers of a <i>whole object</i>, without any cut planes: B rotates them about the Y axis, C about
+  the Z axis. They only apply while non-planar printing is on.</p>
+
+  <h3 id="contact-layers">Process &rarr; Speed &rarr; Multiplanar cut plane settings</h3>
+  <p>The first layers of each segment are laid on the printed face of the segment below, not on the
+  bed. These settings give those layers their own fan, speed and flow
+  (<span class="ui">Layers on printed material</span> sets how many layers count). They are shown
+  only while non-planar printing is on.</p>
 
   <p class="muted" style="margin-top:36px">Unlayered Slicer · Multiplanar tutorial · also available from
   Help &rarr; Multiplanar Tutorial.</p>

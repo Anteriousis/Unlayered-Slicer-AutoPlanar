@@ -1091,3 +1091,20 @@ TEST_CASE("get_filament_type treats empty vector options as absent", "[Config][F
         REQUIRE(displayed == "Sup.PLA");
     }
 }
+
+TEST_CASE("brim_type list positions match BrimType values", "[Config][Regression]")
+{
+    // The brim_type combo and the object table turn a list position straight into a BrimType, so
+    // each entry of enum_values must sit at the index of its own enum value.
+    const ConfigOptionDef *def = print_config_def.get("brim_type");
+    REQUIRE(def != nullptr);
+    REQUIRE(def->enum_values.size() == def->enum_labels.size());
+    for (size_t i = 0; i < def->enum_values.size(); ++ i) {
+        INFO("brim_type entry " << i << ": " << def->enum_values[i]);
+        CHECK(def->enum_keys_map->at(def->enum_values[i]) == int(i));
+    }
+    // The upstream values keep their numbers.
+    CHECK(btAutoBrim == 0);
+    CHECK(btOuterOnly == 3);
+    CHECK(btNoBrim == 6);
+}

@@ -289,6 +289,18 @@ double virtual_tilt_limit_deg(const HotendEnvelope &envelope, double gantry_heig
 }
 
 // UNLAYERED_MOD — see the header.
+double virtual_tilt_limit_enforced_deg(const HotendEnvelope &envelope, double gantry_height_mm, double manual_max_deg,
+                                       double reach_mm, std::optional<double> tilt_azimuth_rad)
+{
+    const double derived = virtual_tilt_limit_deg(envelope, gantry_height_mm, reach_mm, tilt_azimuth_rad);
+    const double manual  = std::max(0., manual_max_deg);
+    // Whichever is stricter, ignoring the ones that are switched off (0 = not applied).
+    if (derived > 0. && manual > 0.)
+        return std::min(derived, manual);
+    return std::max(derived, manual);
+}
+
+// UNLAYERED_MOD — see the header.
 Vec3d bc_to_tool_axis(double angle_b, double angle_c)
 {
     const double cos_b = std::cos(angle_b);
@@ -559,6 +571,13 @@ static t_config_enum_values s_keys_map_AxisSelection {
     { "virtual", int(AxisSelection::Virtual) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(AxisSelection)
+
+static t_config_enum_values s_keys_map_AcSolution {
+    { "smallest_move", int(AcSolution::SmallestMove) },
+    { "negative_a",    int(AcSolution::NegativeA) },
+    { "positive_a",    int(AcSolution::PositiveA) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(AcSolution)
 
 // BELT_MOD -- see PrintConfig.hpp.
 static t_config_enum_values s_keys_map_BeltRotationAxis {
@@ -2169,16 +2188,16 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.emplace_back("outer_only");
     def->enum_values.emplace_back("inner_only");
     def->enum_values.emplace_back("outer_and_inner");
-    def->enum_values.emplace_back("leading_edge_only");   // BELT_MOD
     def->enum_values.emplace_back("no_brim");
+    def->enum_values.emplace_back("leading_edge_only");   // BELT_MOD
     def->enum_labels.emplace_back(L("Auto"));
     def->enum_labels.emplace_back(L("Mouse ear"));
     def->enum_labels.emplace_back(L("Painted"));
     def->enum_labels.emplace_back(L("Outer brim only"));
     def->enum_labels.emplace_back(L("Inner brim only"));
     def->enum_labels.emplace_back(L("Outer and inner brim"));
-    def->enum_labels.emplace_back(L("Leading edge only (belt)"));   // BELT_MOD
     def->enum_labels.emplace_back(L("No-brim"));
+    def->enum_labels.emplace_back(L("Leading edge only (belt)"));   // BELT_MOD
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionEnum<BrimType>(btAutoBrim));
 
@@ -5395,7 +5414,9 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Master switch for non-planar printing. This is the single source of truth for "
                      "whether non-planar printing is enabled. The other options in this section are "
                      "hidden unless this is enabled.");
-    def->mode = comAdvanced;
+    // UNLAYERED_MOD -- Simple: fresh installs start in Simple mode, and without this the master
+    // switch for the Cut Planes tool was invisible there (the tool just stayed greyed out).
+    def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 
     // DERIVED from printer type == Virtual; see DynamicPrintConfig::normalize_fdm_1. It is NOT
@@ -5571,16 +5592,44 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(0.0));
 
     def = this->add("nonplanar_virtual_max_z", coFloat);
-    def->label = L("Max total height");
+    def->label = L("Max print height (from the bed)");
     def->category = L("Non-planar Printing");
-    def->tooltip = L("Highest Z the toolpath may reach on a virtual 5-axis printer, as written in the "
-                     "G-code. On a large tilted plane the head has to climb as it works outwards -- "
-                     "chunk transitions lift clear of everything printed so far -- until it can strike "
-                     "the gantry. Slicing is refused if any move would exceed this. 0 means no limit.");
+    def->tooltip = L("The highest the nozzle may go while printing on a virtual 5-axis printer, measured "
+                     "from the bed (a Z height, not a clearance): usually the printer's build height, or "
+                     "less if the gantry would strike a tall tilted part. On a large tilted plane the head "
+                     "climbs as it works outwards -- chunk transitions lift clear of everything printed so "
+                     "far -- and slicing is refused if the toolpath would go above this. The printer's own "
+                     "start and end G-code are not checked. 0 means no limit.");
     def->sidetext = L("mm");
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("nonplanar_fixed_nozzle", coInt);
+    def->label = L("Fixed active nozzle for curved printing");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("0 keeps ordinary single-nozzle mode. On a supported two-nozzle shared carriage, choose nozzle 1 or 2 and manually map the one used filament to it. The other nozzle remains parked throughout deposition. No in-print nozzle or material changes are supported.");
+    def->min=0;def->max=2;def->mode=comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("nonplanar_clearance_nozzle", coInt);
+    def->label = L("Active nozzle used for clearance measurements");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("The nozzle number used as the origin for the common hotend angles, envelope, gantry and Z bounds. Must match the fixed active nozzle. Include the parked nozzle and the complete moving toolhead.");
+    def->min=0;def->max=2;def->mode=comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("nonplanar_fixed_clearance_recorded", coBool);
+    def->label = L("Whole toolhead clearance recorded for fixed nozzle");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Set only after establishing conservative whole-toolhead bounds with this nozzle active and the other nozzle parked. This declaration does not measure or certify clearance.");
+    def->mode=comAdvanced;def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("nonplanar_fixed_clearance_source", coString);
+    def->label = L("Fixed-nozzle clearance measurement source");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("Record the installed active tip, parked nozzle position, complete toolhead, method, uncertainty and clearance allowance. Recheck after hardware or active-nozzle changes.");
+    def->mode=comAdvanced;def->set_default_value(new ConfigOptionString(""));
 
     // ---- BELT_MOD: belt printer ----
     // Key names, enum values and defaults are OrcaSlicer's so its belt printer profiles import.
@@ -5745,16 +5794,16 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("B/C"));
     def->enum_labels.push_back(L("A/C"));
     def->enum_labels.push_back(L("Virtual"));
-    def->mode = comAdvanced;
+    def->mode = comSimple; // UNLAYERED_MOD -- shown beside enable_nonplanar, which is Simple too
     def->set_default_value(new ConfigOptionEnum<AxisSelection>(AxisSelection::BC));
 
-    // Per-axis rotation limits (degrees). Stored only; not consumed by slicing yet.
+    // Per-axis rotation limits (degrees). Read by the A/C output (GCode/TrunnionAC.cpp).
     auto add_axis_rotation_limit = [this](const std::string &opt, const std::string &label, double default_value) {
         ConfigOptionDef* def = this->add(opt, coFloat);
         def->label = label;   // already wrapped in L() at the call site (literal -> extractable for i18n)
         def->category = L("Non-planar Printing");
-        def->tooltip = L("Rotation limit of this rotary axis, in degrees. Stored for the machine "
-                         "definition; not consumed by slicing yet.");
+        def->tooltip = L("Rotation limit of this rotary axis, in degrees. An A/C printer's G-code "
+                         "keeps A and C inside their limits; the other printer types store them only.");
         def->sidetext = L("°");
         def->min = -360;
         def->max = 360;
@@ -5781,6 +5830,82 @@ void PrintConfigDef::init_fff_params()
     add_axis_continuous("axis_a_continuous");
     add_axis_continuous("axis_b_continuous");
     add_axis_continuous("axis_c_continuous");
+
+    // UNLAYERED_MOD -- A/C table-table machine geometry (GCode/TrunnionAC.cpp).
+    def = this->add("ac_pivot_height", coFloat);
+    def->label = L("A axis height above the bed");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("A/C printers: how far the A axis (the cradle, tilting about X) lies above the bed surface. "
+                     "A/B (tri-Z bed) printers: the height of the tilt pivot, 0 for a pivot in the bed plane. "
+                     "The exported G-code is converted to machine coordinates with it, so a wrong value shifts "
+                     "every tilted section by the error times sin(A) sideways and (1 - cos(A)) in height.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("ac_c_axis_offset_x", coFloat);
+    def->label = L("X");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("A/C printers: where the C axis (the turntable) pierces the bed, relative to the bed centre, "
+                     "at A = C = 0. A/B (tri-Z bed) printers: where the tilt pivot (the leadscrews' centre) is.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("ac_c_axis_offset_y", coFloat);
+    def->label = L("Y");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("A/C printers: where the C axis (the turntable) pierces the bed, relative to the bed centre, "
+                     "at A = C = 0. A/B (tri-Z bed) printers: where the tilt pivot (the leadscrews' centre) is.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("ac_solution", coEnum);
+    def->label = L("A/C solution");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("A/C printers reach every tilted tool axis two ways: (A, C) and (-A, C + 180). "
+                     "\"Smallest move\" takes whichever needs the least rotation from the current pose; "
+                     "the other two keep A on one side whenever the A limits allow it.");
+    def->enum_keys_map = &ConfigOptionEnum<AcSolution>::get_enum_values();
+    def->enum_values.push_back("smallest_move");
+    def->enum_values.push_back("negative_a");
+    def->enum_values.push_back("positive_a");
+    def->enum_labels.push_back(L("Smallest move"));
+    def->enum_labels.push_back(L("Always negative A"));
+    def->enum_labels.push_back(L("Always positive A"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<AcSolution>(AcSolution::SmallestMove));
+
+    def = this->add("ac_table_radius", coFloat);
+    def->label = L("Turntable radius");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("A/C printers: radius of the turntable, which swings up with the part when A tilts. "
+                     "Section changes lift the nozzle above it. 0 uses the printable area.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("ac_transition_clearance", coFloat);
+    def->label = L("Section change clearance");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("A/C printers: before the table rotates to the next section, the nozzle lifts straight up "
+                     "until it is this far above the highest point the part and the turntable reach anywhere "
+                     "along the rotation.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(5.));
+
+    def = this->add("ac_rotation_speed", coFloat);
+    def->label = L("Rotation speed");
+    def->category = L("Non-planar Printing");
+    def->tooltip = L("A/C printers: speed of the A/C rotation at a section change.");
+    def->sidetext = L("°/s");
+    def->min = 1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(30.));
 
     def = this->add("machine_pause_gcode", coString);
     def->label = L("Pause G-code");
@@ -7668,6 +7793,33 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Per object"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<SkirtType>(stCombined));
+
+    def = this->add("automatic_layer_strategy", coBool);
+    def->label = L("Automatic layer mode (experimental)");
+    def->category = L("Others");
+    def->mode = comAdvanced;
+    def->tooltip = L("Automatically choose curved or planar layers when Slice plate runs. The manual curved layers option is inactive while this is enabled. "
+                     "Try continuous curved transitions through existing planes or infer independent local roof regions. Bridge and support contacts remain planar. "
+                     "Choose planar slicing when the model, current process or configured printer limits do not qualify. "
+                     "Supports and other settings are preserved; clearance limits are never raised. "
+                     "The selected strategy and fallback reason appear in slicing messages and the G-code header. "
+                     "Multiple models and copies may share a plate with separate layer fields and plate-wide clearance checks. Each object needs one closed mesh volume, a Virtual printer and zero layer rotations. "
+                     "Later path-generation safety failures stop slicing; review Preview before exporting. "
+                     "When enabled this takes precedence over the manual curved blend switch and ignores cut sections on planar fallback.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("curved_layer_blend", coBool);
+    def->label = L("Manual curved layers (experimental)");
+    def->category = L("Others");
+    def->mode = comAdvanced;
+    def->tooltip = L("Use curved layers without automatic planar fallback. Available only when Automatic layer mode is off; its saved value is ignored while automatic mode is on. "
+                     "Blend layer directions continuously through the selected nonintersecting, height-ordered planes, slicing the original closed mesh without separate cut sections. "
+                     "With no planes, a rectangular ramp can blend from its flat foundation into its roof. "
+                     "Experimental: Virtual printer only, one closed volume per object, no supports, modifiers or variable layer heights. Multiple objects/copies require plate-wide clearance. "
+                     "Requires classic walls, no scarf seam, ironing, wipe, arcs, bridge paths or custom layer motion. "
+                     "The engine checks the printer layer-height and clearance limits and may reduce the layer step. "
+                     "Review the physical paths in Preview before printing.");
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("layer_rotation_b", coFloat);
     // def->gui_type = ConfigOptionDef::GUIType::f_enum_open;
@@ -10542,11 +10694,16 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         }
     }
     else if(opt_key == "ensure_vertical_shell_thickness") {
-        if(value == "1") {
+        // Bambu Studio 2.x writes "enabled"/"disabled" here; without this every Bambu 3MF opened
+        // a "generated by a newer version" dialog that replaced "enabled" with the default anyway.
+        if(value == "1" || value == "enabled") {
             value = "ensure_all";
         }
         else if (value == "0"){
             value = "ensure_moderate";
+        }
+        else if (value == "disabled") {
+            value = "none";
         }
     } else if (opt_key == "rotate_solid_infill_direction") {
         opt_key = "solid_infill_rotate_template";

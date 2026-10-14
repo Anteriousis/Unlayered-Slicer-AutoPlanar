@@ -1712,6 +1712,8 @@ bool PrintObject::invalidate_state_by_config_options(
             steps.emplace_back(posPerimeters);
         } else if (
                opt_key == "layer_height"
+            || opt_key == "curved_layer_blend"
+            || opt_key == "automatic_layer_strategy"
             || opt_key == "mmu_segmented_region_max_width"
             || opt_key == "mmu_segmented_region_interlocking_depth"
             || opt_key == "raft_layers"
@@ -5960,6 +5962,16 @@ void PrintObject::project_and_append_custom_facets(
                     std::vector<Polygons> projected;
                     // Support blockers or enforcers. Project downward facing painted areas upwards to their respective slicing plane.
                     slice_mesh_slabs(custom_facets, zs_from_layers(this->layers()), this->object_to_slice() * mv->get_matrix(), nullptr, &projected, vertical_points, [](){});
+                    // UNLAYERED_MOD -- while support is generated in a sheared frame, shift the painted
+                    // areas with the layers they are matched against (same rule as slice_support_volumes).
+                    // Only these new projections: `out` may already hold the enforcer/blocker volumes,
+                    // which slice_support_volumes() has shifted.
+                    if (m_support_lean.active())
+                        for (size_t i = 0; i < projected.size() && i < m_layers.size(); ++ i) {
+                            const Point shift = m_support_lean.shift_at(m_layers[i]->print_z);
+                            for (Polygon &poly : projected[i])
+                                poly.translate(shift);
+                        }
                     // Merge these projections with the output, layer by layer.
                     assert(! projected.empty());
                     assert(out.empty() || out.size() == projected.size());
@@ -5970,15 +5982,6 @@ void PrintObject::project_and_append_custom_facets(
                             append(out[i], std::move(projected[i]));
                 }
             }
-        }
-    // UNLAYERED_MOD -- painted facets are projected in the slice frame (object_to_slice(), the
-    // frame the model parts are sliced in, above) and, while support is generated in a sheared
-    // frame, shifted with the layers they are matched against. Same rule as slice_support_volumes.
-    if (! seam && m_support_lean.active())
-        for (size_t i = 0; i < out.size() && i < m_layers.size(); ++ i) {
-            const Point shift = m_support_lean.shift_at(m_layers[i]->print_z);
-            for (Polygon &poly : out[i])
-                poly.translate(shift);
         }
 }
 

@@ -3,7 +3,7 @@
 	"name": "SUNLU PLA @base",
 	"inherits": "fdm_filament_pla",
 	"from": "system",
-	"filament_id": "OGFSNL01",
+	"filament_id": "OFtK0C7c",
 	"instantiation": "false",
 	"filament_vendor": [
 		"SUNLU"

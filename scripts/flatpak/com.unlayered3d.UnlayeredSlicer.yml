@@ -421,6 +421,9 @@ modules:
         path: ../../LICENSE.txt
       - type: file
         path: ../../version.inc
+      # The "What's new" dialog's notes; CMakeLists.txt installs it with the resources.
+      - type: file
+        path: ../../CHANGELOG.md
       - type: file
         path: ../run_gettext.sh
         dest: scripts

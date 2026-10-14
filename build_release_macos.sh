@@ -228,7 +228,14 @@ function verify_python_runtime() {
     fi
     # otool -L shows load commands only; assert the consumer rpath separately.
     # Its loss is masked on the build host by CMake's absolute build-tree rpath.
-    if ! otool -arch all -l "$app/Contents/MacOS/UnlayeredSlicer" | grep -q "path @executable_path/python/lib "; then
+    # Read otool's output in full before matching. Piping it straight into "grep -q" lets
+    # grep exit at the first match and SIGPIPE otool, and under "set -o pipefail" that
+    # fails the whole pipeline -- reporting a missing rpath that is in fact present. It
+    # only bites once the output outgrows the pipe buffer, which is the universal binary
+    # (two architectures of load commands), i.e. exactly the build that ships.
+    local loadcmds
+    loadcmds=$(otool -arch all -l "$app/Contents/MacOS/UnlayeredSlicer")
+    if ! printf '%s\n' "$loadcmds" | grep -q "path @executable_path/python/lib "; then
         echo "ERROR: UnlayeredSlicer lacks the @executable_path/python/lib rpath (relocation regression)" >&2
         exit 1
     fi

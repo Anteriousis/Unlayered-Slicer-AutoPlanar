@@ -24,6 +24,7 @@
   ; Unlayered self-update (src/slic3r/Utils/AppUpdater.cpp, launch_silent_update). The running
   ; slicer starts this installer as
   ;   /S /UPDATE /WAITPID=<its pid> [/RELAUNCH] /D=<its install folder>
+  ; /UPDATE then overrides /S and shows progress; see ShowProgressWhenUpdating.
   ; and exits; see .onInit and .onInstSuccess.
   Var UPDATE_MODE
   Var RELAUNCH
@@ -587,6 +588,9 @@ FunctionEnd
 ; so a reinstall never removes a plug-in the user already has. Silent installs
 ; skip the page and so never opt in.
 Function BambuPluginPage
+  ${If} $UPDATE_MODE == "1"
+    Abort
+  ${EndIf}
   !insertmacro MUI_HEADER_TEXT "Bambu Lab printers" "Optional: printing to Bambu Lab printers"
   nsDialogs::Create 1018
   Pop $0
@@ -615,13 +619,58 @@ Function BambuPluginPageLeave
   ${EndIf}
 FunctionEnd
 
+
+;--------------------------------
+; Unlayered self-update progress. The slicer starts the installer as "/S /UPDATE ..." (silent),
+; and a silent update showed nothing for the minute or two it takes to remove the old version and
+; copy ~17,000 files. .onInit now switches an update back to a normal install that shows only a
+; banner (while it waits for the slicer to close and removes the old version) and then the
+; progress page, and closes itself when done. It is the NEW installer that runs, so this also
+; applies to updates started by a slicer that predates it, which still passes /S.
+Function SkipPageWhenUpdating
+  ${If} $UPDATE_MODE == "1"
+    Abort
+  ${EndIf}
+FunctionEnd
+
+Function ShowProgressWhenUpdating
+  ${If} $UPDATE_MODE == "1"
+    SendMessage $HWNDPARENT ${WM_SETTEXT} 0 "STR:Updating Unlayered Slicer"
+    !insertmacro MUI_HEADER_TEXT "Updating Unlayered Slicer" "Installing version ${VERSION}. Unlayered Slicer opens again by itself when this is done."
+    ; Stopping half-way would leave no working copy at all.
+    GetDlgItem $0 $HWNDPARENT 2
+    EnableWindow $0 0
+    BringToFront
+  ${EndIf}
+FunctionEnd
+
+; The slicer starts the installer with SW_HIDE (it was a silent install), and Windows hands that to
+; the first window shown; show it anyway.
+Function UpdateGuiInit
+  ${If} $UPDATE_MODE == "1"
+    ShowWindow $HWNDPARENT ${SW_SHOW}
+  ${EndIf}
+FunctionEnd
+
+Function ShowUpdateBanner
+  ; $R0: the line under the title.
+  Banner::destroy
+  Banner::show /NOUNLOAD /set 76 "Updating Unlayered Slicer" "$R0"
+FunctionEnd
+
 ;--------------------------------
 ;Pages
+  !define MUI_CUSTOMFUNCTION_GUIINIT UpdateGuiInit
   @CPACK_NSIS_INSTALLER_WELCOME_TITLE_CODE@
   @CPACK_NSIS_INSTALLER_WELCOME_TITLE_3LINES_CODE@
+  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipPageWhenUpdating
   !insertmacro MUI_PAGE_WELCOME
 
+  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipPageWhenUpdating
   @CPACK_NSIS_LICENSE_PAGE@
+  !ifdef MUI_PAGE_CUSTOMFUNCTION_PRE
+    !undef MUI_PAGE_CUSTOMFUNCTION_PRE
+  !endif
   Page custom InstallOptionsPage
   ; The user is free to change the install folder on this page. In the per-user
   ; build the installer is not elevated, so a protected destination such as
@@ -630,21 +679,25 @@ FunctionEnd
   ; check the copy simply fails partway through with a generic error. Verify the
   ; choice is writable before committing to it.
   !define MUI_PAGE_CUSTOMFUNCTION_LEAVE VerifyInstDirWritable
+  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipPageWhenUpdating
   !insertmacro MUI_PAGE_DIRECTORY
 
   ;Start Menu Folder Page Configuration
   !define MUI_STARTMENUPAGE_REGISTRY_ROOT "SHCTX"
   !define MUI_STARTMENUPAGE_REGISTRY_KEY "Software\@CPACK_PACKAGE_VENDOR@\@CPACK_PACKAGE_INSTALL_REGISTRY_KEY@"
   !define MUI_STARTMENUPAGE_REGISTRY_VALUENAME "Start Menu Folder"
+  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipPageWhenUpdating
   !insertmacro MUI_PAGE_STARTMENU Application $STARTMENU_FOLDER
 
   @CPACK_NSIS_PAGE_COMPONENTS@
 
   Page custom BambuPluginPage BambuPluginPageLeave
 
+  !define MUI_PAGE_CUSTOMFUNCTION_SHOW ShowProgressWhenUpdating
   !insertmacro MUI_PAGE_INSTFILES
   @CPACK_NSIS_INSTALLER_FINISH_TITLE_CODE@
   @CPACK_NSIS_INSTALLER_FINISH_TITLE_3LINES_CODE@
+  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipPageWhenUpdating
   !insertmacro MUI_PAGE_FINISH
 
   !insertmacro MUI_UNPAGE_CONFIRM
@@ -856,6 +909,9 @@ FunctionEnd
 ;--------------------------------
 ; Create custom pages
 Function InstallOptionsPage
+  ${If} $UPDATE_MODE == "1"
+    Abort
+  ${EndIf}
   !insertmacro MUI_HEADER_TEXT "Install Options" "Choose options for installing @CPACK_NSIS_PACKAGE_NAME@"
   !insertmacro MUI_INSTALLOPTIONS_DISPLAY "NSIS.InstallOptions.ini"
 
@@ -1035,6 +1091,13 @@ Function .onInit
   ${IfNot} ${Errors}
     StrCpy $RELAUNCH "1"
   ${EndIf}
+  ${If} $UPDATE_MODE == "1"
+    ; See ShowProgressWhenUpdating: an update is shown, not silent, and closes itself.
+    SetSilent normal
+    SetAutoClose true
+    StrCpy $R0 "Waiting for Unlayered Slicer to close..."
+    Call ShowUpdateBanner
+  ${EndIf}
 
   ; Wait for the slicer that launched us to be gone. It starts this installer as the last thing it
   ; does before exiting, and every one of its DLLs is locked until it has: removing or overwriting
@@ -1121,6 +1184,11 @@ mach_done:
   ReadRegStr $0 @CPACK_NSIS_REGISTRY_ROOT@ "Software\Microsoft\Windows\CurrentVersion\Uninstall\@CPACK_PACKAGE_INSTALL_REGISTRY_KEY@" "UninstallString"
   StrCmp $0 "" inst
 
+  ${If} $UPDATE_MODE == "1"
+    StrCpy $R0 "Removing the previous version..."
+    Call ShowUpdateBanner
+    Goto uninst
+  ${EndIf}
   MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION \
   "@CPACK_NSIS_PACKAGE_NAME@ is already installed. $\n$\nDo you want to uninstall the old version before installing the new one?" \
   /SD IDYES IDYES uninst IDNO inst
@@ -1146,11 +1214,15 @@ uninst:
 
   IfErrors uninst_failed inst
 uninst_failed:
+  Banner::destroy
   MessageBox MB_OK|MB_ICONSTOP "Uninstall failed."
   Abort
 
 
 inst:
+  ${If} $UPDATE_MODE == "1"
+    Banner::destroy
+  ${EndIf}
   ; Reads components status for registry
   !insertmacro SectionList "InitSection"
 

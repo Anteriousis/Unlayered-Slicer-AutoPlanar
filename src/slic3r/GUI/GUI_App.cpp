@@ -149,6 +149,7 @@
 #include "WebGuideDialog.hpp"
 #include "ReleaseNote.hpp"
 #include "AutoUpdater.hpp"
+#include "slic3r/Utils/UsageTelemetry.hpp"
 #include "ModelMall.hpp"
 #include "HintNotification.hpp"
 
@@ -840,6 +841,101 @@ static bool take_installer_network_plugin_request(AppConfig* app_config)
 }
 #endif // _WIN32
 
+// Unlayered: anonymous usage diagnostics (slic3r/Utils/UsageTelemetry.hpp). The app's own part is
+// here: the machine facts in app_start, the timer that sends batches, and shutdown at exit.
+namespace {
+// No config file before this launch: a new install. Captured when the config loads, because the
+// setup wizard sets m_app_conf_exists once it has written one.
+bool                     s_usage_first_run      = false;
+bool                     s_usage_app_start_sent = false;
+std::unique_ptr<wxTimer> s_usage_timer;
+
+void record_usage_app_start()
+{
+    if (s_usage_app_start_sent)
+        return;
+    s_usage_app_start_sent = true;
+
+    GUI_App              &app      = wxGetApp();
+    const wxPlatformInfo &platform = wxPlatformInfo::Get();
+    nlohmann::json        props    = {
+        {"os_version", (boost::format("%1%.%2%.%3%") % platform.GetOSMajorVersion() % platform.GetOSMinorVersion() %
+                        platform.GetOSMicroVersion()).str()},
+#if defined(_M_ARM64) || defined(__aarch64__)
+        {"arch", "arm64"},
+#else
+        {"arch", "x64"},
+#endif
+        {"language", app.app_config->get("language")},
+        {"cpu_cores", int(std::thread::hardware_concurrency())},
+        {"ram_gb", int(std::lround(double(total_physical_memory()) / (1024.0 * 1024.0 * 1024.0)))},
+        {"first_run", UsageTelemetry::is_first_run()},
+        {"stealth", app.app_config->get_stealth_mode()},
+        {"dark_mode", GUI_App::dark_mode()},
+    };
+    // The Bambu network plug-in: never opted into, or opted in and did / did not load.
+    if (!app.app_config->get_bool("installed_networking"))
+        props["bambu_plugin"] = "off";
+    else if (BBLNetworkPlugin::instance().is_loaded()) {
+        props["bambu_plugin"]         = "loaded";
+        props["bambu_plugin_version"] = BBLNetworkPlugin::instance().get_version();
+    } else
+        props["bambu_plugin"] = "not loaded";
+    UsageTelemetry::record("app_start", std::move(props));
+}
+
+void start_usage_diagnostics(GUI_App &app)
+{
+    UsageTelemetry::start(*app.app_config, s_usage_first_run);
+
+    // Runs even while switched off (each tick is then a no-op), so switching it on in Preferences
+    // needs no restart. app_start on the first tick (30 s in, so the network plug-in has had its
+    // chance to load), then a batch every 5 minutes.
+    const int timer_id = wxWindow::NewControlId();
+    s_usage_timer      = std::make_unique<wxTimer>(&app, timer_id);
+    app.Bind(wxEVT_TIMER, [](wxTimerEvent &) {
+        static int ticks = 0;
+        ++ticks;
+        if (!UsageTelemetry::enabled())
+            return;
+        if (!s_usage_app_start_sent) {
+            record_usage_app_start();
+            UsageTelemetry::flush();
+        } else if (ticks % 10 == 0)
+            UsageTelemetry::flush();
+    }, timer_id);
+    s_usage_timer->Start(30 * 1000);
+
+    // Said once, where it can be switched off. On by default, so the person is told rather than asked.
+    if (UsageTelemetry::enabled() && !app.app_config->get_bool("usage_diagnostics_notice_shown")) {
+        app.app_config->set_bool("usage_diagnostics_notice_shown", true);
+        app.CallAfter([]() {
+            Plater *plater = wxGetApp().plater();
+            if (!plater)
+                return;
+            plater->get_notification_manager()->push_notification(
+                NotificationType::CustomNotification, NotificationManager::NotificationLevel::ImportantNotificationLevel,
+                _u8L("Unlayered Slicer sends anonymous usage diagnostics to help us improve it: the features you use, "
+                     "slicing results, crashes and system details. Never your models, files or names."),
+                _u8L("Turn off in Preferences"), [](wxEvtHandler *) {
+                    // Online is the fifth Preferences tab.
+                    wxGetApp().open_preferences(4, "usage_diagnostics");
+                    return true;
+                });
+        });
+    }
+}
+
+void stop_usage_diagnostics()
+{
+    s_usage_timer.reset();
+    // A session too short for the timer still says what it ran on.
+    if (UsageTelemetry::enabled())
+        record_usage_app_start();
+    UsageTelemetry::shutdown();
+}
+} // namespace
+
 void GUI_App::post_init()
 {
     assert(initialized());
@@ -854,6 +950,8 @@ void GUI_App::post_init()
     // running, and so it precedes the first WebView creation (the setup wizard).
     init_webview_runtime();
 #endif
+
+    start_usage_diagnostics(*this);
 
     m_open_method = "double_click";
     bool switch_to_3d = false;
@@ -1131,6 +1229,13 @@ void GUI_App::post_init()
         }
     }
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
+    UsageTelemetry::set_phase("running");
+    // Log off / shut down with the app open: the process may be ended before OnExit, which the
+    // next launch would otherwise count as a crash.
+    Bind(wxEVT_END_SESSION, [](wxCloseEvent &evt) {
+        UsageTelemetry::end_session_by_os();
+        evt.Skip();
+    });
 //BBS: remove the single instance currently
 #ifdef _WIN32
     // Sets window property to mainframe so other instances can indentify it.
@@ -1193,6 +1298,27 @@ void GUI_App::shutdown()
     if (m_agent)
         m_agent->set_printer_agent(nullptr);
     NetworkAgentFactory::clear_printer_agent_cache();
+
+    // Unload the Bambu network plug-in while the application is still alive. The only other
+    // place that unloads it is ~GUI_App(), and macOS never gets there on a Quit: AppKit's
+    // -[NSApplication terminate:] calls exit() directly, so wxEntryCleanup -- and with it the
+    // wxApp destructor -- is skipped. The dylib therefore stayed loaded until exit() ran the
+    // dynamic loader's static destructors, one of which throws; an exception escaping
+    // __cxa_finalize_ranges is fatal, and the user saw "Unlayered Slicer quit unexpectedly"
+    // on every Cmd-Q:
+    //
+    //   _handleAEQuit -> -[NSApplication terminate:] -> exit -> __cxa_finalize_ranges
+    //                 -> std::terminate() -> abort()   (SIGABRT)
+    //
+    // Unloading here runs those destructors at a point where a throw can be contained.
+    // shutdown() is idempotent (it null-checks the singleton), so ~GUI_App() calling it
+    // again on platforms that do reach the destructor is harmless.
+    try {
+        BBLNetworkPlugin::shutdown();
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "GUI_App::shutdown: the network plug-in threw while "
+                                      "unloading; ignored so the quit can finish cleanly";
+    }
 
     BOOST_LOG_TRIVIAL(info) << "GUI_App::shutdown exit";
 }
@@ -2648,6 +2774,7 @@ void GUI_App::init_app_config()
     m_config_corrupted = false;
 	// load settings
 	m_app_conf_exists = app_config->exists();
+	s_usage_first_run = !m_app_conf_exists;
 	if (m_app_conf_exists) {
         std::string error = app_config->load();
         if (!error.empty()) {
@@ -2752,6 +2879,8 @@ bool GUI_App::OnInit()
 
 int GUI_App::OnExit()
 {
+    // First, while everything app_start reads still exists. Waits at most a few seconds to send.
+    stop_usage_diagnostics();
     stop_http_server();
     stop_sync_user_preset();
 
@@ -6163,6 +6292,11 @@ void GUI_App::check_new_version_sf(int by_user)
     BOOST_LOG_TRIVIAL(info) << "updater: checking " << url;
 
     auto http = Http::get(url);
+    // The diagnostics install id, so the site can count different installs rather than launches.
+    // Only while diagnostics are on: switching them off (or UNLAYERED_NO_TELEMETRY) drops it. The
+    // site keeps no ids, only a per-day hash sketch that counts how many (USAGE_DIAGNOSTICS.md).
+    if (const std::string install = UsageTelemetry::install_id(); !install.empty())
+        http.header("X-Unlayered-Install", install);
     // Verified TLS: since the manifest can now start an unattended install, it must come from the
     // real site. (Its sha256 is the only check on the installer, so a forged manifest would be a
     // forged installer.)
@@ -10343,16 +10477,11 @@ double virtual_max_tilt_deg(double reach_mm, std::optional<double> tilt_azimuth_
         return opt == nullptr ? 0. : opt->value;
     };
 
-    // The geometry-derived limit, identical to the one Print::validate() enforces -- one definition
-    // in libslic3r so a drag can never stop somewhere the slicer would have accepted, or vice versa.
-    const double derived = virtual_tilt_limit_deg(HotendEnvelope::from_config(cfg), get("nonplanar_gantry_height"),
-                                                  reach_mm, tilt_azimuth_rad);
-    // The optional hand-set ceiling on top. 0 means "not applied" for either of them, so this is
-    // "the stricter of the two that are switched on", not a plain min.
-    const double manual = std::max(0., get("nonplanar_virtual_max_angle"));
-    if (derived > 0. && manual > 0.)
-        return std::min(derived, manual);
-    return std::max(derived, manual);
+    // The limit Print::validate() enforces -- the geometry-derived one with the optional hand-set
+    // ceiling on top -- from the one definition in libslic3r, so a drag can never stop somewhere the
+    // slicer would have accepted, or vice versa.
+    return virtual_tilt_limit_enforced_deg(HotendEnvelope::from_config(cfg), get("nonplanar_gantry_height"),
+                                           get("nonplanar_virtual_max_angle"), reach_mm, tilt_azimuth_rad);
 }
 
 bool has_filaments(const std::vector<string>& model_filaments) {

@@ -16,6 +16,7 @@
 #include <regex>
 #include <atomic>
 #include <mutex>
+#include <chrono>
 #include <boost/algorithm/string.hpp>
 #include <boost/iterator/counting_iterator.hpp>
 #include <boost/optional.hpp>
@@ -95,6 +96,7 @@
 #include "MenuMnemonics.hpp"
 #include "wxExtensions.hpp"
 #include "../Utils/PrintHost.hpp"
+#include "../Utils/UsageTelemetry.hpp"
 #include "libslic3r/BedMesh.hpp"
 #include "../Utils/Moonraker.hpp"
 #include "MainFrame.hpp"
@@ -7375,7 +7377,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         "enable_support", "support_filament", "support_interface_filament",
         // UNLAYERED_MOD: enable_nonplanar gates layer_rotation_b/c, and the variable layer height
         // editor derives object_max_z from the rotated box (PrintObject::slicing_parameters).
-        "test_input", "layer_rotation_b", "layer_rotation_c", "enable_nonplanar",
+        "test_input", "layer_rotation_b", "layer_rotation_c", "curved_layer_blend", "automatic_layer_strategy", "enable_nonplanar",
         "support_top_z_distance", "support_bottom_z_distance", "raft_layers",
         "wipe_tower_rotation_angle", "wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_extra_flow", "wipe_tower_max_purge_speed",
         "wipe_tower_wall_type", "wipe_tower_extra_rib_length","wipe_tower_rib_width","wipe_tower_fillet_wall",
@@ -8305,6 +8307,13 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
     if (input_files.empty())
         return std::vector<size_t>();
+
+    // Unlayered: usage diagnostics. The extension only, and only from a fixed list.
+    for (const fs::path &file : input_files) {
+        std::string ext = boost::algorithm::to_lower_copy(file.extension().string());
+        static const std::set<std::string> known = {".stl", ".3mf", ".obj", ".step", ".stp", ".amf", ".svg", ".gcode", ".drc", ".ply", ".zip"};
+        UsageTelemetry::count("import:" + (known.count(ext) ? ext.substr(1) : std::string("other")));
+    }
 
     if (!input_files.empty())
        q->m_3mf_path = input_files[0].string();
@@ -12633,8 +12642,190 @@ void Plater::priv::on_export_finished(wxCommandEvent& evt)
 #endif
 }
 
+// Unlayered: usage diagnostics for one finished slice (slic3r/Utils/UsageTelemetry.hpp). Setting
+// NAMES only, never values typed in by hand; preset names only for system presets; error messages
+// with the model's names taken out.
+static std::chrono::steady_clock::time_point s_usage_slice_began;
+static bool                                  s_usage_slice_timed = false;
+
+static std::string usage_error_kind(const SlicingProcessCompletedEvent &evt)
+{
+    try {
+        evt.rethrow_exception();
+    } catch (const std::bad_alloc &) {
+        return "out_of_memory";
+    } catch (const HardCrash &) {
+        return "hard_crash";
+    } catch (const PlaceholderParserError &) {
+        return "gcode_template";
+    } catch (const SlicingErrors &) {
+        return "slicing_errors";
+    } catch (const SlicingError &) {
+        return "slicing_error";
+    } catch (const ExportError &) {
+        return "export_error";
+    } catch (const std::exception &) {
+        return "exception";
+    } catch (...) {
+    }
+    return "unknown";
+}
+
+// Unlayered (and a few upstream) features whose use is worth knowing about.
+static const char *const USAGE_FLAG_KEYS[] = {
+    "enable_nonplanar", "virtual_5axis", "zaa_enabled", "wave_overhangs", "adaptive_layer_height", "enable_support",
+    "spiral_mode", "enable_prime_tower", "enable_arc_fitting", "make_overhang_printable", "brim_ears",
+    "independent_support_layer_height",
+};
+// Choices from fixed lists, sent with their value.
+static const char *const USAGE_CHOICE_KEYS[] = {
+    "support_type", "wall_generator", "sparse_infill_pattern", "slicing_mode", "print_sequence",
+    "ironing_type", "fuzzy_skin", "seam_position", "timelapse_type",
+};
+// Bookkeeping, not settings anybody changes.
+static bool usage_ignored_key(const std::string &key)
+{
+    static const std::set<std::string> ignored = {"inherits", "compatible_printers", "compatible_prints",
+                                                  "compatible_printers_condition", "compatible_prints_condition",
+                                                  "printer_settings_id", "print_settings_id", "filament_settings_id",
+                                                  "name", "print_compatible_printers"};
+    return ignored.count(key) > 0;
+}
+
+static void record_usage_slice(const Model &model, int plate_count, const SlicingProcessCompletedEvent &evt, const std::string &crash_site)
+{
+    if (!UsageTelemetry::enabled())
+        return;
+    const PresetBundle &bundle = *wxGetApp().preset_bundle;
+
+    nlohmann::json props;
+    props["result"] = evt.cancelled() ? "cancelled" : (evt.error() ? "error" : "ok");
+    if (s_usage_slice_timed) {
+        props["duration_ms"] = int64_t(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - s_usage_slice_began).count());
+        s_usage_slice_timed = false;
+    }
+    size_t instances = 0;
+    for (const ModelObject *object : model.objects)
+        instances += object->instances.size();
+    props["plates"]    = plate_count;
+    props["objects"]   = int(model.objects.size());
+    props["instances"] = int(instances);
+
+    const Preset &printer      = bundle.printers.get_selected_preset();
+    const Preset *printer_base = printer.is_system ? &printer : bundle.printers.get_preset_parent(printer);
+    props["printer"]           = UsageTelemetry::preset_base_name(bundle.printers, printer);
+    if (const VendorProfile *vendor = printer.vendor ? printer.vendor : (printer_base ? printer_base->vendor : nullptr))
+        props["printer_vendor"] = vendor->name;
+    props["process"] = UsageTelemetry::preset_base_name(bundle.prints, bundle.prints.get_selected_preset());
+
+    std::set<std::string> filaments;
+    for (const std::string &name : bundle.filament_presets)
+        if (const Preset *filament = bundle.filaments.find_preset(name, false))
+            filaments.insert(UsageTelemetry::preset_base_name(bundle.filaments, *filament));
+    props["filaments"] = std::vector<std::string>(filaments.begin(), filaments.end());
+
+    const DynamicPrintConfig config = bundle.full_config();
+    std::set<std::string>    filament_types;
+    if (const auto *types = config.option<ConfigOptionStrings>("filament_type"))
+        filament_types.insert(types->values.begin(), types->values.end());
+    props["filament_types"] = std::vector<std::string>(filament_types.begin(), filament_types.end());
+
+    // Which settings differ from the system presets: in the presets themselves (saved or not) and
+    // as per-object, per-part and per-height-range overrides.
+    std::set<std::string> keys;
+    const PresetCollection *collections[] = {&bundle.prints, &bundle.printers, &bundle.filaments};
+    for (const PresetCollection *collection : collections)
+        for (const std::string &key : collection->current_different_from_parent_options())
+            keys.insert(key);
+    // Features, and how many parts (copies on the plate) each one applied to: a setting counts for an
+    // object when the object's own value says so, or it has none and the settings say so.
+    std::map<std::string, int> parts;
+    auto flag_on = [](const ConfigOption *opt) { return opt && opt->type() == coBool && opt->getBool(); };
+    std::vector<std::string> names;
+    for (const ModelObject *object : model.objects) {
+        names.push_back(object->name);
+        for (const std::string &key : object->config.keys())
+            keys.insert(key);
+        for (const auto &range : object->layer_config_ranges)
+            for (const std::string &key : range.second.keys())
+                keys.insert(key);
+
+        const int copies = int(object->instances.size());
+        auto      add    = [&](const char *feature, bool on) {
+            if (on)
+                parts[feature] += copies;
+        };
+        for (const char *key : USAGE_FLAG_KEYS) {
+            const ConfigOption *own = object->config.option(key);
+            add(key, own ? flag_on(own) : flag_on(config.option(key)));
+        }
+        add("cut_planes", object->has_cut_planes());
+        add("variable_layer_height", !object->layer_height_profile.empty());
+        add("height_range_modifiers", !object->layer_config_ranges.empty());
+        bool modifiers = false, painted_supports = false, painted_seams = false, painted_colors = false, painted_fuzzy = false;
+        for (const ModelVolume *volume : object->volumes) {
+            names.push_back(volume->name);
+            for (const std::string &key : volume->config.keys())
+                keys.insert(key);
+            modifiers |= volume->is_modifier();
+            painted_supports |= volume->is_fdm_support_painted();
+            painted_seams |= volume->is_seam_painted();
+            painted_colors |= volume->is_mm_painted();
+            painted_fuzzy |= volume->is_fuzzy_skin_painted();
+        }
+        add("modifier_parts", modifiers);
+        add("painted_supports", painted_supports);
+        add("painted_seams", painted_seams);
+        add("painted_colors", painted_colors);
+        add("painted_fuzzy_skin", painted_fuzzy);
+    }
+    std::vector<std::string> modified;
+    for (const std::string &key : keys)
+        if (!usage_ignored_key(key) && modified.size() < 60)
+            modified.push_back(key);
+    props["modified_keys"] = modified;
+
+    std::vector<std::string> features;
+    nlohmann::json           part_counts = nlohmann::json::object();
+    for (const auto &[feature, n] : parts)
+        if (n > 0) {
+            features.push_back(feature);
+            part_counts["parts:" + feature] = n;
+        }
+    for (const char *key : USAGE_CHOICE_KEYS)
+        if (const ConfigOption *opt = config.option(key))
+            features.push_back(std::string(key) + ":" + opt->serialize());
+    props["features"] = features;
+
+    if (evt.error()) {
+        std::string kind    = usage_error_kind(evt);
+        props["error_type"] = kind;
+        // A hardware exception's message is one of BackgroundSlicingProcess' fixed names ("Access
+        // violation", ...): keep it, quotes and all would otherwise be redacted to "<...>". Where it
+        // faulted is a module file name and offset.
+        if (kind == "hard_crash") {
+            std::string first = evt.format_error_message().first;
+            first             = first.substr(0, first.find('\n'));
+            first.erase(std::remove(first.begin(), first.end(), '"'), first.end());
+            props["error"] = first.substr(0, 160);
+            if (!crash_site.empty())
+                props["crash_at"] = crash_site;
+        } else
+        // A G-code template error quotes the person's own custom G-code; its kind is enough.
+        if (kind != "gcode_template") {
+            names.push_back(wxGetApp().plater()->get_project_name().ToUTF8().data());
+            props["error"] = UsageTelemetry::redact_message(evt.format_error_message().first, names);
+        }
+    }
+    // Parts are counted for slices that produced G-code only.
+    if (!evt.success())
+        part_counts = nlohmann::json::object();
+    UsageTelemetry::record("slice", std::move(props), std::move(part_counts));
+}
+
 void Plater::priv::on_slicing_began()
 {
+    UsageTelemetry::set_phase("slicing");
     clear_warnings();
     notification_manager->close_notification_of_type(NotificationType::SignDetected);
     notification_manager->close_notification_of_type(NotificationType::ExportFinished);
@@ -12643,6 +12834,8 @@ void Plater::priv::on_slicing_began()
     bool need_change_dailytips = !(slice_all && !is_first_plate);
     notification_manager->set_slicing_progress_began();
     notification_manager->update_slicing_notif_dailytips(need_change_dailytips);
+    s_usage_slice_began = std::chrono::steady_clock::now();
+    s_usage_slice_timed = true;
 
     // Unlayered: for embedded web applications (WEB_APP_BRIDGE.md section 4.5).
     WebAppPanel::notify_all("slicer.sliceStarted", json{{"plate", partplate_list.get_curr_plate_index()}});
@@ -12784,6 +12977,9 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         this->notification_manager->set_slicing_progress_canceled(_u8L("Slicing Canceled"));
         is_finished = true;
     }
+
+    record_usage_slice(this->model, this->partplate_list.get_plate_count(), evt, this->background_process.hard_crash_site());
+    UsageTelemetry::set_phase("running");
 
     //BBS: set the current plater's slice result to valid
     if (!this->background_process.empty())
@@ -18420,6 +18616,8 @@ void Plater::export_gcode(bool prefer_removable)
     if (p->process_completed_with_error == p->partplate_list.get_curr_plate_index())
         return;
 
+    UsageTelemetry::record("export", {{"kind", "gcode"}, {"removable", prefer_removable}});
+
     // If possible, remove accents from accented latin characters.
     // This function is useful for generating file names to be processed by legacy firmwares.
     fs::path default_output_file;
@@ -18522,6 +18720,8 @@ void Plater::export_gcode_3mf(bool export_all)
 
     if (p->process_completed_with_error == p->partplate_list.get_curr_plate_index())
         return;
+
+    UsageTelemetry::record("export", {{"kind", "gcode_3mf"}, {"all_plates", export_all}});
 
     //calc default_output_file, get default output file from background process
     fs::path default_output_file;
@@ -20121,14 +20321,10 @@ bool Plater::export_loaded_gcode()
     if (output_path.empty())
         return false;
 
-    // equivalent() takes the error_code by non-const reference, so it has to be a named variable:
-    // MSVC binds the temporary anyway, clang and gcc reject it. An error (e.g. output_path does not
-    // exist yet) just means "not the same file".
-    boost::system::error_code equivalent_ec;
-    if (fs::equivalent(source, output_path, equivalent_ec))
+    boost::system::error_code ec;
+    if (fs::equivalent(source, output_path, ec))
         return true;   // saving it over itself: nothing to do, and copy_file would truncate it
 
-    boost::system::error_code ec;
     fs::copy_file(source, output_path, fs::copy_options::overwrite_existing, ec);
     if (ec) {
         show_error(this, _L("Saving the G-code file failed") + ":\n" + from_u8(ec.message()));
@@ -20208,6 +20404,8 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
     PrintHostJob upload_job(physical_printer_config);
     if (upload_job.empty())
         return;
+
+    UsageTelemetry::record("export", {{"kind", "send"}, {"host_type", physical_printer_config->opt_serialize("host_type")}});
 
     // Orca: the use_3mf printer option makes us send a .gcode.3mf to the printer
     const auto* use_3mf_opt = physical_printer_config->option<ConfigOptionBool>("use_3mf");

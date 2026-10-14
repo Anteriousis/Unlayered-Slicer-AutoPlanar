@@ -4,6 +4,7 @@
 	"inherits": "Generic PLA @BabyBelt Pro",
 	"from": "system",
 	"setting_id": "EH3X7oE0DU5tSpjW",
+	"filament_id": "OFkrxQC4",
 	"instantiation": "true",
 	"compatible_printers": [
 		"BabyBelt Pro 0.4 nozzle"

@@ -141,7 +141,13 @@ elseif(APPLE)
     # the post-install -add_rpath below.
     set(_python_ldflags "${_python_arch_flags} -Wl,-headerpad_max_install_names")
 
-    if(IS_CROSS_COMPILE)
+    # CPython's configure only accepts --host cross builds for a known list of systems
+    # (Linux, Cygwin, VxWorks, Emscripten, WASI) and errors "cross build not supported"
+    # for anything else, Darwin included -- so this branch can never configure on macOS.
+    # Targeting the other macOS architecture is an ordinary native build carrying -arch
+    # flags, which the branch below already does; configure runs its test binaries under
+    # Rosetta 2. Kept here for reference, and for a platform that can use it one day.
+    if(FALSE)  # was: IS_CROSS_COMPILE
         set(_python_build_tgt --build=${_python_build_arch}-apple-darwin --host=${_python_host_arch}-apple-darwin)
         set(_python_build_arch_flags "-arch ${_python_build_arch_flag} -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
         set(_python_build_ldflags "${_python_build_arch_flags} -Wl,-rpath,${DESTDIR}/lib")

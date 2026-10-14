@@ -18,6 +18,7 @@
 #include <wx/numformatter.h>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/AppConfig.hpp"
@@ -1371,6 +1372,12 @@ wxString OptionsGroup::get_url(const std::string& path_end)
         anchor.Replace(L" ", "-");
         str = str.Left(pos) + anchor;
     }
+    // UNLAYERED_MOD -- our own options have no page on the upstream wiki; "multiplanar_tutorial#x"
+    // opens the bundled offline tutorial (resources/web/tutorial) at anchor x instead.
+    static const std::string tutorial_prefix = "multiplanar_tutorial";
+    if (boost::starts_with(path_end, tutorial_prefix))
+        return wxString::Format("file://%s/web/tutorial/multiplanar.html%s", from_u8(Slic3r::resources_dir()),
+                                from_u8(path_end.substr(tutorial_prefix.size())));
     // Orca: point to sf wiki for seam parameters
     return wxString::Format(L"https://www.orcaslicer.com/wiki/%s", from_u8(path_end));
 }

@@ -8,6 +8,9 @@
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
+#include "slic3r/Utils/UsageTelemetry.hpp"
+
+#include <iterator>
 #include "slic3r/GUI/NotificationManager.hpp"
 
 #include "slic3r/GUI/Gizmos/GLGizmoMove.hpp"
@@ -35,11 +38,57 @@
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "slic3r/GUI/MsgDialog.hpp"
+#include "slic3r/GUI/Tab.hpp"
 
 #include <wx/glcanvas.h>
 
 namespace Slic3r {
 namespace GUI {
+
+// UNLAYERED_MOD -- Cut Planes and Pipe Cut are greyed out while the printer has non-planar printing
+// off. These two helpers say why on hover and, on click, offer to turn it on.
+static bool is_multiplanar_gizmo(GLGizmosManager::EType type)
+{
+    return type == GLGizmosManager::CutPlanes || type == GLGizmosManager::Skeleton;
+}
+
+static std::string nonplanar_disabled_hint()
+{
+    // The canvas tooltip does not wrap, so the line breaks are part of the text.
+    return _u8L("Non-planar printing is off for this printer.\n"
+                "Click to turn it on, or use Printer settings >\n"
+                "Motion ability > Enable non-planar printing.");
+}
+
+// Turns non-planar printing on in the edited printer preset (left modified; the user saves it as
+// usual) if the user agrees. Returns true when it is on afterwards.
+static bool offer_enable_nonplanar_printing()
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return false;
+    if (nonplanar_printing_enabled())
+        return true;
+    const Preset &printer = bundle->printers.get_edited_preset();
+    // Every Unlayered 5-axis profile ships with non-planar on, so a printer reaching this prompt
+    // is almost certainly an ordinary 3-axis one. Virtual writes no rotary axis words and keeps
+    // the nozzle upright; the B/C default would send rotary moves the printer cannot make.
+    const wxString message = wxString::Format(
+        _L("Cut Planes and Pipe Cut need non-planar printing, which is off for the printer \"%s\".\n\n"
+           "Turn it on now, with Printer type set to Virtual (for an ordinary 3-axis printer)?\n\n"
+           "Both settings are under Printer settings > Motion ability > Non-planar Printing. "
+           "For a real 5-axis printer, change Printer type there. Save the printer preset to keep the change."),
+        from_u8(printer.label(false)));
+    MessageDialog dialog(wxGetApp().plater(), message, _L("Turn on non-planar printing"), wxICON_QUESTION | wxYES_NO | wxYES_DEFAULT);
+    if (dialog.ShowModal() != wxID_YES)
+        return false;
+    DynamicPrintConfig config = printer.config;
+    config.set_key_value("enable_nonplanar", new ConfigOptionBool(true));
+    config.set_key_value("axis_selection", new ConfigOptionEnum<AxisSelection>(AxisSelection::Virtual));
+    wxGetApp().get_tab(Preset::TYPE_PRINTER)->load_config(config);
+    return nonplanar_printing_enabled();
+}
 //BBS: GUI refactor: to support top layout
 #if BBS_TOOLBAR_ON_TOP
 const float GLGizmosManager::Default_Icons_Size = 40;
@@ -425,6 +474,13 @@ void GLGizmosManager::reset_all_states()
     //m_hover = Undefined;
 }
 
+// Unlayered: names for usage diagnostics, in EType order.
+static const char *const GIZMO_USAGE_NAMES[] = {
+    "move", "rotate", "scale", "flatten", "cut", "mesh_boolean", "cut_chunks", "rotate_layers", "skeleton", "cut_planes",
+    "supports", "seam", "fuzzy_skin", "mm_segmentation", "emboss", "svg", "measure", "assembly", "simplify", "brim_ears",
+};
+static_assert(std::size(GIZMO_USAGE_NAMES) == GLGizmosManager::Undefined, "one usage name per gizmo type");
+
 bool GLGizmosManager::open_gizmo(EType type)
 {
     int idx = static_cast<int>(type);
@@ -433,6 +489,8 @@ bool GLGizmosManager::open_gizmo(EType type)
     if (m_current == type) type = Undefined;
 
     if (m_gizmos[idx]->is_activable() && activate_gizmo(type)) {
+        if (type != Undefined)
+            UsageTelemetry::count(std::string("gizmo:") + GIZMO_USAGE_NAMES[idx]);
         // remove update data into gizmo itself
         update_data();
 #ifdef __WXOSX__
@@ -746,6 +804,14 @@ bool GLGizmosManager::gizmos_toolbar_on_mouse(const wxMouseEvent &mouse_event) {
             if (gizmo == Emboss) {
                 GLGizmoBase *gizmo_emboss = m_gizmos[Emboss].get();
                 dynamic_cast<GLGizmoEmboss *>(gizmo_emboss)->on_shortcut_key();
+            } else if (is_multiplanar_gizmo(gizmo) && !nonplanar_printing_enabled()) {
+                // UNLAYERED_MOD -- a greyed multiplanar tool offers to turn non-planar printing on
+                // instead of ignoring the click. Deferred: a modal dialog inside the canvas mouse
+                // handler would swallow the LeftUp and leave the capture state stuck.
+                wxGetApp().CallAfter([this, gizmo]() {
+                    if (offer_enable_nonplanar_printing())
+                        open_gizmo(gizmo);
+                });
             } else {
                 open_gizmo(gizmo);
             }
@@ -1441,8 +1507,11 @@ void GLGizmosManager::update_hover_state(const EType &type)
     }
 
     const GLGizmoBase &hovered_gizmo = *m_gizmos[type];
-    m_hover = hovered_gizmo.is_activable() ? type : Undefined;    
+    m_hover = hovered_gizmo.is_activable() ? type : Undefined;
     m_tooltip = hovered_gizmo.get_name();
+    // UNLAYERED_MOD -- say why a multiplanar tool is greyed out (see nonplanar_disabled_hint()).
+    if (is_multiplanar_gizmo(type) && !nonplanar_printing_enabled())
+        m_tooltip += "\n" + nonplanar_disabled_hint();
 }
 
 bool GLGizmosManager::activate_gizmo(EType type)

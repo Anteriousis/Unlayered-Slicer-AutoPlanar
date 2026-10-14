@@ -10,6 +10,7 @@
 #include <wx/stattext.h>
 #include <wx/utils.h>
 
+#include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
@@ -26,6 +27,7 @@
 #include "NotificationManager.hpp"
 #include "Plater.hpp"
 #include "ReleaseNote.hpp"
+#include "slic3r/Utils/UsageTelemetry.hpp"
 
 namespace fs = boost::filesystem;
 
@@ -48,6 +50,27 @@ constexpr const char *PENDING_UPDATE_KEY = "pending_update_version";
 
 // The newest version whose "What's new" has been dealt with (shown, or skipped on a first run).
 constexpr const char *WHATS_NEW_KEY = "whats_new_version";
+// UNLAYERED_MOD -- usage diagnostics for the updater. The version the update came FROM, and how
+// handing over to the installer went, are kept here across the restart: on_app_exit() runs after
+// diagnostics have shut down, so the next launch reports them (update_applied).
+constexpr const char *UPDATE_FROM_KEY   = "update_from_version";
+constexpr const char *UPDATE_LAUNCH_KEY = "update_launch_result";
+
+// A download failure as a fixed category: the error text itself can hold file paths.
+std::string download_failure_reason(const std::string &error, unsigned http_status)
+{
+    if (http_status == 401) return "not_signed_in";
+    if (http_status == 403) return "no_access";
+    if (http_status == 404) return "no_installer";
+    if (http_status >= 500) return "server_error";
+    const std::string e = boost::algorithm::to_lower_copy(error);
+    if (e.find("replaced") != std::string::npos) return "replaced_mid_update";
+    if (e.find("sha") != std::string::npos || e.find("checksum") != std::string::npos || e.find("hash") != std::string::npos)
+        return "checksum";
+    if (e.find("space") != std::string::npos || e.find("disk") != std::string::npos) return "disk";
+    if (http_status == 0) return "network";
+    return "other";
+}
 
 // "## 0.1.2 — 2026-10-10" -> 0.1.2. Not a version heading -> none.
 boost::optional<Semver> heading_version(const std::string &line)
@@ -222,6 +245,13 @@ void AutoUpdater::on_startup()
         const std::string pending = config->get(PENDING_UPDATE_KEY);
         if (!pending.empty()) {
             config->set(PENDING_UPDATE_KEY, "");
+            // Usage diagnostics: did the update the previous session downloaded actually install?
+            UsageTelemetry::record("update_applied", {{"to", pending},
+                                                      {"from", config->get(UPDATE_FROM_KEY)},
+                                                      {"outcome", pending == UNLAYERED_VERSION ? "updated" : "not_updated"},
+                                                      {"launch", config->get(UPDATE_LAUNCH_KEY)}});
+            config->set(UPDATE_FROM_KEY, "");
+            config->set(UPDATE_LAUNCH_KEY, "");
             if (pending == UNLAYERED_VERSION) {
                 BOOST_LOG_TRIVIAL(info) << "updater: now running the update to " << pending;
                 notify((boost::format(_u8L("%1% was updated to %2%.")) % SLIC3R_APP_FULL_NAME % pending).str());
@@ -323,6 +353,9 @@ void AutoUpdater::sign_in(wxWindow *parent, std::function<void(bool)> done)
 {
     SignInDialog dlg(parent ? parent : m_app.mainframe, m_account);
     const bool   ok = dlg.ShowModal() == wxID_OK && m_account->signed_in();
+    // Usage diagnostics: "update" when an update asked for the sign-in, "menu" from Help.
+    UsageTelemetry::record("account_signin", {{"result", ok ? "ok" : (dlg.error().empty() ? "cancelled" : "failed")},
+                                              {"from", done ? "update" : "menu"}});
     if (ok) {
         const auto p = m_account->profile();
         notify((boost::format(_u8L("Signed in to Unlayered as %1%.")) % (p ? p->email : std::string())).str());
@@ -348,11 +381,21 @@ void AutoUpdater::sign_out()
 bool AutoUpdater::handle_new_version(const std::string &version, const std::string &notes, const std::string &page_url,
                                      const std::optional<AccountDownload> &download, bool by_user, bool skipped)
 {
-    if (!download)
+    // Usage diagnostics: what happened when the update check found a newer version.
+    auto offered = [&](const char *action) {
+        UsageTelemetry::record("update_offered", {{"to", version},
+                                                  {"by_user", by_user},
+                                                  {"signed_in", m_account->signed_in()},
+                                                  {"action", action}});
+    };
+    if (!download) {
+        offered("no_account_download"); // the site has no installer for this platform: download page
         return false;
+    }
 
     m_install_dir = self_updatable_install_dir();
     if (!m_install_dir) {
+        offered("not_self_updatable");
         BOOST_LOG_TRIVIAL(info) << "updater: " << version
                                 << " is available with the account, but this copy is not a per-user installation "
                                    "that can replace itself; using the update dialog";
@@ -371,8 +414,10 @@ bool AutoUpdater::handle_new_version(const std::string &version, const std::stri
     if (m_state == State::Downloading)
         return true; // finish the one in flight; the next launch looks again
 
-    if (skipped && !by_user)
+    if (skipped && !by_user) {
+        offered("skipped");
         return true; // "Skip this Version" means silence, for the automatic check
+    }
 
     m_state    = State::Idle;
     m_version  = version;
@@ -381,6 +426,7 @@ bool AutoUpdater::handle_new_version(const std::string &version, const std::stri
     const bool signed_in = m_account->signed_in();
     if (signed_in && !by_user) {
         BOOST_LOG_TRIVIAL(info) << "updater: downloading " << version << " in the background";
+        offered("background_download");
         start_download();
         return true;
     }
@@ -394,7 +440,10 @@ bool AutoUpdater::handle_new_version(const std::string &version, const std::stri
     if (by_user)
         dialog.m_button_skip_version->Hide();
 
-    switch (dialog.ShowModal()) {
+    const int choice = dialog.ShowModal();
+    offered(choice == wxID_YES ? (signed_in ? "dialog_update" : "dialog_sign_in")
+                               : choice == wxID_OPEN ? "dialog_download_page" : "dialog_dismissed");
+    switch (choice) {
     case wxID_YES:
         if (signed_in)
             start_download();
@@ -414,7 +463,8 @@ void AutoUpdater::start_download()
 {
     if (m_state == State::Downloading)
         return;
-    m_state = State::Downloading;
+    m_state            = State::Downloading;
+    m_download_started = std::chrono::steady_clock::now();
 
     auto       account  = m_account;
     auto       alive    = m_alive;
@@ -446,11 +496,26 @@ void AutoUpdater::start_download()
 
 void AutoUpdater::on_download_finished(bool ok, const fs::path &installer, const std::string &error, unsigned http_status)
 {
+    {
+        // Usage diagnostics. The reason is a fixed category, never the error text (it can hold paths).
+        nlohmann::json props = {{"to", m_version},
+                                {"result", ok ? "ok" : "failed"},
+                                {"seconds", int64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                                        std::chrono::steady_clock::now() - m_download_started).count())}};
+        if (!ok) {
+            props["reason"]      = download_failure_reason(error, http_status);
+            props["http_status"] = int(http_status);
+        }
+        UsageTelemetry::record("update_download", std::move(props));
+    }
     if (ok) {
         m_installer = installer;
         m_state     = State::Ready;
-        if (m_app.app_config)
+        if (m_app.app_config) {
             m_app.app_config->set(PENDING_UPDATE_KEY, m_version);
+            m_app.app_config->set(UPDATE_FROM_KEY, UNLAYERED_VERSION);
+            m_app.app_config->set(UPDATE_LAUNCH_KEY, "not_launched"); // until on_app_exit() says otherwise
+        }
         BOOST_LOG_TRIVIAL(info) << "updater: " << m_version << " is ready at " << installer.string();
         notify_ready();
         return;
@@ -509,15 +574,27 @@ void AutoUpdater::on_app_exit()
 {
     if (m_state != State::Ready || !m_install_dir || m_installer.empty())
         return;
+    // Diagnostics have already shut down here, so how the hand-over went is kept for the next
+    // launch's update_applied event. Saved explicitly: this runs at the very end of OnExit.
+    auto keep_launch_result = [this](const char *result) {
+        if (m_app.app_config) {
+            m_app.app_config->set(UPDATE_LAUNCH_KEY, result);
+            m_app.app_config->save();
+        }
+    };
     if (other_instances_running()) {
         // Its files are in use, so the installer would fail part-way. The next launch offers the
         // update again.
         BOOST_LOG_TRIVIAL(info) << "updater: another instance is running; not installing " << m_version << " now";
+        keep_launch_result("other_instance_running");
         return;
     }
     std::string error;
-    if (!launch_silent_update(m_installer, *m_install_dir, m_relaunch, error))
+    if (!launch_silent_update(m_installer, *m_install_dir, m_relaunch, error)) {
         BOOST_LOG_TRIVIAL(error) << "updater: could not start the update: " << error;
+        keep_launch_result("launch_failed");
+    } else
+        keep_launch_result(m_relaunch ? "launched_restart" : "launched_on_exit");
 }
 
 } // namespace GUI

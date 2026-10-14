@@ -275,9 +275,15 @@ int uncross_skeleton_cut_planes(const indexed_triangle_set& mesh, const Skeleton
             if (angle > M_PI - 1e-3)
                 continue; // the spine doubles back on itself here; no swing direction is defined
             const auto swing = [&](double t) -> Vec3d {
-                return angle < 1e-9 ? to
-                                    : Vec3d((std::sin((1. - t) * angle) * from + std::sin(t * angle) * to) /
-                                            std::sin(angle)).normalized();
+                // Separate returns rather than a conditional: normalized() yields an aligned
+                // Eigen::Matrix<double,3,1> while `to` is Vec3d (Eigen::DontAlign). Each
+                // converts to the other, so clang rejects the conditional as ambiguous. Each
+                // return converts to the lambda's Vec3d on its own.
+                if (angle < 1e-9)
+                    return to;
+                return Vec3d((std::sin((1. - t) * angle) * from + std::sin(t * angle) * to) /
+                             std::sin(angle))
+                    .normalized();
             };
             double             lo = 0., hi = 1.;
             Vec3d              best_n    = from;

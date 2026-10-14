@@ -51,6 +51,9 @@ void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field
     if(fixed_nozzle>=0 && (!filament() || int(filament()->extruder_id())!=fixed_nozzle))
         throw RuntimeError("The writer active nozzle differs from the planned fixed nozzle.");
     m_curved_fixed_nozzle=fixed_nozzle;
+    m_curved_max_z=m_curved_common_max_z;
+    if(fixed_nozzle>=0 && size_t(fixed_nozzle)<m_curved_nozzle_heights.size())
+        m_curved_max_z=std::min(m_curved_max_z,m_curved_nozzle_heights[fixed_nozzle]);
     m_curved_field=std::move(field); m_curved_domain=domain; m_curved_origin=origin;
     m_curved_safe_z=std::max(m_curved_plate_safe_z,domain.top_max+travel_clearance); m_curved_z_speed=z_speed;
     m_curved_travel_clearance=travel_clearance;
@@ -95,8 +98,11 @@ double GCodeWriter::curved_travel_height(const Vec3d& target) const
     // Round upward before output precision rounds a traverse below its bound.
     // Round computed bounds only. Re-rounding an already emitted staging Z can
     // ratchet it upward at floating-point values such as 2.007 mm.
-    return std::max({std::ceil(bound*1000.)/1000.,m_pos.z(),
+    const double safe=std::max({std::ceil(bound*1000.)/1000.,m_pos.z(),
         is_current_position_clear()?0.:std::ceil(m_curved_safe_z*1000.)/1000.});
+    if(!std::isfinite(safe) || !(m_curved_max_z>0.) || safe>m_curved_max_z+1e-9)
+        throw RuntimeError("Curved travel exceeds the configured machine/Virtual or active-nozzle Z limit");
+    return safe;
 }
 
 std::string GCodeWriter::travel_to_curved_path(const std::vector<Vec3d>& points, const std::string& comment)
@@ -259,6 +265,9 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
     m_curved_field.reset(); m_curved_domain.reset();
     m_curved_plate_safe_z=0.;
     m_curved_travel_clearance=0.;m_curved_max_bead_rise=0.;
+    m_curved_common_max_z=std::min(print_config.nonplanar_virtual_max_z.value,print_config.printable_height.value);
+    m_curved_max_z=m_curved_common_max_z;
+    m_curved_nozzle_heights=print_config.extruder_printable_height.values;
     m_curved_fixed_nozzle=-1;
     m_fixed_dual_enabled=print_config.nozzle_diameter.size()==2 && print_config.nonplanar_fixed_nozzle.value>0;
     this->config.apply(print_config, true);

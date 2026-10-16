@@ -10217,15 +10217,19 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
         if (m_writer.has_curved_blend()) {
             if (path.z_contoured || sloped!=nullptr)
                 throw RuntimeError("Curved blend encountered an unsupported scarf or Z-contoured path");
-            const bool needs_planar=is_bridge(path.role()) || is_support(path.role());
-            if(needs_planar) {
+            const bool special=is_bridge(path.role()) || is_support(path.role());
+            if(special) {
                 const BoundingBox bounds=get_extents(path.polyline.to_polyline()).inflated(scale_(path.width*.5+.02));
                 const Vec2d lo=point_to_gcode(bounds.min),hi=point_to_gcode(bounds.max);
-                if(!m_writer.curved_path_is_planar(lo,hi,m_nominal_z,path.height))
+                const bool mapped=m_writer.curved_maps_supports() &&
+                    (is_support(path.role()) || m_writer.curved_path_is_affine(lo,hi,m_nominal_z,path.height));
+                if(!mapped && !m_writer.curved_path_is_planar(lo,hi,m_nominal_z,path.height))
                     throw RuntimeError("A bridge or support bead crosses a curved region. Move the region or use planar mode for this object.");
             } else if(std::abs(path.height-m_layer->height)>1e-4)
                 throw RuntimeError("Curved blend encountered a combined-height path");
-            m_writer.set_curved_path(m_nominal_z,path.width,path.height);
+            const bool round_bead=m_writer.curved_maps_supports() && is_bridge(path.role()) &&
+                (path.role()!=erOverhangPerimeter || std::abs(path.height-path.width)<1e-5);
+            m_writer.set_curved_path(m_nominal_z,path.width,path.height,round_bead);
             const double multiplier=m_writer.curved_max_flow_scale();
             if (filament_max_volumetric_speed>0.)
                 F=std::min(F,60.*filament_max_volumetric_speed/(_mm3_per_mm*multiplier));

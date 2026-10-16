@@ -3742,6 +3742,11 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
 {
     CNumericLocalesSetter locales_setter;
 
+    // Stand-alone, producer-unknown G-code has no embedded profile. Initialize
+    // its filament/nozzle tables before motion parsing, just as configured
+    // imports do. Keep an explicitly applied config intact.
+    if(m_result.filaments_count==0) apply_config(FullPrintConfig{});
+
     // pre-processing
     // parse the gcode file to detect its producer
     {

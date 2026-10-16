@@ -145,7 +145,7 @@ inline UndersideAnalysis analyze_undersides(const std::vector<Ramp::Triangle>& m
     return report;
 }
 
-inline std::string underside_analysis_summary(const UndersideAnalysis& r)
+inline std::string underside_analysis_summary(const UndersideAnalysis& r,bool field_applied=false)
 {
     std::ostringstream s;s.imbue(std::locale::classic());s<<std::fixed<<std::setprecision(1);
     s<<"Underside check: "<<r.facets<<" elevated downward facets, "<<r.projected_area_mm2<<" mm2 projected area";
@@ -161,8 +161,10 @@ inline std::string underside_analysis_summary(const UndersideAnalysis& r)
          <<" deg, uphill XY ("<<ux<<", "<<uy<<"); shallowest underside angle to its layer plane "
          <<r.planar.minimum_angle_deg<<" -> "<<r.best.minimum_angle_deg<<" deg; "
          <<r.best.worsened_mm2<<" mm2 of relevant surface area worsens.";
-        s<<" Candidate not applied: underside-changing layers require support/bridge generation and anchoring checks.";
+        if(field_applied) s<<" The applied field can use a smaller angle to finish its foundation transition; see the selection report.";
+        else s<<" Candidate not applied: underside-changing layers require support/bridge generation and anchoring checks.";
     } else s<<" No lower angular-deficit candidate within the configured angle bound.";
-    return s.str()+" Geometry estimate only; not support savings or a clearance/printability certificate. Supports unchanged.";
+    return s.str()+" Geometry estimate only; not support savings or a clearance/printability certificate. "+
+        (field_applied?"Support settings retained; paths regenerated with the object.":"Supports unchanged.");
 }
 } // namespace Slic3r::CurvedTransition

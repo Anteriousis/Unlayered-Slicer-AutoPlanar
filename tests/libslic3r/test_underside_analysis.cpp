@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #endif
 #include "libslic3r/UndersideAnalysis.hpp"
+#include "libslic3r/CurvedUnderside.hpp"
 using namespace Slic3r::CurvedTransition;
 
 namespace {
@@ -79,6 +80,7 @@ TEST_CASE("Underside ranking exposes regressions on opposing overhangs", "[curve
     REQUIRE(r.best.improved_mm2==Catch::Approx(4.*area));
     REQUIRE(r.best.worst_regression_deg>4.);
     REQUIRE(r.best.angular_deficit_mm2<r.planar.angular_deficit_mm2);
+    REQUIRE_FALSE(select_underside_program({dominant,underside(20.,180.)},r,.2,.2,.32,.08));
 }
 
 TEST_CASE("Underside angular costs are area weighted across mesh subdivision", "[curved-blend][undersides]")
@@ -146,4 +148,34 @@ TEST_CASE("Underside candidates account for new overhangs on initially vertical 
     REQUIRE(r.has_candidate);REQUIRE(r.facets==1);
     REQUIRE(std::abs(r.best.gx)<1e-5);REQUIRE(std::abs(r.best.gy)>.9*allowed);
     REQUIRE(r.best.worsened_mm2==0.);
+}
+
+TEST_CASE("Underside deposition finishes its monotone transition below bridge slabs", "[curved-blend][undersides]")
+{
+    const std::vector<Ramp::Triangle> mesh{underside(20.,0.,3.),
+        {{{0.,0.,0.},{10.,0.,0.},{0.,10.,0.}}}};
+    const double allowed=std::tan(5.*3.14159265358979323846/180.);
+    const auto analysis=analyze_undersides(mesh,allowed,30.);
+    auto program=select_underside_program(mesh,analysis,.2,.2,.32,allowed);
+    REQUIRE(program);REQUIRE(program->maps_supports());
+    REQUIRE(program->angle_deg()>=.25);REQUIRE(program->angle_deg()<5.);
+    REQUIRE(program->slope_bound()<=allowed);
+    REQUIRE(program->world_z(2.,2.,.2)==Catch::Approx(.2));
+    REQUIRE(program->layer_mode(2.,2.,.2)==LayerMode::Planar);
+    REQUIRE(program->layer_mode(2.,2.,1.)==LayerMode::Transition);
+    REQUIRE(program->layer_mode(2.,2.,4.)==LayerMode::Curved);
+    REQUIRE(program->affine_on_box(0.,10.,0.,10.,3.-.4-program->max_displacement_mm(),4.));
+    const auto& domain=program->domain();
+    for(double x:{domain.xmin,domain.xmax}) for(double y:{domain.ymin,domain.ymax}) {
+        double previous=.2;
+        for(int i=1;i<=50;++i) {
+            const double w=.2+i*.05,z=program->world_z(x,y,w);
+            REQUIRE(z>previous);REQUIRE(program->slice_z(x,y,z)==Catch::Approx(w));previous=z;
+        }
+    }
+    auto too_low=mesh;for(auto& p:too_low.front()) p[2]-=2.9;
+    REQUIRE_FALSE(select_underside_program(too_low,analyze_undersides(too_low,allowed,30.),.2,.2,.32,allowed));
+    auto taller=mesh;for(auto& p:taller.front()) p[2]+=15.;
+    const auto tall=select_underside_program(taller,analyze_undersides(taller,allowed,30.),.2,.2,.32,allowed);
+    REQUIRE(tall);REQUIRE(tall->angle_deg()>3.);REQUIRE(tall->slope_bound()<=allowed);
 }

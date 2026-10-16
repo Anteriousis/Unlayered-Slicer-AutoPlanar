@@ -20,6 +20,7 @@
 #include "CurvedFixedNozzle.hpp"
 #include "AutomaticCurvedSelection.hpp"
 #include "UndersideAnalysis.hpp"
+#include "CurvedUnderside.hpp"
 #include "AutoPlanes.hpp"
 //BBS
 #include "ShortestPath.hpp"
@@ -1192,9 +1193,98 @@ std::string PrintObject::curved_blend_error(bool automatic) const
     return {};
 }
 
+static void validate_underside_deposition(const PrintObject& object,const std::function<void()>& cancel)
+{
+    const auto& field=*object.curved_field();const auto& domain=*object.curved_domain();
+    const auto limits=CurvedTransition::FixedNozzleLimits::from_config(object.print()->config(),object.curved_nozzle_index());
+    struct Beads {double z;Polygons footprint;};
+    std::vector<Beads> deposited;
+    std::function<void(const ExtrusionEntity&,const std::function<void(const ExtrusionPath&)>&)> paths;
+    paths=[&](const ExtrusionEntity& e,const auto& f) {
+        if(const auto* p=dynamic_cast<const ExtrusionPath*>(&e)) f(*p);
+        else if(const auto* c=dynamic_cast<const ExtrusionEntityCollection*>(&e)) for(const auto* child:c->entities) paths(*child,f);
+        else if(const auto* l=dynamic_cast<const ExtrusionLoop*>(&e)) for(const auto& p:l->paths) f(p);
+        else if(const auto* m=dynamic_cast<const ExtrusionMultiPath*>(&e)) for(const auto& p:m->paths) f(p);
+    };
+    const auto covered=[](const ExtrusionEntity& e) {Polygons p;e.polygons_covered_by_width(p,float(scale_(.01)));return p;};
+    for(const auto* layer:object.layers()) {
+        Polygons p;
+        for(const auto* r:layer->regions()) {append(p,covered(r->perimeters));append(p,covered(r->fills));}
+        if(!p.empty()) deposited.push_back({layer->print_z,union_(p)});
+    }
+    for(const auto* layer:object.support_layers()) {
+        auto p=covered(layer->support_fills);
+        if(!p.empty()) deposited.push_back({layer->print_z,union_(p)});
+    }
+    const auto anchors=[&](double w,double height,double gap) {
+        Polygons p;
+        // Use already lower logical layers only. The monotone mapping preserves
+        // this column order; a support gap remains the owner's configured gap.
+        for(const auto& b:deposited) if(b.z<w-1e-5 && b.z>=w-height-gap-.05) append(p,b.footprint);
+        return union_(p);
+    };
+    const auto check=[&](const ExtrusionPath& path,double w,const Polygons& prior,const Polygons& perimeter_anchors) {
+        cancel();
+        const auto xy=path.polyline.to_polyline();if(xy.points.size()<2) return;
+        const auto bb=get_extents(xy).inflated(scale_(path.width*.5+.02));
+        const Vec2d lo=unscale(bb.min),hi=unscale(bb.max);
+        if(lo.x()<domain.xmin-1e-4 || hi.x()>domain.xmax+1e-4 || lo.y()<domain.ymin-1e-4 || hi.y()>domain.ymax+1e-4)
+            throw SlicingError("Underside support paths exceed the bounded field domain; keep planar or reduce support expansion.");
+        if(is_bridge(path.role()) && !field.affine_on_box(lo.x(),hi.x(),lo.y(),hi.y(),w-path.height,w))
+            throw SlicingError("An underside bridge crosses a changing layer direction; no curved air bridge will be exported.");
+        if(is_support(path.role())) {
+            if(field.spacing_bounds(path.height).max_vertical_mm>limits.max_layer+.005)
+                throw SlicingError("Mapped underside support spacing exceeds the configured nozzle layer-height limit.");
+            if(w-path.height>1e-4) {
+                for(const auto& island:union_ex(covered(path)))
+                    if(intersection(to_polygons(island),prior).empty())
+                        throw SlicingError("A generated underside support starts without a lower deposition foundation.");
+            }
+        } else if(is_bridge(path.role())) {
+            Polygons anchor=anchors(w,path.height,std::max(0.,object.config().support_top_z_distance.value));
+            append(anchor,perimeter_anchors);anchor=union_(anchor);
+            if(path.role()==erOverhangPerimeter) {
+                if(intersection(covered(path),anchor).empty())
+                    throw SlicingError("An underside overhang perimeter has no deposited anchor.");
+            } else {
+                const coord_t r=scale_(path.width*.5+.02);
+                for(const Point& point:{xy.points.front(),xy.points.back()}) {
+                    Polygon end(Points{{point.x()-r,point.y()-r},{point.x()+r,point.y()-r},
+                        {point.x()+r,point.y()+r},{point.x()-r,point.y()+r}});
+                    if(intersection(Polygons{end},anchor).empty())
+                        throw SlicingError("An underside bridge is missing a deposited end anchor.");
+                }
+            }
+        }
+    };
+    for(const auto* layer:object.layers()) {
+        const auto prior=anchors(layer->print_z,limits.max_layer,
+            std::max(0.,object.config().support_top_z_distance.value));
+        Polygons perimeter_anchors;
+        for(const auto* r:layer->regions()) if(!r->region().config().is_infill_first.value)
+            paths(r->perimeters,[&](const ExtrusionPath& p){if(!is_bridge(p.role())) append(perimeter_anchors,covered(p));});
+        perimeter_anchors=union_(perimeter_anchors);
+        for(const auto* r:layer->regions()) {
+            paths(r->perimeters,[&](const ExtrusionPath& p){check(p,layer->print_z,prior,{});});
+            paths(r->fills,[&](const ExtrusionPath& p){check(p,layer->print_z,prior,perimeter_anchors);});
+        }
+    }
+    for(const auto* layer:object.support_layers()) {
+        std::map<double,Polygons> by_height;
+        paths(layer->support_fills,[&](const ExtrusionPath& p) {
+            auto [it,inserted]=by_height.try_emplace(p.height);
+            if(inserted) it->second=anchors(layer->print_z,p.height,std::max(0.,object.config().support_bottom_z_distance.value));
+            check(p,layer->print_z,it->second,{});
+        });
+    }
+}
+
 bool PrintObject::refine_curved_regions_for_paths()
 {
     if(!m_config.automatic_layer_strategy.value) return false;
+    if(m_curved_field && m_curved_field->maps_supports()) {
+        validate_underside_deposition(*this,[this]{m_print->throw_if_canceled();});return false;
+    }
     const auto regions=std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field);
     if(!regions) return false;
     std::vector<std::array<double,6>> boxes;
@@ -1269,7 +1359,7 @@ void PrintObject::slice()
     m_curved_mesh.reset();
     m_layer_strategy_decision.clear();
     const bool automatic=m_config.automatic_layer_strategy.value;
-    std::string underside_decision;
+    std::optional<CurvedTransition::UndersideAnalysis> underside_analysis;
     bool use_curved=automatic || m_config.curved_layer_blend.value;
     if (use_curved) {
         std::string error = this->curved_blend_error(automatic);
@@ -1329,9 +1419,8 @@ void PrintObject::slice()
                 const double limit=virtual_tilt_limit_enforced_deg(envelope,pc.nonplanar_gantry_height.value,
                     pc.nonplanar_virtual_max_angle.value,std::hypot(xmax-xmin,ymax-ymin));
                 const double allowed=std::tan(limit*PI/180.);
-                underside_decision=CurvedTransition::underside_analysis_summary(
-                    CurvedTransition::analyze_undersides(triangles,allowed,m_config.support_threshold_angle.value,
-                        [this]{m_print->throw_if_canceled();}));
+                underside_analysis=CurvedTransition::analyze_undersides(triangles,allowed,m_config.support_threshold_angle.value,
+                    [this]{m_print->throw_if_canceled();});
                 const auto target=CurvedTransition::automatic_target(triangles,allowed);
                 bool sparse=false;double solid_depth=INFINITY;
                 for(size_t i=0;i<num_printing_regions();++i) {
@@ -1350,16 +1439,33 @@ void PrintObject::slice()
                     patches.erase(std::remove_if(patches.begin(),patches.end(),[&](const Regions::Patch& p) {
                         return std::find(m_curved_rejected_centres.begin(),m_curved_rejected_centres.end(),Vec2d(p.x,p.y))!=m_curved_rejected_centres.end();
                     }),patches.end());
-                    if(patches.empty()) throw std::invalid_argument("no useful regional roof can blend above the planar bridge/contact and foundation zones");
                     ModelDomain domain{xmin,xmax,ymin,ymax,top,0.};
-                    auto program=std::make_shared<Regions>(domain,std::move(patches),allowed);
+                    std::shared_ptr<Field> program;
+                    if(patches.empty() && selected_planes.empty() && m_config.enable_support.value &&
+                       m_config.support_type.value==stNormalAuto) {
+                        const double support_limit=virtual_tilt_limit_enforced_deg(envelope,pc.nonplanar_gantry_height.value,
+                            pc.nonplanar_virtual_max_angle.value,std::hypot(xmax-xmin+20.,ymax-ymin+20.));
+                        auto underside=select_underside_program(triangles,*underside_analysis,
+                            m_slicing_params.first_object_layer_height,m_config.layer_height.value,limits.max_layer,
+                            std::min(allowed,std::tan(support_limit*PI/180.)),10.,
+                            std::max({0.,m_config.support_top_z_distance.value,m_config.support_bottom_z_distance.value}),
+                            [this]{m_print->throw_if_canceled();});
+                        if(underside) {domain=underside->domain();program=std::move(underside);}
+                    }
+                    if(!program && !patches.empty()) program=std::make_shared<Regions>(domain,std::move(patches),allowed);
+                    if(!program) {
+                        if(underside_analysis->has_candidate && (!m_config.enable_support.value || m_config.support_type.value!=stNormalAuto))
+                            throw std::invalid_argument("an underside direction was found, but applying it currently requires Normal (auto) supports enabled; support settings were retained");
+                        throw std::invalid_argument("no useful regional roof or underside field fits the foundation, support and transition bounds");
+                    }
                     domain.slope_max=program->slope_bound();
                     indexed_triangle_set placed=volume.mesh().its;
                     for(auto& p:placed.vertices) p=(transform*p.cast<double>()).cast<float>();
                     if(transform.linear().determinant()<0.) its_flip_triangles(placed);
                     auto mapped=map_mesh(std::move(placed),*program,[this]{m_print->throw_if_canceled();});
                     double mapped_top=0.;for(const auto& p:mapped.vertices) mapped_top=std::max(mapped_top,double(p.z()));
-                    program->set_reference_top(mapped_top);
+                    if(auto roof=std::dynamic_pointer_cast<Regions>(program)) roof->set_reference_top(mapped_top);
+                    else std::dynamic_pointer_cast<UndersideProgram>(program)->set_reference_top(mapped_top);
                     object_layers=Ramp{}.schedule(*program,m_slicing_params.first_object_layer_height,m_config.layer_height.value,limits.min_layer,limits.max_layer);
                     double step=0.;for(size_t i=0;i+1<object_layers.size();i+=2) step=std::max(step,object_layers[i+1]-object_layers[i]);
                     domain.top_max+=program->spacing_bounds(step).max_vertical_mm+.02;
@@ -1530,9 +1636,17 @@ void PrintObject::slice()
             if (!m_curved_field) throw std::invalid_argument(last_rejection.empty()?"no useful curved direction was found":last_rejection);
             m_slicing_params.object_print_z_max = m_curved_field->reference_top_mm();
             m_slicing_params.object_print_z_uncompensated_max = m_slicing_params.object_print_z_max;
+            if(m_curved_field->maps_supports()) {
+                // Native normal-support layers are generated in logical space.
+                // Bound their physical vertical spacing before generating them.
+                m_slicing_params.max_suport_layer_height=std::min(m_slicing_params.max_suport_layer_height,
+                    limits.max_layer*m_curved_field->jacobian_min());
+            }
             if (automatic) m_layer_strategy_decision="Automatic selection: curved. "+
                 (std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field)?
-                 std::to_string(std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field)->patches().size())+" local roof regions; bridge and support-contact zones remain planar. ":std::string())+
+                 std::to_string(std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field)->patches().size())+" local roof regions; bridge and support-contact zones remain planar. ":
+                 m_curved_field->maps_supports()?"Underside field applied at "+std::to_string(std::dynamic_pointer_cast<const CurvedTransition::UndersideProgram>(m_curved_field)->angle_deg())+
+                 " deg; native normal supports regenerated in the same field. Bridge and foundation checks follow path generation. ":std::string())+
                 "Continuous transitions passed configured geometry and layer-spacing checks; physical clearance and finish are unverified.";
             if(automatic && !m_curved_rejected_centres.empty()) m_layer_strategy_decision+=" "+std::to_string(m_curved_rejected_centres.size())+" regions left planar after inspecting generated bridge/support beads.";
         } catch (const std::invalid_argument& e) {
@@ -1548,7 +1662,8 @@ void PrintObject::slice()
             this->update_layer_height_profile(*this->model_object(),m_slicing_params,layer_height_profile);
             object_layers=generate_object_layers(m_slicing_params,layer_height_profile,m_config.precise_z_height.value);
         }
-        if(automatic && !underside_decision.empty()) m_layer_strategy_decision+=" "+underside_decision;
+        if(automatic && underside_analysis) m_layer_strategy_decision+=" "+CurvedTransition::underside_analysis_summary(
+            *underside_analysis,m_curved_field && m_curved_field->maps_supports());
     } else if (this->is_segment()) {
         // A segment's slicing parameters are sized to its own extent (see
         // update_slicing_parameters), so validating the object's layer-height profile against that

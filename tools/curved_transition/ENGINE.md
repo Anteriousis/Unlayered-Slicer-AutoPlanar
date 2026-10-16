@@ -25,10 +25,11 @@ they do not predict curved print time, support savings or surface quality. The
 selector does not yet optimize strength or independently directed branches.
 Symmetric curved surfaces, unsupported undersides, supports and sparse infill use
 independent compact roof fields instead of requiring a single global direction.
-Downward-face contacts have protected planar zones. Native bridge/support bead
+Roof-region downward-face contacts have protected planar zones. Native bridge/support bead
 boxes are inspected after path generation; intersecting local patches are removed
 and the original solid is re-sliced, up to 64 bounded retries. An object with no
-remaining useful region stays planar. No process setting or printer limit is
+remaining useful roof region tries the bounded underside strategy below before
+falling back to planar. No process setting or printer limit is
 changed. Explicit B/C rotations or directed parts conflict with
 automatic selection and require the user to choose manual mode instead.
 
@@ -59,8 +60,10 @@ Each object requires one closed mesh volume. Multiple different models and copie
 can share a plate and have independent fields, including planar objects. Modifiers,
 painting, variable heights and intersecting authored branch planes remain outside
 this integration. Automatic mode preserves planar bridges and support/contact
-regions and uses native support generation; it does not make curved unsupported
-bridges printable or remove support solely because a roof can curve.
+regions in roof mode and uses native support generation. The underside strategy
+regenerates normal supports in its logical slicing domain and maps them with
+the object. It does not make curved unsupported bridges printable or remove
+support solely because a roof can curve.
 With no planes, a certified rectangular ramp remains a calibration mode blending
 from its flat foundation into its exact roof.
 
@@ -188,14 +191,37 @@ world-XY projections. A 0.0001-degree threshold band excludes float-normal noise
 it is an analysis convention, not a printer allowance or a support-generation rule.
 
 The saved automatic decision and Preview Selection details include this analysis
-even when the roof strategy falls back to planar. The score is a geometric ranking
-heuristic, not support material saved, measured printability, or a bridge-span or
-collision check. A candidate is explicitly **not applied** to an underside: the
-current deposition engine still protects support/contact and bridge zones. The
-analysis neither removes supports nor relaxes any clearance. Implementing such a
-candidate requires regeneration and validation of supports and bridge deposition,
-including the foundation and order of every initial extrusion. Changing the
-support angle invalidates automatic slicing so the report cannot stay stale.
+even when automatic selection falls back to planar. The score is a geometric
+ranking heuristic, not support material saved, measured printability, or a bridge
+span or collision check.
+
+If no roof patch fits and Normal (auto) supports are enabled, automatic mode can
+apply a whole-object underside field. It requires a candidate that does not worsen
+another threshold-relevant surface. The field blends above a flat first layer and
+finishes below all elevated downward faces, with bead, contact-gap and displacement
+slabs reserved. A bounded search reduces its terminal angle when a short part
+cannot finish the transition at the configured maximum. The report identifies
+the actual applied angle; an analyzed maximum is not the deposited angle.
+
+The original solid is mapped and sliced again; native normal supports are generated
+from those same slices. XY is unchanged and each vertical column is monotone.
+The mathematical domain includes a bounded support margin; generated beads outside
+it fail rather than being extrapolated. Support layer steps are restricted by the
+physical-spacing bound. After path generation, support components need lower
+deposition within their height and configured bottom gap. Bridges must occupy a
+fully affine slab, preserving straight strands; their ends need deposited anchors
+(overhang perimeters need deposited overlap). Normal bridge-strand area is retained
+while extrusion uses physical path length. Missing foundations, unanchored bridges,
+changing-direction air bridges and excessive support spacing stop slicing before
+export. These are geometric checks, not sag, bonding or physical-print qualification.
+Support settings and printer clearances are retained. Enabling/disabling supports
+or changing the support angle invalidates the automatic slice.
+
+Tree/manual supports and configurations without a usable foundation transition
+retain the roof strategy or planar fallback. A candidate remains explicitly
+unapplied when no eligible field was built. This is not a universal support-free
+planner; curved air bridges and independently steered underside branches remain
+outside this integration.
 
 For fixed dual-carriage jobs, expanded startup selection tracks both BBL T/H
 and M1020 S/H commands. Parking/unloading or an unsupported selection invalidates

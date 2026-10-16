@@ -1756,7 +1756,7 @@ bool PrintObject::invalidate_state_by_config_options(
             steps.emplace_back(posSlice);
         } else if (opt_key == "enable_support") {
             steps.emplace_back(posSupportMaterial);
-            if (m_config.support_top_z_distance == 0.) {
+            if (m_config.automatic_layer_strategy.value || m_config.support_top_z_distance == 0.) {
             	// Enabling / disabling supports while soluble support interface is enabled.
             	// This changes the bridging logic (bridging enabled without supports, disabled with supports).
             	// Reset everything.

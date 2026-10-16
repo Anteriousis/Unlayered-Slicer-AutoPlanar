@@ -90,6 +90,12 @@ public:
     virtual bool identity_on_box(double,double,double,double,double,double zmax) const {
         return zmax<=m_options.flat_height_mm;
     }
+    // Mapped supports are opt-in to a field whose support/bridge paths are
+    // validated after native generation. Other fields retain planar contacts.
+    virtual bool maps_supports() const { return false; }
+    virtual bool affine_on_box(double x0,double x1,double y0,double y1,double z0,double z1) const {
+        return identity_on_box(x0,x1,y0,y1,z0,z1);
+    }
     virtual double inverse_hessian_bound_box(double,double,double,double,double,double) const {
         return inverse_hessian_bound();
     }

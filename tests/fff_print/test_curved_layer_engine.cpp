@@ -325,7 +325,7 @@ TEST_CASE("Automatic slicing preserves supports and ignores cut sections on a fl
     REQUIRE(print.objects().front()->layer_strategy_decision().find("no useful regional roof")!=std::string::npos);
 }
 
-TEST_CASE("Automatic underside report preserves coupon deposition and supports on planar fallback", "[curved-engine][automatic][undersides]")
+TEST_CASE("Automatic underside slicing regenerates nonplanar coupon deposition and normal supports", "[curved-engine][automatic][undersides]")
 {
     Model input;
     const std::string path=std::string(TEST_DATA_DIR)+"/curved/Centauri_AB_support_surface_coupon.stl";
@@ -342,34 +342,49 @@ TEST_CASE("Automatic underside report preserves coupon deposition and supports o
     config.set_deserialize_strict({{"automatic_layer_strategy","1"}});print.apply(model,config);
     print.process();print.export_gcode(automatic.string(),&auto_preview,nullptr);
     const auto* o=print.objects().front();
-    REQUIRE_FALSE(o->curved_field());REQUIRE(o->config().enable_support.value);
+    REQUIRE(o->curved_field());REQUIRE(o->curved_field()->maps_supports());REQUIRE(o->config().enable_support.value);
     REQUIRE_FALSE(o->support_layers().empty());
     REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==vertices);
     const auto& decision=o->layer_strategy_decision();INFO(decision);
-    REQUIRE(decision.find("Automatic selection: planar.")!=std::string::npos);
+    REQUIRE(decision.find("Automatic selection: curved.")!=std::string::npos);
+    REQUIRE(decision.find("Underside field applied at")!=std::string::npos);
     REQUIRE(decision.find("Underside check:")!=std::string::npos);
     REQUIRE(decision.find("Best uniform-layer candidate:")!=std::string::npos);
-    REQUIRE(decision.find("Candidate not applied")!=std::string::npos);
-    REQUIRE(decision.find("Supports unchanged")!=std::string::npos);
-    // This is an analysis feature: every model/support deposition coordinate,
-    // role and extrusion amount must match ordinary slicing on this fallback.
-    const auto deposition=[](const GCodeProcessorResult& result) {
-        std::vector<std::array<float,5>> paths;
-        for(const auto& move:result.moves) if(move.type==EMoveType::Extrude && move.extrusion_role!=erCustom)
-            paths.push_back({{move.position.x(),move.position.y(),move.position.z(),move.delta_extruder,float(move.extrusion_role)}});
-        return paths;
-    };
-    REQUIRE_FALSE(deposition(auto_preview).empty());
-    REQUIRE(deposition(auto_preview)==deposition(planar_preview));
-    REQUIRE(std::any_of(auto_preview.moves.begin(),auto_preview.moves.end(),[](const auto& m){return m.type==EMoveType::Extrude && is_support(m.extrusion_role);}));
+    REQUIRE(decision.find("Candidate not applied")==std::string::npos);
+    REQUIRE(decision.find("paths regenerated with the object")!=std::string::npos);
+    // A colour tag alone is insufficient: require positive extrusion with
+    // simultaneous XY/Z movement for BOTH model and regenerated support paths.
+    size_t model_tilted=0,support_tilted=0,transition=0,nonplanar=0;
+    Vec3f previous=Vec3f::Zero();
+    for(const auto& move:auto_preview.moves) {
+        if(move.type==EMoveType::Extrude && move.delta_extruder>0. && move.extrusion_role!=erCustom) {
+            if(move.layer_mode==1) ++transition;
+            if(move.layer_mode==2) ++nonplanar;
+            if((move.position.head<2>()-previous.head<2>()).norm()>.01 && std::abs(move.position.z()-previous.z())>.0001) {
+                if(is_support(move.extrusion_role)) ++support_tilted;
+                else ++model_tilted;
+            }
+        }
+        previous=move.position;
+    }
+    REQUIRE(model_tilted>20);REQUIRE(support_tilted>20);REQUIRE(transition>20);REQUIRE(nonplanar>20);
     GCodeProcessor imported;imported.process_file(automatic.string());
     REQUIRE(imported.get_result().layer_strategy_decisions.size()==1);
     REQUIRE(imported.get_result().layer_strategy_decisions.front()==decision);
+    SECTION("Missing support foundation is rejected before export") {
+        auto* mutable_object=const_cast<PrintObject*>(o);
+        REQUIRE(mutable_object->support_layers().size()>1);
+        mutable_object->support_layers().front()->support_fills.clear();
+        REQUIRE_THROWS(mutable_object->refine_curved_regions_for_paths());
+    }
     // A support-angle-only edit used to invalidate supports, but not slicing.
     // The new automatic analysis must be recomputed as well.
     config.set_deserialize_strict({{"support_threshold_angle","20"}});print.apply(model,config);
     REQUIRE_FALSE(Test::gcode(print).empty());
     REQUIRE(print.objects().front()->layer_strategy_decision().find("20.0 deg configured angle")!=std::string::npos);
+    config.set_deserialize_strict({{"support_threshold_angle","30"},{"enable_support","0"}});print.apply(model,config);
+    REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE_FALSE(print.objects().front()->curved_field());
+    REQUIRE_FALSE(print.objects().front()->config().enable_support.value);
 }
 
 TEST_CASE("Automatic slicing checks explicit plane transitions and rejects ambiguous manual rotation", "[curved-engine][automatic]")
@@ -1009,6 +1024,7 @@ TEST_CASE("Imported Preview preserves explicit layer modes and bounded selection
               ";LAYER_MODE:invalid\nG1 X0 Y10 Z0.4 E1\n"
               ";LAYER_MODE:999\nG1 X0 Y0 Z0.4 E1\n";
     }
+    GCodeProcessor::s_IsBBLPrinter=false;
     GCodeProcessor replay;replay.process_file(temp.string());
     std::vector<unsigned> modes;
     for(const auto& move:replay.get_result().moves)

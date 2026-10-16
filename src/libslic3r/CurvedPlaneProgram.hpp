@@ -9,7 +9,7 @@ namespace Slic3r::CurvedTransition {
 // A plane selects the target layer direction at its placed centre height. The
 // ORIGINAL solid is sliced through this field; it is never clipped into chunks.
 // This is shape independent: closed meshes may have curved outlines and holes.
-class PlaneProgram final : public Field {
+class PlaneProgram : public Field {
 public:
     struct Target { double height, gx, gy; };
     struct Blend { double lo, hi, from_x, from_y, delta_x, delta_y; };
@@ -72,6 +72,11 @@ public:
     double max_displacement_mm() const override {return m_amplitude;}
     bool identity_on_box(double,double,double,double,double,double zmax) const override {
         return zmax<=m_blends.front().lo;
+    }
+    bool affine_on_box(double,double,double,double,double zmin,double zmax) const override {
+        // The box is in logical coordinates. |physical_z-logical_z| is
+        // bounded over the entire field, including the bead's bottom face.
+        return zmax<=m_blends.front().lo || zmin-m_amplitude>=m_blends.back().hi;
     }
     double jacobian_min() const override { return m_world_jmin; }
     double jacobian_max() const override { return m_world_jmax; }

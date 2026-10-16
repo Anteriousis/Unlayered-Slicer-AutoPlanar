@@ -137,7 +137,12 @@ public:
         return m_curved_field && m_curved_field->identity_on_box(lo.x()-m_curved_origin.x(),hi.x()-m_curved_origin.x(),
             lo.y()-m_curved_origin.y(),hi.y()-m_curved_origin.y(),z-height,z);
     }
-    void set_curved_path(double w, double width, double height);
+    bool curved_maps_supports() const { return m_curved_field && m_curved_field->maps_supports(); }
+    bool curved_path_is_affine(const Vec2d& lo,const Vec2d& hi,double z,double height) const {
+        return m_curved_field && m_curved_field->affine_on_box(lo.x()-m_curved_origin.x(),hi.x()-m_curved_origin.x(),
+            lo.y()-m_curved_origin.y(),hi.y()-m_curved_origin.y(),z-height,z);
+    }
+    void set_curved_path(double w, double width, double height, bool round_bead=false);
     double curved_max_flow_scale() const;
     Vec2f get_xy_offset() { return Vec2f{m_x_offset, m_y_offset}; };
 
@@ -260,6 +265,7 @@ public:
     double m_curved_max_z=std::numeric_limits<double>::infinity();
     std::vector<double> m_curved_nozzle_heights;
     int m_curved_preview_mode=-1;
+    bool m_curved_round_bead=false;
 	// Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_filament_extruders;
     bool            m_single_extruder_multi_material;

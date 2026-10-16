@@ -60,11 +60,12 @@ void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field
     m_curved_preview_mode=-1;
 }
 
-void GCodeWriter::set_curved_path(double w, double width, double height)
+void GCodeWriter::set_curved_path(double w, double width, double height, bool round_bead)
 {
     if (!m_curved_field) return;
     CurvedTransition::Ramp::bead_area(width,height); // same validity rule as upstream gap fill
     m_curved_w=w; m_curved_width=width; m_curved_height=height;
+    m_curved_round_bead=round_bead;
     // Tilted bead edges can stand above the tip's path centre. Retain the
     // largest rise across fields, instances, planar supports and layer changes.
     m_curved_max_bead_rise=std::max(m_curved_max_bead_rise,
@@ -74,6 +75,7 @@ void GCodeWriter::set_curved_path(double w, double width, double height)
 double GCodeWriter::curved_max_flow_scale() const
 {
     if (!m_curved_field) return 1.;
+    if(m_curved_round_bead) return std::sqrt(1.+m_curved_domain->slope()*m_curved_domain->slope());
     const double h=m_curved_field->spacing_bounds(m_curved_height).max_vertical_mm;
     return std::max(1.,CurvedTransition::Ramp::max_bead_area(m_curved_width,h) /
         CurvedTransition::Ramp::bead_area(m_curved_width,m_curved_height) *
@@ -187,7 +189,9 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
                         m_curved_field->world_z(mx,my,target.z()-m_curved_height);
         const auto gradient=m_curved_field->gradient(mx,my,target.z());
         const double normal_length=std::sqrt(1.+gradient.dx*gradient.dx+gradient.dy*gradient.dy);
-        const double h=dz/normal_length;
+        // A straight bridge uses the native round-strand area. Compressing its
+        // area as if it were a flattened layer bead would change bridge flow.
+        const double h=m_curved_round_bead?m_curved_height:dz/normal_length;
         const int preview_mode=int(m_curved_field->layer_mode(mx,my,midpoint_z));
         if(preview_mode!=m_curved_preview_mode) {
             out+=";LAYER_MODE:"+std::to_string(preview_mode)+"\n";
@@ -195,7 +199,7 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
         }
         // Physical bead area times physical path length. Upstream's dE already
         // contains material/role ratios; preserve those, replacing only geometry.
-        const double ratio=CurvedTransition::Ramp::bead_area(m_curved_width,h)/area0 *
+        const double ratio=(m_curved_round_bead?1.:CurvedTransition::Ramp::bead_area(m_curved_width,h)/area0) *
                            (physical-previous).norm()/(length/count);
         char height_tag[64];
         std::snprintf(height_tag,sizeof(height_tag),";%s%.6f\n",

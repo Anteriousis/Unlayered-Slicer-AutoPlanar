@@ -335,6 +335,14 @@ std::optional<Record> load(const AppConfig &config)
 
 void save(AppConfig &config, const Record &record)
 {
+    // Reported once per decision: saving the same answer again (Preferences reopened, the region
+    // changed) reports nothing, an answer to new notice wording does, and a migrated pre-0.1.6
+    // opt-out is not a decision made now.
+    const std::optional<Record> previous = load(config);
+    if (record.selection_method != "legacy_setting" &&
+        (!previous || previous->diagnostics_preference != record.diagnostics_preference ||
+         previous->notice_version != record.notice_version))
+        config.set(CHOICE_REPORT_KEY, record.enabled() ? "shared" : "private");
     config.set(CONFIG_KEY, serialize(record));
     config.set_bool("usage_diagnostics", diagnostics_permitted(record, false, legal_approvals()));
 }
@@ -370,6 +378,18 @@ bool migrate_legacy_setting(AppConfig &config)
     // On by default before 0.1.6 is not a choice anyone made: nothing is sent until they make one.
     config.set_bool("usage_diagnostics", false);
     return false;
+}
+
+bool queue_earlier_choice_report(AppConfig &config)
+{
+    if (config.get(EARLIER_CHOICE_REPORTED_KEY) == "1")
+        return false;
+    config.set(EARLIER_CHOICE_REPORTED_KEY, "1");
+    const std::optional<Record> record = load(config);
+    if (!record || record->selection_method == "legacy_setting" || !config.get(CHOICE_REPORT_KEY).empty())
+        return false;
+    config.set(CHOICE_REPORT_KEY, record->enabled() ? "shared" : "private");
+    return true;
 }
 
 bool organization_opt_out()

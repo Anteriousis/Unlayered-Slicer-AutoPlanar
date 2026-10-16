@@ -31,7 +31,7 @@ Changes since **0.1.5** (2026-10-13).
   diagnostics are on). See [USAGE_DIAGNOSTICS.md](USAGE_DIAGNOSTICS.md).
 - **The installation id is created only when you choose to share diagnostics**, not at first launch.
   It is kept if you later switch them off, so you can quote it in a privacy request, but no longer sent.
-- **Privacy policy 2026-10-v3** (draft for legal review) is bundled, with the consent wording it sets
+- **Privacy policy 2026-10-v3** is bundled, with the consent wording it sets
   out. Anyone who answered the earlier wording is asked again.
 - **Preferences > Online > Privacy** shows your choice and where you live, switches diagnostics on or off at
   once (switching off deletes anything not yet sent), lets you join or leave the Slicing improvement
@@ -46,6 +46,9 @@ Changes since **0.1.5** (2026-10-13).
   diagnostics are shared.
 - When a copy cannot update itself (for example, one unzipped or run from a build folder rather than
   installed), shared diagnostics now say why.
+- **The update check notes, once, that an update installed and which privacy choice you made**
+  (keep private or share), with no identifier, so we can count both without usage diagnostics.
+  See [USAGE_DIAGNOSTICS.md](USAGE_DIAGNOSTICS.md).
 
 ### Fixed
 
@@ -53,6 +56,9 @@ Changes since **0.1.5** (2026-10-13).
 - Unlayered's own macOS builds are counted as internal copies in usage diagnostics, as on Windows.
 - Long sessions no longer build diagnostics batches too large for the site to accept: batches are
   split by size as well as by number of events.
+- **An update downloaded before the app crashed is no longer lost.** It used to be downloaded
+  again and only installed at the next clean exit. Now the next launch reuses the download (after
+  checking it again) and offers **Install now**.
 
 ## 0.1.5 — 2026-10-13
 

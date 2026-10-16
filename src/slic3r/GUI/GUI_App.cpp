@@ -6420,6 +6420,27 @@ void GUI_App::check_new_version_sf(int by_user)
         return;
     }
 
+    // Two one-time reports, so the site can count them whatever the privacy choice: that an update
+    // just installed (?updated=<the version it came from>) and the privacy choice just made
+    // (?choice=private|shared). No identifier goes with them; the site only adds one to a per-day
+    // counter. Each is cleared once the site has answered, so an offline launch reports it next time.
+    // UNLAYERED_NO_TELEMETRY: an organization that switched diagnostics off is told nothing is shared,
+    // so these are dropped, not kept for later.
+    if (PrivacyConsent::organization_opt_out()) {
+        app_config->set(AutoUpdater::UPDATED_REPORT_KEY, "");
+        app_config->set(PrivacyConsent::CHOICE_REPORT_KEY, "");
+    }
+    std::string reported_updated, reported_choice;
+    if (std::string from = app_config->get(AutoUpdater::UPDATED_REPORT_KEY);
+        std::regex_match(from, version_tag_matcher()))
+        reported_updated = std::move(from);
+    if (std::string choice = app_config->get(PrivacyConsent::CHOICE_REPORT_KEY); choice == "private" || choice == "shared")
+        reported_choice = std::move(choice);
+    if (!reported_updated.empty())
+        url += "&updated=" + reported_updated;
+    if (!reported_choice.empty())
+        url += "&choice=" + reported_choice;
+
     BOOST_LOG_TRIVIAL(info) << "updater: checking " << url;
 
     auto http = Http::get(url);
@@ -6448,9 +6469,22 @@ void GUI_App::check_new_version_sf(int by_user)
           BOOST_LOG_TRIVIAL(error) << format("Error getting: `%1%`: HTTP %2%, %3%", "check_new_version_sf", http_status,
                                              error);
         })
-        .on_complete([this, by_user, check_stable_only, current_version](std::string body, unsigned http_status) {
+        .on_complete([this, by_user, check_stable_only, current_version, reported_updated,
+                      reported_choice](std::string body, unsigned http_status) {
           if (http_status != 200)
             return;
+          if (!reported_updated.empty() || !reported_choice.empty()) {
+              // Delivered. On the GUI thread, like every other app_config write; only if nothing
+              // newer was stored meanwhile.
+              this->CallAfter([this, reported_updated, reported_choice]() {
+                  // this->app_config, the member: the function's local `app_config` is not captured
+                  // and is long gone when this runs (clang refuses it; MSVC compiled it).
+                  if (!reported_updated.empty() && this->app_config->get(AutoUpdater::UPDATED_REPORT_KEY) == reported_updated)
+                      this->app_config->set(AutoUpdater::UPDATED_REPORT_KEY, "");
+                  if (!reported_choice.empty() && this->app_config->get(PrivacyConsent::CHOICE_REPORT_KEY) == reported_choice)
+                      this->app_config->set(PrivacyConsent::CHOICE_REPORT_KEY, "");
+              });
+          }
           try {
             boost::trim(body);
             if (body.empty()) {

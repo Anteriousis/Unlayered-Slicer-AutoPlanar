@@ -274,6 +274,98 @@ TEST_CASE("Privacy: the config record, corrupt config and pre-0.1.6 configs", "[
     }
 }
 
+TEST_CASE("Privacy: each decision is reported once on the update check, and nothing else is", "[Privacy]")
+{
+    SECTION("a first answer, the same answer again, then a change")
+    {
+        AppConfig config;
+        CHECK(config.get(CHOICE_REPORT_KEY).empty());
+        save(config, choice("europe", "", false));
+        CHECK(config.get(CHOICE_REPORT_KEY) == "private");
+        config.set(CHOICE_REPORT_KEY, ""); // the update check delivered it
+        save(config, choice("europe", "", false));
+        CHECK(config.get(CHOICE_REPORT_KEY).empty());
+        save(config, choice("europe", "", true));
+        CHECK(config.get(CHOICE_REPORT_KEY) == "shared");
+    }
+    SECTION("an answer to new notice wording is a decision, even when it is the same answer")
+    {
+        AppConfig config;
+        Record old = choice("europe", "", false);
+        old.notice_version = "2026-10-v2";
+        save(config, old);
+        config.set(CHOICE_REPORT_KEY, "");
+        save(config, choice("europe", "", false));
+        CHECK(config.get(CHOICE_REPORT_KEY) == "private");
+    }
+    SECTION("a pre-0.1.6 opt-out carried over is not a decision made now")
+    {
+        AppConfig config;
+        config.set_bool("usage_diagnostics", false);
+        CHECK(migrate_legacy_setting(config));
+        CHECK(config.get(CHOICE_REPORT_KEY).empty());
+    }
+    SECTION("the report holds only the choice")
+    {
+        AppConfig config;
+        save(config, choice("north_america", "US", true, true, US_APPROVED));
+        CHECK(config.get(CHOICE_REPORT_KEY) == "shared");
+    }
+}
+
+TEST_CASE("Privacy: a decision made before choices were reported is reported once", "[Privacy]")
+{
+    // What a 0.1.6 decision looks like to the next version: a record, no report pending.
+    auto decided_in_016 = [](bool share) {
+        AppConfig config;
+        save(config, choice("europe", "", share));
+        config.set(CHOICE_REPORT_KEY, "");
+        config.set(EARLIER_CHOICE_REPORTED_KEY, "");
+        return config;
+    };
+    SECTION("keep my data private, once")
+    {
+        AppConfig config = decided_in_016(false);
+        CHECK(queue_earlier_choice_report(config));
+        CHECK(config.get(CHOICE_REPORT_KEY) == "private");
+        config.set(CHOICE_REPORT_KEY, ""); // the update check delivered it
+        CHECK_FALSE(queue_earlier_choice_report(config));
+        CHECK(config.get(CHOICE_REPORT_KEY).empty());
+    }
+    SECTION("share")
+    {
+        AppConfig config = decided_in_016(true);
+        CHECK(queue_earlier_choice_report(config));
+        CHECK(config.get(CHOICE_REPORT_KEY) == "shared");
+    }
+    SECTION("no decision yet: nothing now, and save() reports it when it is made")
+    {
+        AppConfig config;
+        CHECK_FALSE(queue_earlier_choice_report(config));
+        CHECK(config.get(CHOICE_REPORT_KEY).empty());
+        save(config, choice("europe", "", false));
+        CHECK(config.get(CHOICE_REPORT_KEY) == "private");
+        config.set(CHOICE_REPORT_KEY, "");
+        CHECK_FALSE(queue_earlier_choice_report(config)); // already ran: no second report
+    }
+    SECTION("a carried-over pre-0.1.6 opt-out is not reported")
+    {
+        AppConfig config;
+        config.set_bool("usage_diagnostics", false);
+        CHECK(migrate_legacy_setting(config));
+        CHECK_FALSE(queue_earlier_choice_report(config));
+        CHECK(config.get(CHOICE_REPORT_KEY).empty());
+    }
+    SECTION("a report already pending is left as it is")
+    {
+        AppConfig config;
+        save(config, choice("europe", "", true));
+        config.set(EARLIER_CHOICE_REPORTED_KEY, "");
+        CHECK_FALSE(queue_earlier_choice_report(config));
+        CHECK(config.get(CHOICE_REPORT_KEY) == "shared");
+    }
+}
+
 TEST_CASE("Privacy: model uploads need their own answer, for one file, once", "[Privacy]")
 {
     ModelUploadRequest q;

@@ -1,6 +1,7 @@
 #include "AppUpdater.hpp"
 
 #include <algorithm>
+#include <vector>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/case_conv.hpp>
@@ -422,13 +423,22 @@ std::optional<AppUpdateAsset> select_platform_asset(const std::vector<AppUpdateA
 #endif
 }
 
+namespace {
+constexpr const char *DOWNLOAD_DIR_PREFIX = "unlayered-update-";
+
+// This process's own download directory. A private subdirectory rather than the temp root: the
+// file name comes from the manifest, and a predictable path in a world-writable directory is a
+// swap target between verify and launch.
+fs::path own_download_dir()
+{
+    return fs::temp_directory_path() / (std::string(DOWNLOAD_DIR_PREFIX) + std::to_string(get_current_pid()));
+}
+} // namespace
+
 bool download_installer(const AppUpdateAsset &asset, fs::path &dest_out, AppUpdateProgressFn progress,
                         std::string &error_out)
 {
-    // A private subdirectory rather than the temp root: the file name comes from the manifest, and
-    // a predictable path in a world-writable directory is a swap target between verify and launch.
-    const fs::path dir = fs::temp_directory_path() /
-                         (std::string("unlayered-update-") + std::to_string(get_current_pid()));
+    const fs::path dir = own_download_dir();
 
     boost::system::error_code ec;
     fs::create_directories(dir, ec);
@@ -729,16 +739,89 @@ bool launch_silent_update(const fs::path &installer, const fs::path &install_dir
 #endif
 }
 
+std::string download_relative_path(const fs::path &installer)
+{
+    const fs::path dir = installer.parent_path();
+    if (installer.filename().empty() || dir.filename().string().rfind(DOWNLOAD_DIR_PREFIX, 0) != 0)
+        return {};
+    return (dir.filename() / installer.filename()).generic_string();
+}
+
+bool claim_previous_installer(const std::string &relative, fs::path &dest_out, std::string &error_out)
+{
+    // Only ever "unlayered-update-<pid>/<file>" under the temp directory: the value comes from the
+    // app config, and is never allowed to point anywhere else.
+    const fs::path rel(relative);
+    std::vector<fs::path> parts(rel.begin(), rel.end());
+    if (rel.has_root_path() || parts.size() != 2 || parts[0].string().rfind(DOWNLOAD_DIR_PREFIX, 0) != 0 ||
+        parts[1] == "." || parts[1] == "..") {
+        error_out = "Not a download this updater made: " + relative;
+        return false;
+    }
+    try {
+        const fs::path source = fs::temp_directory_path() / rel;
+        if (!fs::is_regular_file(source)) {
+            error_out = "The downloaded installer is gone.";
+            return false;
+        }
+        const fs::path dir = own_download_dir();
+        if (source.parent_path() == dir) { // the same process id again
+            dest_out = source;
+            return true;
+        }
+        fs::create_directories(dir);
+        const fs::path target = dir / parts[1];
+        fs::rename(source, target);
+        dest_out = target;
+        return true;
+    } catch (const std::exception &e) {
+        error_out = e.what();
+        return false;
+    }
+}
+
+bool verify_installer(const fs::path &installer, const std::string &sha256, std::string &error_out)
+{
+    if (sha256.empty()) {
+        error_out = "No checksum to compare against.";
+        return false;
+    }
+    std::vector<uint8_t> bytes;
+    {
+        boost::system::error_code ec;
+        const uintmax_t           size = fs::file_size(installer, ec);
+        fs::ifstream              file(installer, std::ios::binary);
+        if (ec || !file.good()) {
+            error_out = (boost::format("Could not open %1%") % installer.string()).str();
+            return false;
+        }
+        bytes.resize(size_t(size));
+        file.read(reinterpret_cast<char *>(bytes.data()), std::streamsize(bytes.size()));
+        if (size_t(file.gcount()) != bytes.size()) {
+            error_out = (boost::format("Could not read %1%") % installer.string()).str();
+            return false;
+        }
+    }
+    const std::string actual = sha256_hex(bytes);
+    if (!boost::algorithm::iequals(actual, sha256)) {
+        error_out = (boost::format("The kept installer does not match its checksum (expected %1%, got %2%).") % sha256 %
+                     actual)
+                        .str();
+        return false;
+    }
+    return true;
+}
+
 void cleanup_stale_download_dirs()
 {
     boost::system::error_code ec;
     const fs::path            tmp  = fs::temp_directory_path(ec);
     if (ec)
         return;
-    const std::string mine = std::string("unlayered-update-") + std::to_string(get_current_pid());
+    const std::string mine = std::string(DOWNLOAD_DIR_PREFIX) + std::to_string(get_current_pid());
     for (fs::directory_iterator it(tmp, ec), end; !ec && it != end; it.increment(ec)) {
         const std::string name = it->path().filename().string();
-        if (name.rfind("unlayered-update-", 0) != 0 || name == mine)
+        if (name.rfind(DOWNLOAD_DIR_PREFIX, 0) != 0 || name == mine)
             continue;
         // Fails harmlessly while an installer from that directory is still running.
         boost::system::error_code rm_ec;
@@ -753,7 +836,7 @@ void cleanup_download_dir(const fs::path &installer)
     boost::system::error_code ec;
     const fs::path            dir = installer.parent_path();
     // Only ever remove a directory this module created.
-    if (dir.filename().string().rfind("unlayered-update-", 0) == 0)
+    if (dir.filename().string().rfind(DOWNLOAD_DIR_PREFIX, 0) == 0)
         fs::remove_all(dir, ec);
 }
 

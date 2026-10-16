@@ -101,6 +101,21 @@ bool launch_installer(const boost::filesystem::path &installer, std::string &err
 bool launch_silent_update(const boost::filesystem::path &installer, const boost::filesystem::path &install_dir,
                           bool relaunch, std::string &error_out);
 
+// Where download_installer() put `installer`, relative to the temp directory
+// ("unlayered-update-<pid>/<file>"), for keeping across a restart. Empty if it is not one of ours.
+std::string download_relative_path(const boost::filesystem::path &installer);
+
+// Takes over an installer an earlier session downloaded but never ran (it crashed or was ended
+// before it could hand over, or another copy was open): `relative` is what download_relative_path()
+// gave that session. The file moves into this process's download directory, so
+// cleanup_stale_download_dirs() keeps it. Quick; call it before that sweep. The file is not trusted
+// yet: check it with verify_installer().
+bool claim_previous_installer(const std::string &relative, boost::filesystem::path &dest_out, std::string &error_out);
+
+// Whether the file on disk matches the sha256 the update manifest declared. Reads the whole file,
+// so call it from a worker thread.
+bool verify_installer(const boost::filesystem::path &installer, const std::string &sha256, std::string &error_out);
+
 // Best-effort removal of a directory left behind by download_installer(). Never throws.
 void cleanup_download_dir(const boost::filesystem::path &installer);
 

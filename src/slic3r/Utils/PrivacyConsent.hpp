@@ -38,6 +38,13 @@ constexpr const char *NOTICE_VERSION = "2026-10-v3";
 constexpr const char *CONFIG_KEY = "privacy_consent";
 // Set once migrate_legacy_setting() has looked at a pre-0.1.6 config.
 constexpr const char *MIGRATED_KEY = "privacy_consent_migrated";
+// "private" or "shared": a choice the person just made, which the next update check reports once
+// as ?choice= (GUI_App::check_new_version_sf). Anonymous by construction: with diagnostics off the
+// check carries no install id, it never carries an account, and the site only adds one to a per-day
+// counter of platform, version and choice. Cleared once the site has answered.
+constexpr const char *CHOICE_REPORT_KEY = "update_check_report_choice";
+// Set once queue_earlier_choice_report() has run on this installation.
+constexpr const char *EARLIER_CHOICE_REPORTED_KEY = "update_check_report_choice_earlier";
 
 // Decisions that belong to counsel, not to code. A flag can only be turned on by changing
 // legal_approvals() in PrivacyConsent.cpp, in a reviewed commit: none of them is a user or
@@ -128,7 +135,8 @@ std::optional<Record> parse(const std::string &json_text);
 std::string           serialize(const Record &record);
 
 std::optional<Record> load(const AppConfig &config);
-// Writes the record and the "usage_diagnostics" mirror. Does not save the config file.
+// Writes the record and the "usage_diagnostics" mirror. Does not save the config file. A new
+// decision (not a carried-over pre-0.1.6 setting) also sets CHOICE_REPORT_KEY.
 void save(AppConfig &config, const Record &record);
 void clear(AppConfig &config);
 
@@ -137,6 +145,13 @@ void clear(AppConfig &config);
 // opt-out survives the update. Anything else (the old default "true") is NOT consent and leaves
 // no record: the person is asked. Returns true when it wrote a record.
 bool migrate_legacy_setting(AppConfig &config);
+
+// One time, at start-up, after migrate_legacy_setting(): a decision made before the update check
+// reported choices (0.1.6 itself) is queued for that report once, like a decision made now, so a
+// "keep my data private" from 0.1.6 is counted when the person updates. Not a carried-over
+// pre-0.1.6 opt-out, and nothing when no decision exists yet (save() reports that one when it is
+// made). Returns true when it queued a report.
+bool queue_earlier_choice_report(AppConfig &config);
 
 // UNLAYERED_NO_TELEMETRY set to anything non-empty: optional diagnostics are off on this machine,
 // whatever any record says.

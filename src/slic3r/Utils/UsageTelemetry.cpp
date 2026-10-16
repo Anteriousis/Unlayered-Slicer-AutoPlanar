@@ -961,6 +961,7 @@ void start(AppConfig &config, bool first_run)
     // A config from before 0.1.6 keeps an explicit "off" as a declined choice; the old default "on"
     // is not a choice, so those installations are asked (GUI_App) and send nothing until then.
     PrivacyConsent::migrate_legacy_setting(config);
+    PrivacyConsent::queue_earlier_choice_report(config);
     s.on      = PrivacyConsent::diagnostics_permitted(PrivacyConsent::load(config), s.env_off, PrivacyConsent::legal_approvals());
     s.program = s.on && PrivacyConsent::program_permitted(PrivacyConsent::load(config), s.env_off, PrivacyConsent::legal_approvals());
     load_install_id_locked(s, config);

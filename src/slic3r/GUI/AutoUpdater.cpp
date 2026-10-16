@@ -55,6 +55,11 @@ constexpr const char *WHATS_NEW_KEY = "whats_new_version";
 // diagnostics have shut down, so the next launch reports them (update_applied).
 constexpr const char *UPDATE_FROM_KEY   = "update_from_version";
 constexpr const char *UPDATE_LAUNCH_KEY = "update_launch_result";
+// Where that update's installer was downloaded ("unlayered-update-<pid>/<file>" under the temp
+// directory) and its sha256, so a session that ended before installing it does not cost the next
+// one a second download.
+constexpr const char *PENDING_INSTALLER_KEY = "pending_update_installer";
+constexpr const char *PENDING_SHA256_KEY    = "pending_update_sha256";
 
 // A download failure as a fixed category: the error text itself can hold file paths.
 std::string download_failure_reason(const std::string &error, unsigned http_status)
@@ -238,29 +243,53 @@ void AutoUpdater::notify(const std::string &text, const std::string &link, std::
 void AutoUpdater::on_startup()
 {
     m_account->load();
-    cleanup_stale_download_dirs();
 
     // Did the previous session hand over to an installer, and did it work?
     if (AppConfig *config = m_app.app_config) {
         const std::string pending = config->get(PENDING_UPDATE_KEY);
         if (!pending.empty()) {
+            const std::string launch    = config->get(UPDATE_LAUNCH_KEY);
+            const std::string installer = config->get(PENDING_INSTALLER_KEY);
+            const std::string sha256    = config->get(PENDING_SHA256_KEY);
+            const std::string from      = config->get(UPDATE_FROM_KEY);
             config->set(PENDING_UPDATE_KEY, "");
             // Usage diagnostics: did the update the previous session downloaded actually install?
             UsageTelemetry::record("update_applied", {{"to", pending},
-                                                      {"from", config->get(UPDATE_FROM_KEY)},
+                                                      {"from", from},
                                                       {"outcome", pending == UNLAYERED_VERSION ? "updated" : "not_updated"},
-                                                      {"launch", config->get(UPDATE_LAUNCH_KEY)}});
+                                                      {"launch", launch}});
             config->set(UPDATE_FROM_KEY, "");
             config->set(UPDATE_LAUNCH_KEY, "");
+            config->set(PENDING_INSTALLER_KEY, "");
+            config->set(PENDING_SHA256_KEY, "");
             if (pending == UNLAYERED_VERSION) {
                 BOOST_LOG_TRIVIAL(info) << "updater: now running the update to " << pending;
+                if (!from.empty())
+                    config->set(UPDATED_REPORT_KEY, from);
                 notify((boost::format(_u8L("%1% was updated to %2%.")) % SLIC3R_APP_FULL_NAME % pending).str());
             } else {
                 BOOST_LOG_TRIVIAL(warning) << "updater: an update to " << pending << " was due but this is still "
-                                           << UNLAYERED_VERSION << "; it will be offered again";
+                                           << UNLAYERED_VERSION << " (" << launch << ")";
+                // The installer never ran: the session ended before it could hand over (a crash, or
+                // the process was ended), or another copy was still open. Its download is still on
+                // disk; take it over before the sweep below removes it. Only for a version newer than
+                // this one: a newer copy may have been installed by hand in the meantime.
+                const auto due         = Semver::parse(pending);
+                const auto current     = Semver::parse(UNLAYERED_VERSION);
+                const bool interrupted = launch == "not_launched";
+                if ((interrupted || launch == "other_instance_running") && due && current && *current < *due &&
+                    !installer.empty() && !sha256.empty()) {
+                    fs::path    claimed;
+                    std::string error;
+                    if (claim_previous_installer(installer, claimed, error))
+                        reuse_download(pending, claimed, sha256, interrupted);
+                    else
+                        BOOST_LOG_TRIVIAL(info) << "updater: cannot reuse the previous download: " << error;
+                }
             }
         }
     }
+    cleanup_stale_download_dirs();
 
     // Stealth mode keeps only the anonymous update check. The sign-in is re-validated lazily instead,
     // by the download itself, which forgets a token the site refuses.
@@ -402,7 +431,20 @@ bool AutoUpdater::handle_new_version(const std::string &version, const std::stri
         return false;
     }
 
+    if (m_version == version && m_state == State::Ready && !download->sha256.empty() &&
+        !boost::algorithm::iequals(download->sha256, m_installer_sha256)) {
+        // Published again since that installer was downloaded (a reused one from the last session):
+        // download the one the site has now.
+        BOOST_LOG_TRIVIAL(info) << "updater: " << version << " was published again; downloading it again";
+        m_state = State::Idle;
+    }
     if (m_version == version && m_state != State::Idle) {
+        if (m_reusing)
+            m_download = *download; // should the kept installer fail its check, download this one
+        if (m_reused && !by_user) {
+            offered("reused_download"); // the check found what the previous session already downloaded
+            m_reused = false;
+        }
         if (by_user) {
             if (m_state == State::Ready)
                 notify_ready();
@@ -509,15 +551,8 @@ void AutoUpdater::on_download_finished(bool ok, const fs::path &installer, const
         UsageTelemetry::record("update_download", std::move(props));
     }
     if (ok) {
-        m_installer = installer;
-        m_state     = State::Ready;
-        if (m_app.app_config) {
-            m_app.app_config->set(PENDING_UPDATE_KEY, m_version);
-            m_app.app_config->set(UPDATE_FROM_KEY, UNLAYERED_VERSION);
-            m_app.app_config->set(UPDATE_LAUNCH_KEY, "not_launched"); // until on_app_exit() says otherwise
-        }
-        BOOST_LOG_TRIVIAL(info) << "updater: " << m_version << " is ready at " << installer.string();
-        notify_ready();
+        m_installer_sha256 = m_download.sha256;
+        mark_ready(installer, false);
         return;
     }
 
@@ -543,8 +578,86 @@ void AutoUpdater::on_download_finished(bool ok, const fs::path &installer, const
     // and Help > Check for Updates is always there.
 }
 
-void AutoUpdater::notify_ready()
+void AutoUpdater::reuse_download(const std::string &version, const fs::path &installer, const std::string &sha256,
+                                 bool interrupted)
 {
+    m_install_dir = self_updatable_install_dir();
+    if (!m_install_dir) {
+        cleanup_download_dir(installer); // the update check decides what this copy can do
+        return;
+    }
+    m_state            = State::Downloading; // so the update check does not start a second download
+    m_version          = version;
+    m_download         = {};
+    m_installer_sha256 = sha256;
+    m_reusing          = true;
+    BOOST_LOG_TRIVIAL(info) << "updater: checking the " << version << " installer the last session downloaded";
+
+    auto alive = m_alive;
+    std::thread([this, alive, version, installer, sha256, interrupted]() {
+        std::string error;
+        const bool  ok = verify_installer(installer, sha256, error);
+        wxGetApp().CallAfter([this, alive, ok, version, installer, error, interrupted]() {
+            if (*alive)
+                on_reuse_checked(ok, version, installer, error, interrupted);
+        });
+    }).detach();
+}
+
+void AutoUpdater::on_reuse_checked(bool ok, const std::string &version, const fs::path &installer,
+                                   const std::string &error, bool interrupted)
+{
+    m_reusing = false;
+    // The update check may have answered meanwhile, with an installer published since.
+    const bool republished = !m_download.url.empty() && !m_download.sha256.empty() &&
+                             !boost::algorithm::iequals(m_download.sha256, m_installer_sha256);
+    if (ok && !republished) {
+        if (m_download.url.empty())
+            m_reused = true; // handle_new_version() reports it when the update check answers
+        else // the check has already answered
+            UsageTelemetry::record("update_offered", {{"to", version},
+                                                      {"by_user", false},
+                                                      {"signed_in", m_account->signed_in()},
+                                                      {"action", "reused_download"}});
+        mark_ready(installer, interrupted);
+        return;
+    }
+    if (!ok)
+        BOOST_LOG_TRIVIAL(warning) << "updater: not reusing the " << version << " installer: " << error;
+    cleanup_download_dir(installer);
+    m_state = State::Idle;
+    if (!m_download.url.empty())
+        start_download();
+    // Otherwise the update check, still to come, downloads it the usual way.
+}
+
+void AutoUpdater::mark_ready(const fs::path &installer, bool interrupted)
+{
+    m_installer = installer;
+    m_state     = State::Ready;
+    if (m_app.app_config) {
+        m_app.app_config->set(PENDING_UPDATE_KEY, m_version);
+        m_app.app_config->set(UPDATE_FROM_KEY, UNLAYERED_VERSION);
+        m_app.app_config->set(UPDATE_LAUNCH_KEY, "not_launched"); // until on_app_exit() says otherwise
+        m_app.app_config->set(PENDING_INSTALLER_KEY, download_relative_path(installer));
+        m_app.app_config->set(PENDING_SHA256_KEY, m_installer_sha256);
+    }
+    BOOST_LOG_TRIVIAL(info) << "updater: " << m_version << " is ready at " << installer.string();
+    notify_ready(interrupted);
+}
+
+void AutoUpdater::notify_ready(bool interrupted)
+{
+    if (interrupted) {
+        // The last session crashed or was ended with this update downloaded, so it never installed.
+        // Someone whose sessions keep ending that way would otherwise never get it.
+        notify((boost::format(_u8L("%1% %2% did not install because the app closed unexpectedly. Install it now, or "
+                                   "it installs when you close the app.")) %
+                SLIC3R_APP_FULL_NAME % m_version)
+                   .str(),
+               _u8L("Install now"), [this]() { restart_to_update(); });
+        return;
+    }
     notify((boost::format(_u8L("%1% %2% is ready. It installs when you close the app.")) % SLIC3R_APP_FULL_NAME %
             m_version)
                .str(),

@@ -24,6 +24,7 @@ add_executable(${_TEST_NAME}_tests
     test_privacy_consent.cpp
     test_app_updater_macos.cpp
     test_app_updater_platform.cpp
+    test_app_updater_reuse.cpp
     ../fff_print/test_helpers.cpp
     )
 

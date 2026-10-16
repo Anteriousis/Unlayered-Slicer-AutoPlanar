@@ -4288,6 +4288,9 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
     case libvgcode::EViewType::ActualVolumetricFlowRate: { append_range(m_viewer.get_color_range(libvgcode::EViewType::ActualVolumetricFlowRate), 2); break; }
     case libvgcode::EViewType::LayerMode:
     {
+        // This categorical view has one column and no earlier header case to
+        // populate offsets. Indexing the default-empty vector crashes Preview.
+        offsets={0.f};
         append_headers({{_u8L("Layer mode"),offsets[0]}});
         const std::array<std::string,3> names={_u8L("Planar"),_u8L("Transition"),_u8L("Nonplanar")};
         for(size_t i=0;i<names.size();++i)

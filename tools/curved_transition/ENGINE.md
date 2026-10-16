@@ -174,6 +174,25 @@ guarantee.
 
 ## Motion and Preview
 
+Automatic selection now checks the undersides as well as the roofs. It excludes
+bed-contact faces, clips triangles crossing the bed, and measures elevated
+downward surfaces against the configured support angle. A zero/automatic angle
+uses a labelled 30-degree analysis reference; it does not replace upstream's
+bead-overlap rule. At most 128 uniform layer-direction candidates are compared,
+including diagonal and dominant facet directions, within the conservative
+all-direction configured slope bound. Area-weighted angular-deficit scores use
+unchanged world-XY projected area, and opposing-underside regressions are reported.
+
+The saved automatic decision and Preview Selection details include this analysis
+even when the roof strategy falls back to planar. The score is a geometric ranking
+heuristic, not support material saved, measured printability, or a bridge-span or
+collision check. A candidate is explicitly **not applied** to an underside: the
+current deposition engine still protects support/contact and bridge zones. The
+analysis neither removes supports nor relaxes any clearance. Implementing such a
+candidate requires regeneration and validation of supports and bridge deposition,
+including the foundation and order of every initial extrusion. Changing the
+support angle invalidates automatic slicing so the report cannot stay stale.
+
 For fixed dual-carriage jobs, expanded startup selection tracks both BBL T/H
 and M1020 S/H commands. Parking/unloading or an unsupported selection invalidates
 an earlier selection; out-of-range IDs are rejected before numeric conversion.

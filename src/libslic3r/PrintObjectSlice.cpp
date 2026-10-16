@@ -19,6 +19,7 @@
 #include "ExtrusionEntityCollection.hpp"
 #include "CurvedFixedNozzle.hpp"
 #include "AutomaticCurvedSelection.hpp"
+#include "UndersideAnalysis.hpp"
 #include "AutoPlanes.hpp"
 //BBS
 #include "ShortestPath.hpp"
@@ -1268,6 +1269,7 @@ void PrintObject::slice()
     m_curved_mesh.reset();
     m_layer_strategy_decision.clear();
     const bool automatic=m_config.automatic_layer_strategy.value;
+    std::string underside_decision;
     bool use_curved=automatic || m_config.curved_layer_blend.value;
     if (use_curved) {
         std::string error = this->curved_blend_error(automatic);
@@ -1327,6 +1329,9 @@ void PrintObject::slice()
                 const double limit=virtual_tilt_limit_enforced_deg(envelope,pc.nonplanar_gantry_height.value,
                     pc.nonplanar_virtual_max_angle.value,std::hypot(xmax-xmin,ymax-ymin));
                 const double allowed=std::tan(limit*PI/180.);
+                underside_decision=CurvedTransition::underside_analysis_summary(
+                    CurvedTransition::analyze_undersides(triangles,allowed,m_config.support_threshold_angle.value,
+                        [this]{m_print->throw_if_canceled();}));
                 const auto target=CurvedTransition::automatic_target(triangles,allowed);
                 bool sparse=false;double solid_depth=INFINITY;
                 for(size_t i=0;i<num_printing_regions();++i) {
@@ -1543,6 +1548,7 @@ void PrintObject::slice()
             this->update_layer_height_profile(*this->model_object(),m_slicing_params,layer_height_profile);
             object_layers=generate_object_layers(m_slicing_params,layer_height_profile,m_config.precise_z_height.value);
         }
+        if(automatic && !underside_decision.empty()) m_layer_strategy_decision+=" "+underside_decision;
     } else if (this->is_segment()) {
         // A segment's slicing parameters are sized to its own extent (see
         // update_slicing_parameters), so validating the object's layer-height profile against that

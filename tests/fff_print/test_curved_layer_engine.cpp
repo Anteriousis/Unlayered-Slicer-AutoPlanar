@@ -325,6 +325,53 @@ TEST_CASE("Automatic slicing preserves supports and ignores cut sections on a fl
     REQUIRE(print.objects().front()->layer_strategy_decision().find("no useful regional roof")!=std::string::npos);
 }
 
+TEST_CASE("Automatic underside report preserves coupon deposition and supports on planar fallback", "[curved-engine][automatic][undersides]")
+{
+    Model input;
+    const std::string path=std::string(TEST_DATA_DIR)+"/curved/Centauri_AB_support_surface_coupon.stl";
+    REQUIRE(load_stl(path.c_str(),&input));REQUIRE(input.objects.size()==1);
+    const auto& mesh=input.objects.front()->volumes.front()->mesh();
+    auto config=curved_config();config.set_deserialize_strict({{"curved_layer_blend","0"},
+        {"automatic_layer_strategy","0"},{"enable_support","1"},{"support_threshold_angle","30"},
+        {"support_type","normal(auto)"},{"support_style","grid"}});
+    Print print;Model model;Test::init_print({mesh},print,model,config);
+    const auto vertices=model.objects.front()->volumes.front()->mesh().its.vertices;
+    ScopedTemporaryFile baseline(".gcode"),automatic(".gcode");
+    GCodeProcessorResult planar_preview,auto_preview;
+    print.process();print.export_gcode(baseline.string(),&planar_preview,nullptr);
+    config.set_deserialize_strict({{"automatic_layer_strategy","1"}});print.apply(model,config);
+    print.process();print.export_gcode(automatic.string(),&auto_preview,nullptr);
+    const auto* o=print.objects().front();
+    REQUIRE_FALSE(o->curved_field());REQUIRE(o->config().enable_support.value);
+    REQUIRE_FALSE(o->support_layers().empty());
+    REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==vertices);
+    const auto& decision=o->layer_strategy_decision();INFO(decision);
+    REQUIRE(decision.find("Automatic selection: planar.")!=std::string::npos);
+    REQUIRE(decision.find("Underside check:")!=std::string::npos);
+    REQUIRE(decision.find("Best uniform-layer candidate:")!=std::string::npos);
+    REQUIRE(decision.find("Candidate not applied")!=std::string::npos);
+    REQUIRE(decision.find("Supports unchanged")!=std::string::npos);
+    // This is an analysis feature: every model/support deposition coordinate,
+    // role and extrusion amount must match ordinary slicing on this fallback.
+    const auto deposition=[](const GCodeProcessorResult& result) {
+        std::vector<std::array<float,5>> paths;
+        for(const auto& move:result.moves) if(move.type==EMoveType::Extrude && move.extrusion_role!=erCustom)
+            paths.push_back({{move.position.x(),move.position.y(),move.position.z(),move.delta_extruder,float(move.extrusion_role)}});
+        return paths;
+    };
+    REQUIRE_FALSE(deposition(auto_preview).empty());
+    REQUIRE(deposition(auto_preview)==deposition(planar_preview));
+    REQUIRE(std::any_of(auto_preview.moves.begin(),auto_preview.moves.end(),[](const auto& m){return m.type==EMoveType::Extrude && is_support(m.extrusion_role);}));
+    GCodeProcessor imported;imported.process_file(automatic.string());
+    REQUIRE(imported.get_result().layer_strategy_decisions.size()==1);
+    REQUIRE(imported.get_result().layer_strategy_decisions.front()==decision);
+    // A support-angle-only edit used to invalidate supports, but not slicing.
+    // The new automatic analysis must be recomputed as well.
+    config.set_deserialize_strict({{"support_threshold_angle","20"}});print.apply(model,config);
+    REQUIRE_FALSE(Test::gcode(print).empty());
+    REQUIRE(print.objects().front()->layer_strategy_decision().find("20.0 deg configured angle")!=std::string::npos);
+}
+
 TEST_CASE("Automatic slicing checks explicit plane transitions and rejects ambiguous manual rotation", "[curved-engine][automatic]")
 {
     auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"}});

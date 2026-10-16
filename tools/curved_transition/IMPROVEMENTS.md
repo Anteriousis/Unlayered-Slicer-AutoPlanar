@@ -7,6 +7,11 @@ is the unsliced pair of small 4-degree ramps; the owner slices and prints it.
 
 ## Current source changes
 
+- Underside analysis: elevated downward facets, bed clipping, bounded cardinal
+  and diagonal layer-direction comparisons, configured-angle/reference labels,
+  area-weighted angular-deficit and opposing-overhang regression reports. Saved
+  selection reasons state that these candidates are not applied; support/bridge
+  regeneration and anchoring remain required before underside-changing paths.
 - Layer-mode Preview: explicit native planar/transition/nonplanar tags, a colour
   legend, local inclination in the position inspector, and expandable selection
   decisions. Old files without mode tags are not assigned invented transitions.

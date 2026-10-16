@@ -1,5 +1,14 @@
 # Regional native slicing fixture
 
+`Centauri_AB_support_surface_coupon.stl` is the original 52 mm wide five-fin
+support comparison coupon from this project's October 10 trial. Its physical
+undersides are 35, 30, 27.5, 25 and 20 degrees above horizontal. It exercises
+underside analysis on the actual reported geometry, plus unchanged planar
+deposition/supports and report invalidation after a support-angle edit. It is
+not a validated nonplanar support-reduction recipe.
+
+SHA256: `7131ec3795d82990e7046c5a67bdd56f79b82c51c3130a36a0e25143076a73dd`.
+
 `MCT-1_Centauri_5deg.stl` is the 76 x 76 x 28 mm Centauri variant of the
 repository's parametric MCT-1 totem, generated with rung angles
 `1,2,3,4,5,6,8,10` degrees and shelf undersides `15,20,25,30,35,40,45,55`

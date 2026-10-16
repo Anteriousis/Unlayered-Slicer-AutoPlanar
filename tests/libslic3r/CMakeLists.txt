@@ -19,6 +19,7 @@ add_executable(${_TEST_NAME}_tests
     test_curved_ramp.cpp
     test_curved_plane_program.cpp
     test_curved_regions.cpp
+    test_underside_analysis.cpp
     test_segment_support_bounds.cpp
     test_config_variant_expansion.cpp
     test_toolordering_nozzle_group.cpp

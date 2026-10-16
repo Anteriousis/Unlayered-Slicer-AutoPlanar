@@ -1818,6 +1818,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "tree_support_angle_slow"
             || opt_key == "tree_support_wall_count") {
             steps.emplace_back(posSupportMaterial);
+            // Automatic selection's underside report depends on this angle,
+            // even when the selected deposition field remains planar.
+            if(opt_key=="support_threshold_angle" && m_config.automatic_layer_strategy.value)
+                steps.emplace_back(posSlice);
         } else if (
                opt_key == "bottom_shell_layers"
             || opt_key == "top_shell_layers") {

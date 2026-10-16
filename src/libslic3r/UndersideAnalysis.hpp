@@ -16,6 +16,7 @@ struct UndersideAnalysis {
         double gx=0.,gy=0.; // layer plane z=gx*x+gy*y, NOT a rotated nozzle
         double angular_deficit_mm2=0.;
         double below_threshold_mm2=0.;
+        double minimum_angle_deg=90.;
         double improved_mm2=0.,worsened_mm2=0.,worst_regression_deg=0.;
     };
     size_t facets=0,candidates_checked=0;
@@ -87,6 +88,7 @@ inline UndersideAnalysis analyze_undersides(const std::vector<Ramp::Triangle>& m
             checkpoint();
             const double dot=(-f.nx*gx-f.ny*gy+f.nz)/length;
             const double angle=dot<0.?std::acos(std::clamp(-dot,0.,1.))*180./pi:90.;
+            c.minimum_angle_deg=std::min(c.minimum_angle_deg,angle);
             // Float STL normals at a nominal threshold can differ by a few
             // millionths of a degree. Avoid counting whole facets on that noise.
             if(angle<report.threshold_deg-angle_tolerance) {
@@ -146,9 +148,11 @@ inline std::string underside_analysis_summary(const UndersideAnalysis& r)
         <<(r.explicit_threshold?"configured angle":"analysis reference (automatic support uses bead overlap)")<<".";
     if(r.has_candidate) {
         const double slope=std::hypot(r.best.gx,r.best.gy);
+        const double ux=std::abs(r.best.gx/slope)<1e-4?0.:r.best.gx/slope;
+        const double uy=std::abs(r.best.gy/slope)<1e-4?0.:r.best.gy/slope;
         s<<" Best uniform-layer candidate: "<<std::atan(slope)*180./3.14159265358979323846
-         <<" deg, uphill XY ("<<r.best.gx/slope<<", "<<r.best.gy/slope<<"); angular-deficit index "
-         <<100.*(1.-r.best.angular_deficit_mm2/r.planar.angular_deficit_mm2)<<"% lower; "
+         <<" deg, uphill XY ("<<ux<<", "<<uy<<"); shallowest underside angle to its layer plane "
+         <<r.planar.minimum_angle_deg<<" -> "<<r.best.minimum_angle_deg<<" deg; "
          <<r.best.worsened_mm2<<" mm2 of relevant undersides worsen.";
         s<<" Candidate not applied: underside-changing layers require support/bridge generation and anchoring checks.";
     } else s<<" No lower angular-deficit candidate within the configured angle bound.";

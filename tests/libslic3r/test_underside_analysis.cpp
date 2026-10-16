@@ -50,6 +50,8 @@ TEST_CASE("Underside candidates use the improving signed direction and stay in t
     REQUIRE(r.projected_area_mm2==Catch::Approx(50.));
     REQUIRE(r.planar.angular_deficit_mm2==Catch::Approx(50./3.));
     REQUIRE(r.best.angular_deficit_mm2==Catch::Approx(50./6.));
+    REQUIRE(r.planar.minimum_angle_deg==Catch::Approx(20.));
+    REQUIRE(r.best.minimum_angle_deg==Catch::Approx(25.));
     REQUIRE(r.best.gx==Catch::Approx(-allowed));REQUIRE(std::abs(r.best.gy)<1e-10);
     REQUIRE(r.best.worsened_mm2==0.);REQUIRE(r.best.improved_mm2==Catch::Approx(50.));
     REQUIRE(std::hypot(r.best.gx,r.best.gy)<=allowed+1e-12);

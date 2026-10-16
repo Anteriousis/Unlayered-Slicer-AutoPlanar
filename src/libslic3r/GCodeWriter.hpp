@@ -259,6 +259,7 @@ public:
     double m_curved_common_max_z=std::numeric_limits<double>::infinity();
     double m_curved_max_z=std::numeric_limits<double>::infinity();
     std::vector<double> m_curved_nozzle_heights;
+    int m_curved_preview_mode=-1;
 	// Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_filament_extruders;
     bool            m_single_extruder_multi_material;

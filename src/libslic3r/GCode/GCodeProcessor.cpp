@@ -2554,6 +2554,7 @@ void GCodeProcessorResult::reset() {
     moves.clear();
     // UNLAYERED_MOD: index 0 must always exist and always be straight up.
     tool_axes.assign(1, Vec3f(0.0f, 0.0f, 1.0f));
+    layer_strategy_decisions.clear();
     virtual_5axis = false;
     lines_ends.clear();
     printable_area = Pointfs();
@@ -3643,6 +3644,8 @@ void GCodeProcessor::reset()
     // UNLAYERED_MOD
     m_tool_axis_id = 0;
     m_has_tool_axis_tag = false;
+    m_layer_mode = 0;
+    m_has_layer_mode_tag = false;
     m_last_bc_deg = { -90.0f, 0.0f };
     m_mm3_per_mm = 0.0f;
     m_travel_dist = 0.0f;
@@ -4324,6 +4327,12 @@ bool GCodeProcessor::tool_axis_is_vertical() const
 
 void GCodeProcessor::process_tags(const std::string_view comment, bool producers_enabled)
 {
+    if(boost::starts_with(comment," layer_strategy: ")) {
+        // Untrusted G-code text is display data. Bound it before retaining it.
+        if(m_result.layer_strategy_decisions.size()<256)
+            m_result.layer_strategy_decisions.emplace_back(comment.substr(17,2048));
+        return;
+    }
     // producers tags
     if (producers_enabled && process_producers_tags(comment))
         return;
@@ -4463,6 +4472,14 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     // since the last extrusion, which on nonplanar G-code jumping between islands is tens of mm, and
     // the viewer drew each bead that tall along the tool axis: giant blades sticking out of the part.
     if (!producers_enabled || m_producer == EProducer::OrcaSlicer || m_producer == EProducer::Unknown) {
+        // Native curved fields tag their mode explicitly. Invalid input resets
+        // to unknown so a stale curved state cannot bleed into later paths.
+        if (boost::starts_with(comment, "LAYER_MODE:")) {
+            unsigned int mode=0;
+            m_layer_mode=parse_number(comment.substr(11),mode) && mode<=2?uint8_t(mode):uint8_t(255);
+            m_has_layer_mode_tag=true;
+            return;
+        }
         // height tag
         if (boost::starts_with(comment, reserved_tag(ETags::Height))) {
             if (!parse_number(comment.substr(reserved_tag(ETags::Height).size()), m_forced_height))
@@ -7315,7 +7332,8 @@ void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type, 
         m_object_label_id,
         m_print_z,
         m_tool_axis_id,
-        m_cut_segment_id
+        m_cut_segment_id,
+        m_has_layer_mode_tag?m_layer_mode:(m_tool_axis_id==0?uint8_t(0):uint8_t(255))
     });
 
     if (type == EMoveType::Seam) {

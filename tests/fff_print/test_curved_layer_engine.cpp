@@ -919,3 +919,58 @@ TEST_CASE("Curved travel refuses heights above common or active-tip Z limits", "
         REQUIRE_THROWS(writer.travel_to_curved_path({Vec3d(0.,0.,78.)}));
     }
 }
+
+TEST_CASE("Layer-mode preview follows field boundaries and protected planar regions", "[curved-engine][preview]")
+{
+    using namespace CurvedTransition;
+    const ModelDomain domain{0.,20.,0.,20.,30.,.1};
+    const PlaneProgram program(domain,.2,.2,{{10.,.02,0.}},.1);
+    const auto blend=program.blends().front();
+    REQUIRE(program.layer_mode(10.,10.,blend.lo)==LayerMode::Planar);
+    REQUIRE(program.layer_mode(10.,10.,(blend.lo+blend.hi)*.5)==LayerMode::Transition);
+    REQUIRE(program.layer_mode(10.,10.,blend.hi)==LayerMode::Curved);
+    const Regions regions(domain,{{10.,10.,5.,1.,4.,.02,0.}},.1);
+    REQUIRE(regions.layer_mode(10.,10.,.2)==LayerMode::Planar);
+    REQUIRE(regions.layer_mode(10.,10.,2.)==LayerMode::Transition);
+    REQUIRE(regions.layer_mode(10.,10.,5.)==LayerMode::Curved);
+    REQUIRE(regions.layer_mode(0.,0.,5.)==LayerMode::Planar);
+    REQUIRE(regions.layer_mode(15.,10.,5.)==LayerMode::Planar);
+    REQUIRE(Identity{}.layer_mode(10.,10.,20.)==LayerMode::Planar);
+    GCodeWriter writer;writer.set_extruders({0});writer.set_extruder(0);
+    writer.set_curved_blend(std::make_shared<PlaneProgram>(program),domain,Vec2d::Zero(),2.,5.);
+    std::string output;
+    for(double z:{.2,10.,20.}) {
+        writer.set_curved_path(z,.45,.2);
+        output+=writer.travel_to_xyz(Vec3d(5.,5.,z));
+        output+=writer.extrude_to_xy(Vec2d(6.,5.),.2);
+    }
+    REQUIRE(output.find(";LAYER_MODE:0\n")!=std::string::npos);
+    REQUIRE(output.find(";LAYER_MODE:1\n")!=std::string::npos);
+    REQUIRE(output.find(";LAYER_MODE:2\n")!=std::string::npos);
+}
+
+TEST_CASE("Imported Preview preserves explicit layer modes and bounded selection reports", "[curved-engine][preview]")
+{
+    ScopedTemporaryFile temp(".gcode");
+    {
+        std::ofstream out(temp.string());
+        out<<"; layer_strategy: Automatic selection: curved. Fixture region\n"
+              "M83\nG90\n;TYPE:Outer wall\n;HEIGHT:0.2\n;WIDTH:0.45\n"
+              "G1 X0 Y0 Z0.2 F600\n"
+              ";LAYER_MODE:1\nG1 X10 Y0 Z0.3 E1\n"
+              ";LAYER_MODE:2\nG1 X10 Y10 Z0.4 E1\n"
+              ";LAYER_MODE:invalid\nG1 X0 Y10 Z0.4 E1\n"
+              ";LAYER_MODE:999\nG1 X0 Y0 Z0.4 E1\n";
+    }
+    GCodeProcessor replay;replay.process_file(temp.string());
+    std::vector<unsigned> modes;
+    for(const auto& move:replay.get_result().moves)
+        if(move.type==EMoveType::Extrude) modes.push_back(move.layer_mode);
+    REQUIRE(modes==std::vector<unsigned>{1,2,255,255});
+    REQUIRE(replay.get_result().layer_strategy_decisions.size()==1);
+    REQUIRE(replay.get_result().layer_strategy_decisions.front()=="Automatic selection: curved. Fixture region");
+    GCodeProcessorResult copied;copied=replay.get_result();
+    REQUIRE(copied.layer_strategy_decisions==replay.get_result().layer_strategy_decisions);
+    REQUIRE(copied.moves.size()==replay.get_result().moves.size());
+    copied.reset();REQUIRE(copied.layer_strategy_decisions.empty());
+}

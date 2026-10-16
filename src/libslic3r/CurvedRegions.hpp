@@ -59,6 +59,11 @@ public:
         return true;
     }
     const std::vector<Patch>& patches() const {return m_patches;}
+    LayerMode layer_mode(double x,double y,double physical_z) const override {
+        for(const auto& p:m_patches) if(physical_z>p.lo && std::hypot(x-p.x,y-p.y)<p.radius)
+            return physical_z<p.hi?LayerMode::Transition:LayerMode::Curved;
+        return LayerMode::Planar;
+    }
     double slice_z(double x,double y,double z) const override {
         const auto q=displacement(x,y,z);return z-q.value;
     }

@@ -29,6 +29,9 @@ struct TopSample {
 
 struct Gradient { double dx, dy; };
 
+// Preview classification only; it is never a collision or print-quality claim.
+enum class LayerMode : unsigned char { Planar=0, Transition=1, Curved=2 };
+
 struct SpacingBounds {
     double min_vertical_mm;
     double max_vertical_mm;
@@ -74,6 +77,10 @@ public:
     virtual bool enabled() const { return m_options.enabled; }
     virtual double reference_top_mm() const { return m_options.reference_top_mm; }
     virtual double slope_bound() const { return m_slope_max; }
+    virtual LayerMode layer_mode(double x,double y,double physical_z) const {
+        if(!enabled() || physical_z<=m_options.flat_height_mm) return LayerMode::Planar;
+        return physical_z<roof(x,y).z?LayerMode::Transition:LayerMode::Curved;
+    }
     // Physical/logical height difference bounds used across independent objects.
     virtual double max_displacement_mm() const {
         return std::max(std::abs(m_options.top_min_mm-m_options.reference_top_mm),
@@ -213,6 +220,7 @@ public:
     double jacobian_max() const override {return 1.;}
     double world_z(double,double,double w) const override {return w;}
     double slice_z(double,double,double z) const override {return z;}
+    LayerMode layer_mode(double,double,double) const override {return LayerMode::Planar;}
     Gradient gradient(double,double,double) const override {return {0.,0.};}
     bool identity_on_box(double,double,double,double,double,double) const override {return true;}
 };

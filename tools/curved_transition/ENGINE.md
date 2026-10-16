@@ -190,6 +190,16 @@ The writer emits physical XYZ, local bead-height and layer-normal tags. Preview
 processes those same paths and orients extrusion cross-sections. Virtual mode
 keeps the actual nozzle upright and emits no rotary B/C motions.
 
+Preview's **Layer mode** view colours native planar paths blue, the active
+direction-transition intervals amber, and the established nonplanar field purple.
+These labels come from the field at each emitted chord's midpoint; colours are
+descriptive, not an independent collision check. The position inspector shows
+the local layer inclination, while the physical Virtual nozzle remains upright.
+The legend's **Selection details** expands the saved automatic decision reasons.
+G-code imported from older builds cannot reliably distinguish a completed curved
+field from its transition; tilted paths without a native mode label stay grey
+and unclassified. This metadata does not alter coordinates, extrusion or speeds.
+
 The represented asymmetric hotend pyramid and gantry bounds apply to the whole
 layer field. The legacy checker for independent cut-plane episodes does not
 partition a continuous curved pass correctly and is bypassed only for this bounded

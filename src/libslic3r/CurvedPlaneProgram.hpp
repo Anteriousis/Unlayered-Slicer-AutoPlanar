@@ -80,6 +80,12 @@ public:
         return m_second_projection+2.*m_grad_derivative;
     }
     const std::vector<Blend>& blends() const { return m_blends; }
+    LayerMode layer_mode(double,double,double physical_z) const override {
+        for(const auto& b:m_blends)
+            if(physical_z>b.lo && physical_z<b.hi) return LayerMode::Transition;
+        const auto g=direction(physical_z);
+        return std::hypot(g.dx,g.dy)>1e-12?LayerMode::Curved:LayerMode::Planar;
+    }
 
     double world_z(double x,double y,double w) const override {
         check(x,y,w);

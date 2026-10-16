@@ -57,6 +57,7 @@ void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field
     m_curved_field=std::move(field); m_curved_domain=domain; m_curved_origin=origin;
     m_curved_safe_z=std::max(m_curved_plate_safe_z,domain.top_max+travel_clearance); m_curved_z_speed=z_speed;
     m_curved_travel_clearance=travel_clearance;
+    m_curved_preview_mode=-1;
 }
 
 void GCodeWriter::set_curved_path(double w, double width, double height)
@@ -181,11 +182,17 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
             throw RuntimeError("Curved blend deposition exceeds its printed-height travel bound");
         const Vec3d midpoint=start+(target-start)*((double(i)-.5)/count);
         const double mx=midpoint.x()-m_curved_origin.x(), my=midpoint.y()-m_curved_origin.y();
-        const double dz=m_curved_field->world_z(mx,my,target.z())-
+        const double midpoint_z=m_curved_field->world_z(mx,my,target.z());
+        const double dz=midpoint_z-
                         m_curved_field->world_z(mx,my,target.z()-m_curved_height);
         const auto gradient=m_curved_field->gradient(mx,my,target.z());
         const double normal_length=std::sqrt(1.+gradient.dx*gradient.dx+gradient.dy*gradient.dy);
         const double h=dz/normal_length;
+        const int preview_mode=int(m_curved_field->layer_mode(mx,my,midpoint_z));
+        if(preview_mode!=m_curved_preview_mode) {
+            out+=";LAYER_MODE:"+std::to_string(preview_mode)+"\n";
+            m_curved_preview_mode=preview_mode;
+        }
         // Physical bead area times physical path length. Upstream's dE already
         // contains material/role ratios; preserve those, replacing only geometry.
         const double ratio=CurvedTransition::Ramp::bead_area(m_curved_width,h)/area0 *

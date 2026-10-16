@@ -181,7 +181,11 @@ uses a labelled 30-degree analysis reference; it does not replace upstream's
 bead-overlap rule. At most 128 uniform layer-direction candidates are compared,
 including diagonal and dominant facet directions, within the conservative
 all-direction configured slope bound. Area-weighted angular-deficit scores use
-unchanged world-XY projected area, and opposing-underside regressions are reported.
+unchanged actual surface area, and opposing-surface regressions are reported.
+Initially vertical and upward faces participate in candidate scoring so a tilt
+cannot hide a new overhang elsewhere. Reported downward footprint areas remain
+world-XY projections. A 0.0001-degree threshold band excludes float-normal noise;
+it is an analysis convention, not a printer allowance or a support-generation rule.
 
 The saved automatic decision and Preview Selection details include this analysis
 even when the roof strategy falls back to planar. The score is a geometric ranking

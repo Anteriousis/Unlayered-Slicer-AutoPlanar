@@ -48,12 +48,13 @@ TEST_CASE("Underside candidates use the improving signed direction and stay in t
     REQUIRE(r.has_candidate);REQUIRE(r.facets==1);
     REQUIRE(r.minimum_angle_deg==Catch::Approx(20.));
     REQUIRE(r.projected_area_mm2==Catch::Approx(50.));
-    REQUIRE(r.planar.angular_deficit_mm2==Catch::Approx(50./3.));
-    REQUIRE(r.best.angular_deficit_mm2==Catch::Approx(50./6.));
+    const double area=50./std::cos(20.*3.14159265358979323846/180.);
+    REQUIRE(r.planar.angular_deficit_mm2==Catch::Approx(area/3.));
+    REQUIRE(r.best.angular_deficit_mm2==Catch::Approx(area/6.));
     REQUIRE(r.planar.minimum_angle_deg==Catch::Approx(20.));
     REQUIRE(r.best.minimum_angle_deg==Catch::Approx(25.));
     REQUIRE(r.best.gx==Catch::Approx(-allowed));REQUIRE(std::abs(r.best.gy)<1e-10);
-    REQUIRE(r.best.worsened_mm2==0.);REQUIRE(r.best.improved_mm2==Catch::Approx(50.));
+    REQUIRE(r.best.worsened_mm2==0.);REQUIRE(r.best.improved_mm2==Catch::Approx(area));
     REQUIRE(std::hypot(r.best.gx,r.best.gy)<=allowed+1e-12);
     REQUIRE(r.candidates_checked<=128);
 }
@@ -73,8 +74,9 @@ TEST_CASE("Underside ranking exposes regressions on opposing overhangs", "[curve
 {
     auto dominant=underside(20.);for(auto& p:dominant) {p[0]*=2.;p[1]*=2.;p[2]=4.+(p[2]-4.)*2.;}
     const auto r=analyze_undersides({dominant,underside(20.,180.)},.08,30.);
-    REQUIRE(r.has_candidate);REQUIRE(r.best.worsened_mm2==Catch::Approx(50.));
-    REQUIRE(r.best.improved_mm2==Catch::Approx(200.));
+    const double area=50./std::cos(20.*3.14159265358979323846/180.);
+    REQUIRE(r.has_candidate);REQUIRE(r.best.worsened_mm2==Catch::Approx(area));
+    REQUIRE(r.best.improved_mm2==Catch::Approx(4.*area));
     REQUIRE(r.best.worst_regression_deg>4.);
     REQUIRE(r.best.angular_deficit_mm2<r.planar.angular_deficit_mm2);
 }
@@ -131,4 +133,17 @@ TEST_CASE("Underside checks reject invalid geometry and honor cancellation", "[c
     size_t calls=0;
     REQUIRE_THROWS(analyze_undersides({underside(20.)},.1,30.,[&]{if(++calls==2) throw std::runtime_error("canceled");}));
     REQUIRE(calls==2);
+}
+
+TEST_CASE("Underside candidates account for new overhangs on initially vertical walls", "[curved-blend][undersides]")
+{
+    // A deliberately broad synthetic bound exercises printers unlike the
+    // five-degree Centauri fixture. Tilting along -X would turn this large
+    // vertical wall into a critical underside. Tilting toward Y avoids it.
+    const Ramp::Triangle wall{{{0.,0.,1.},{0.,0.,101.},{0.,100.,1.}}}; // outward -X
+    const double allowed=std::tan(70.*3.14159265358979323846/180.);
+    const auto r=analyze_undersides({underside(20.),wall},allowed,80.);
+    REQUIRE(r.has_candidate);REQUIRE(r.facets==1);
+    REQUIRE(std::abs(r.best.gx)<1e-5);REQUIRE(std::abs(r.best.gy)>.9*allowed);
+    REQUIRE(r.best.worsened_mm2==0.);
 }

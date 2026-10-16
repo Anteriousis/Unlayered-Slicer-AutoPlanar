@@ -207,7 +207,8 @@ The original solid is mapped and sliced again; native normal supports are genera
 from those same slices. XY is unchanged and each vertical column is monotone.
 The mathematical domain includes a bounded support margin; generated beads outside
 it fail rather than being extrapolated. Support layer steps are restricted by the
-physical-spacing bound. After path generation, support components need lower
+physical-spacing bounds; contact merging uses the active nozzle's minimum normal
+spacing in the field. After path generation, support components need lower
 deposition within their height and configured bottom gap. Bridges must occupy a
 fully affine slab, preserving straight strands; their ends need deposited anchors
 (overhang perimeters need deposited overlap). Normal bridge-strand area is retained

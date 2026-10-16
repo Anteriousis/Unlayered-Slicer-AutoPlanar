@@ -1233,7 +1233,8 @@ static void validate_underside_deposition(const PrintObject& object,const std::f
         if(is_bridge(path.role()) && !field.affine_on_box(lo.x(),hi.x(),lo.y(),hi.y(),w-path.height,w))
             throw SlicingError("An underside bridge crosses a changing layer direction; no curved air bridge will be exported.");
         if(is_support(path.role())) {
-            if(field.spacing_bounds(path.height).max_vertical_mm>limits.max_layer+.005)
+            const auto spacing=field.spacing_bounds(path.height);
+            if(spacing.max_vertical_mm>limits.max_layer+1e-4 || spacing.min_graph_distance_mm<limits.min_layer-1e-4)
                 throw SlicingError("Mapped underside support spacing exceeds the configured nozzle layer-height limit.");
             if(w-path.height>1e-4) {
                 for(const auto& island:union_ex(covered(path)))

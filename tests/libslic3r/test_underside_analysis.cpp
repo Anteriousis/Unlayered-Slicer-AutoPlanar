@@ -160,6 +160,9 @@ TEST_CASE("Underside deposition finishes its monotone transition below bridge sl
     REQUIRE(program);REQUIRE(program->maps_supports());
     REQUIRE(program->angle_deg()>=.25);REQUIRE(program->angle_deg()<5.);
     REQUIRE(program->slope_bound()<=allowed);
+    const double support_min=.08*program->jacobian_max()*std::hypot(1.,program->slope_bound());
+    REQUIRE(program->spacing_bounds(support_min).min_graph_distance_mm==Catch::Approx(.08));
+    REQUIRE(program->spacing_bounds(.32*program->jacobian_min()).max_vertical_mm==Catch::Approx(.32));
     REQUIRE(program->world_z(2.,2.,.2)==Catch::Approx(.2));
     REQUIRE(program->layer_mode(2.,2.,.2)==LayerMode::Planar);
     REQUIRE(program->layer_mode(2.,2.,1.)==LayerMode::Transition);

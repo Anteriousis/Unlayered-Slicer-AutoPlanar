@@ -1649,7 +1649,9 @@ void PrintObject::slice()
                 (std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field)?
                  std::to_string(std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field)->patches().size())+" local roof regions; bridge and support-contact zones remain planar. ":
                  m_curved_field->maps_supports()?"Underside field applied at "+std::to_string(std::dynamic_pointer_cast<const CurvedTransition::UndersideProgram>(m_curved_field)->angle_deg())+
-                 " deg; native normal supports regenerated in the same field. Bridge and foundation checks follow path generation. ":std::string())+
+                 " deg; "+(has_support_material()?std::string("native normal supports regenerated in the same field. "):
+                    std::string("supports off; no support paths requested. "))+
+                 "Bridge and foundation checks follow path generation. ":std::string())+
                 "Continuous transitions passed configured geometry and layer-spacing checks; physical clearance and finish are unverified.";
             if(automatic && !m_curved_rejected_centres.empty()) m_layer_strategy_decision+=" "+std::to_string(m_curved_rejected_centres.size())+" regions left planar after inspecting generated bridge/support beads.";
         } catch (const std::invalid_argument& e) {

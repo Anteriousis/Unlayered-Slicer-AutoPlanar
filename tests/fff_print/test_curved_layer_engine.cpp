@@ -446,6 +446,7 @@ TEST_CASE("Support-free underside mapping uses actual generated paths rather tha
     REQUIRE_FALSE(o->config().enable_support.value);
     REQUIRE_FALSE(Test::gcode(print).empty());
     REQUIRE(o->support_layers().empty());
+    REQUIRE(o->layer_strategy_decision().find("supports off; no support paths requested")!=std::string::npos);
     // Inject an air bridge into the changing-direction slab after ordinary
     // generation. Support OFF must not bypass this independent path guard.
     const auto program=std::dynamic_pointer_cast<const CurvedTransition::PlaneProgram>(o->curved_field());

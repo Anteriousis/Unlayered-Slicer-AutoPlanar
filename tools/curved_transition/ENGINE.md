@@ -33,6 +33,13 @@ falling back to planar. No process setting or printer limit is
 changed. Explicit B/C rotations or directed parts conflict with
 automatic selection and require the user to choose manual mode instead.
 
+Regional proposals clip each nearby downward facet to the patch's padded XY box
+before reserving its highest contact height. A remote high tip no longer excludes
+an otherwise usable roof. Bounded interior seeds supplement facet centroids;
+sparse proposals also reserve the highest roof in their whole footprint so the
+field cannot reach below the configured top shell. These remain candidate
+heuristics: full generated bead-box checks decide which patches survive.
+
 The decision and reason are displayed as a slicing notification and recorded in
 the `layer_strategy` G-code header. A later extrusion or motion safety refusal
 still stops slicing: automatic mode does not conceal such errors or export a
@@ -218,6 +225,11 @@ export. These are geometric checks, not sag, bonding or physical-print qualifica
 Support settings and printer clearances are retained. Enabling/disabling supports
 or changing the support angle invalidates the automatic slice.
 
+Supports do not have to be enabled to attempt an underside field. With supports
+off, the engine neither creates supports nor borrows the inactive support gap
+for bridge anchors or transition room. Actual generated bridges, deposited
+anchors and changing-direction slabs are still checked before export. With
+supports enabled, mapped underside generation currently requires Normal (auto).
 Tree/manual supports and configurations without a usable foundation transition
 retain the roof strategy or planar fallback. A candidate remains explicitly
 unapplied when no eligible field was built. This is not a universal support-free
@@ -255,7 +267,9 @@ layer field. The legacy checker for independent cut-plane episodes does not
 partition a continuous curved pass correctly and is bypassed only for this bounded
 mode. This does not claim a general CAD mesh collision checker or cover missing
 hardware. Within one object, earlier material lies beneath earlier field
-isosurfaces; supports and bridge beads must remain entirely in identity zones.
+isosurfaces. Regional roof mode keeps support and bridge beads entirely in
+identity zones; underside mode additionally permits straight affine bridges and
+regenerated supports after its bounded foundation transition.
 Different objects additionally receive whole-footprint checks including generated
 supports and every instance. The generated first-layer hull, including brim and
 skirt bead margins, is checked against the common and active-nozzle printable areas.
@@ -287,6 +301,11 @@ unmodeled obstructions; firmware macros and material swelling are not inferred.
 An XY detour retains all planned waypoints at one raised height, with one
 departure and one final approach. Exact repeated destinations emit no motion.
 These changes do not reduce the configured clearance or raise motion limits.
+Completed affine tilted slabs emit each straight extrusion as one exact segment;
+mesh mapping likewise avoids refining affine physical slabs. Changing-direction
+and regional curved paths retain their bounded chord subdivision. This reduces
+redundant rounded moves without flattening a curved path or changing its bead
+volume, and does not promise the same elapsed print time as planar output.
 The writer refuses a computed height above the common machine/Virtual Z ceiling
 or the declared active tip's lower ceiling, including output precision padding.
 Every actual travel requests ordinary retraction, including
@@ -310,8 +329,10 @@ results and exact commit before distributing a build.
 
 Intersecting authored branch fields, general curved bridge deposition, seam
 optimization across changing topology and full measured toolhead meshes need
-further integration. Supports currently stay planar; tree paths crossing a local
-field remove that patch during automatic planning. Rafts remain excluded. The
+further integration. Roof-mode supports stay planar; tree paths crossing a local
+field remove that patch during automatic planning. Underside-mode Normal (auto)
+supports are regenerated and mapped under the independent foundation/anchor
+checks above. Rafts remain excluded. The
 selector does not promise that every model has a useful curved region, nor that
 its limited local adjustment improves the printed finish.
 Software tests and physical prints are separate evidence.

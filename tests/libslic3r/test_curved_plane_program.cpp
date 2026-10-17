@@ -84,3 +84,26 @@ TEST_CASE("Plane field refuses infeasible directions and bounds", "[curved-blend
     PlaneProgram p(d,.2,.2,{{4.,.07,0.}});
     REQUIRE_THROWS(p.world_z(11.,0.,5.));
 }
+
+TEST_CASE("Plane field certifies exact affine physical slabs without skipping transitions", "[curved-blend][planes]")
+{
+    const PlaneProgram p({-10.,10.,-8.,8.,30.,.1},.2,.2,
+        {{6.,.03,0.},{20.,-.02,.01}},.1);
+    const auto a=p.blends().front(),b=p.blends().back();
+    REQUIRE(p.inverse_hessian_bound_box(-10.,10.,-8.,8.,.2,a.lo)==0.);
+    REQUIRE(p.inverse_hessian_bound_box(-10.,10.,-8.,8.,a.hi,b.lo)==0.);
+    REQUIRE(p.inverse_hessian_bound_box(-10.,10.,-8.,8.,b.hi,30.)==0.);
+    REQUIRE(p.inverse_hessian_bound_box(-10.,10.,-8.,8.,a.lo,a.hi)>0.);
+    REQUIRE(p.inverse_hessian_bound_box(-10.,10.,-8.,8.,a.lo-.01,a.lo+.01)>0.);
+    // Independently sample a physical chord wholly in the middle affine slab.
+    const double z=(a.hi+b.lo)*.5;
+    const double start=p.slice_z(-8.,-5.,z),end=p.slice_z(8.,5.,z+.1);
+    for(int i=0;i<=20;++i) {
+        const double t=i/20.;
+        REQUIRE(p.slice_z(-8.+16.*t,-5.+10.*t,z+.1*t)==
+            Catch::Approx(start+t*(end-start)).margin(1e-12));
+    }
+    const double w=b.hi+p.max_displacement_mm()+1.;
+    REQUIRE(p.affine_on_box(-10.,10.,-8.,8.,w-.2,w));
+    REQUIRE_FALSE(p.affine_on_box(-10.,10.,-8.,8.,a.lo,a.hi));
+}

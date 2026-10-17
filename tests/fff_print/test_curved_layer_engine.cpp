@@ -325,12 +325,17 @@ TEST_CASE("Automatic slicing preserves supports and ignores cut sections on a fl
     REQUIRE(print.objects().front()->layer_strategy_decision().find("no useful regional roof")!=std::string::npos);
 }
 
-TEST_CASE("Automatic underside slicing regenerates nonplanar coupon deposition and normal supports", "[curved-engine][automatic][undersides]")
+TEST_CASE("Automatic underside slicing regenerates flat-roof coupon deposition and normal supports", "[curved-engine][automatic][undersides]")
 {
     Model input;
     const std::string path=std::string(TEST_DATA_DIR)+"/curved/Centauri_AB_support_surface_coupon.stl";
     REQUIRE(load_stl(path.c_str(),&input));REQUIRE(input.objects.size()==1);
-    const auto& mesh=input.objects.front()->volumes.front()->mesh();
+    // Flatten only the high vertices of this fixture copy. The original
+    // sloped roof now has its own regional regression below; this variant
+    // keeps exercising underside mapping rather than a useful roof cap.
+    auto flat=input.objects.front()->volumes.front()->mesh().its;
+    for(auto& v:flat.vertices) if(v.z()>7.8f) v.z()=10.f;
+    const TriangleMesh mesh(std::move(flat));
     auto config=curved_config();config.set_deserialize_strict({{"curved_layer_blend","0"},
         {"automatic_layer_strategy","0"},{"enable_support","1"},{"support_threshold_angle","30"},
         {"support_type","normal(auto)"},{"support_style","grid"}});
@@ -382,9 +387,67 @@ TEST_CASE("Automatic underside slicing regenerates nonplanar coupon deposition a
     config.set_deserialize_strict({{"support_threshold_angle","20"}});print.apply(model,config);
     REQUIRE_FALSE(Test::gcode(print).empty());
     REQUIRE(print.objects().front()->layer_strategy_decision().find("20.0 deg configured angle")!=std::string::npos);
-    config.set_deserialize_strict({{"support_threshold_angle","30"},{"enable_support","0"}});print.apply(model,config);
-    REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE_FALSE(print.objects().front()->curved_field());
-    REQUIRE_FALSE(print.objects().front()->config().enable_support.value);
+}
+
+TEST_CASE("Automatic coupon roofs generate nonplanar top extrusion with supports on or off", "[curved-engine][automatic][regions][undersides]")
+{
+    Model input;
+    const std::string path=std::string(TEST_DATA_DIR)+"/curved/Centauri_AB_support_surface_coupon.stl";
+    REQUIRE(load_stl(path.c_str(),&input));
+    auto config=curved_config();config.set_deserialize_strict({{"curved_layer_blend","0"},
+        {"automatic_layer_strategy","1"},{"support_threshold_angle","30"},
+        {"support_type","normal(auto)"},{"support_style","grid"}});
+    SECTION("supports off") {config.set_deserialize_strict({{"enable_support","0"}});}
+    SECTION("normal supports on") {config.set_deserialize_strict({{"enable_support","1"}});}
+    Print print;Model model;
+    Test::init_print({input.objects.front()->volumes.front()->mesh()},print,model,config);
+    const auto original=model.objects.front()->volumes.front()->mesh().its.vertices;
+    print.process();const auto* o=print.objects().front();
+    INFO(o->layer_strategy_decision());
+    REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(o->curved_field()));
+    REQUIRE(o->config().enable_support.value==config.opt_bool("enable_support"));
+    if(!config.opt_bool("enable_support")) REQUIRE(o->support_layers().empty());
+    ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;
+    print.export_gcode(output.string(),&result,nullptr);
+    size_t top_xyz=0;Vec3f previous=Vec3f::Zero();
+    for(const auto& move:result.moves) {
+        if(move.type==EMoveType::Extrude && move.delta_extruder>0. && move.extrusion_role==erTopSolidInfill &&
+           (move.position.head<2>()-previous.head<2>()).norm()>.01 &&
+           std::abs(move.position.z()-previous.z())>.0001) ++top_xyz;
+        previous=move.position;
+    }
+    REQUIRE(top_xyz>20);
+    REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==original);
+}
+
+TEST_CASE("Support-free underside mapping uses actual generated paths rather than a support toggle gate", "[curved-engine][automatic][undersides]")
+{
+    auto config=curved_config();config.set_deserialize_strict({{"curved_layer_blend","0"},
+        {"automatic_layer_strategy","1"},{"enable_support","0"},{"support_threshold_angle","30"}});
+    const TriangleMesh mesh(AutoPlanesFixtures::heightfield_block(8.,4.,8,
+        [](double){return 24.;},[](double x){return x<2.?0.:15.+std::tan(28.*PI/180.)*(x-2.);}));
+    Print print;Model model;Test::init_print({mesh},print,model,config);
+    // This test exercises the OFF branch directly; the native generated-path
+    // guard, not an enable-support prerequisite, decides whether it can export.
+    auto* o=const_cast<PrintObject*>(print.objects().front());o->slice();
+    INFO(o->layer_strategy_decision());
+    REQUIRE(o->curved_field());REQUIRE(o->curved_field()->maps_supports());
+    REQUIRE_FALSE(o->config().enable_support.value);
+    REQUIRE_FALSE(Test::gcode(print).empty());
+    REQUIRE(o->support_layers().empty());
+    // Inject an air bridge into the changing-direction slab after ordinary
+    // generation. Support OFF must not bypass this independent path guard.
+    const auto program=std::dynamic_pointer_cast<const CurvedTransition::PlaneProgram>(o->curved_field());
+    REQUIRE(program);const auto blend=program->blends().front();
+    Layer* changing=nullptr;
+    for(auto* layer:o->layers())
+        if(layer->print_z>blend.lo+.2 && layer->print_z<blend.hi-.2) {changing=layer;break;}
+    REQUIRE(changing);
+    ExtrusionPath bridge(erBridgeInfill,.08,.45f,.2f);
+    bridge.polyline=Polyline3(Points3{Point3(scale_(-.5),0.,0.),Point3(scale_(.5),0.,0.)});
+    changing->regions().front()->fills.append(bridge);
+    REQUIRE_THROWS_WITH(o->refine_curved_regions_for_paths(),
+        Catch::Matchers::ContainsSubstring("bridge crosses a changing layer direction"));
 }
 
 TEST_CASE("Automatic slicing checks explicit plane transitions and rejects ambiguous manual rotation", "[curved-engine][automatic]")
@@ -895,6 +958,38 @@ TEST_CASE("Curved writer subdivides paths, compensates flow and avoids diagonal 
     REQUIRE_THROWS(writer.set_curved_path(2.,.02,.2));
     const auto layer_change=writer.travel_to_z(2.2);
     REQUIRE(layer_change.find("F300")!=std::string::npos);
+}
+
+TEST_CASE("Affine tilted extrusion uses one exact segment while blends retain bounded chords", "[curved-engine][flow]")
+{
+    using namespace CurvedTransition;
+    const ModelDomain domain{0.,20.,0.,20.,30.,.1};
+    const auto field=std::make_shared<PlaneProgram>(domain,.2,.2,
+        std::vector<PlaneProgram::Target>{{6.,.03,0.}},.1);
+    double w=15.;bool terminal=true;
+    SECTION("completed tilt") {}
+    SECTION("changing direction") {terminal=false;w=(field->blends().front().lo+field->blends().front().hi)*.5;}
+    GCodeWriter writer;writer.set_extruders({0});writer.set_extruder(0);
+    writer.set_curved_plate_bound(35.);writer.set_curved_blend(field,domain,Vec2d::Zero(),2.,5.);
+    writer.set_curved_path(w,.45,.2);writer.travel_to_xyz(Vec3d(1.,10.,w));
+    const auto output=writer.extrude_to_xy(Vec2d(19.,10.),1.);
+    size_t count=0;double total_e=0.;std::string line;std::istringstream lines(output);
+    const std::regex eword(R"( E(-?\d*\.?\d+))");
+    while(std::getline(lines,line)) if(line.rfind("G1 ",0)==0) {
+        std::smatch e;if(std::regex_search(line,e,eword)) {++count;total_e+=std::stod(e[1]);}
+    }
+    if(terminal) {
+        REQUIRE(count==1);
+        // Exact tilted-line length and normal bead height cancel here; area
+        // includes the existing rounded bead-end term, so integrate its own
+        // independently computed constant physical cross section.
+        const double h=.2/std::sqrt(1.+.03*.03);
+        const double area=.45*h-h*h*(1.-PI/4.);
+        const double baseline=.45*.2-.2*.2*(1.-PI/4.);
+        REQUIRE(total_e==Catch::Approx(std::sqrt(1.+.03*.03)*area/baseline).margin(2e-5));
+    } else REQUIRE(count>20);
+    REQUIRE(writer.get_position().x()==19.);
+    REQUIRE(writer.get_position().z()==Catch::Approx(field->world_z(19.,10.,w)).margin(1e-9));
 }
 
 TEST_CASE("Curved travel clears prior deposition and batches an XY detour", "[curved-engine][travel]")

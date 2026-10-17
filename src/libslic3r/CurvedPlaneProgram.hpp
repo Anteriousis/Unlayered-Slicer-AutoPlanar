@@ -84,6 +84,12 @@ public:
         // Direct Hessian of physical-to-logical w; mixed XY/Z terms plus ZZ.
         return m_second_projection+2.*m_grad_derivative;
     }
+    double inverse_hessian_bound_box(double,double,double,double,double zmin,double zmax) const override {
+        // map_mesh supplies PHYSICAL bounds. Outside all direction-changing
+        // slabs the map is affine, so its exact Hessian is zero.
+        for(const auto& b:m_blends) if(zmax>b.lo && zmin<b.hi) return inverse_hessian_bound();
+        return 0.;
+    }
     const std::vector<Blend>& blends() const { return m_blends; }
     LayerMode layer_mode(double,double,double physical_z) const override {
         for(const auto& b:m_blends)

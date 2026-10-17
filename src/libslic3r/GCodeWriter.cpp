@@ -171,7 +171,13 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
         throw RuntimeError("Curved blend path start is not on its layer; refusing a diagonal approach extrusion");
     const double length=(target.head<2>()-start.head<2>()).norm();
     if (length<EPSILON) return {};
-    const int count=CurvedTransition::Ramp::chord_segments(length,m_curved_domain->slope());
+    const double tx=target.x()-m_curved_origin.x(),ty=target.y()-m_curved_origin.y();
+    const bool affine=m_curved_field->affine_on_box(std::min(x,tx),std::max(x,tx),
+        std::min(y,ty),std::max(y,ty),target.z()-m_curved_height,target.z());
+    // An affine slab maps the entire segment and its bead thickness exactly:
+    // slope, normal spacing and flow scale are constant. Subdivision only adds
+    // rounded microscopic corners there. Keep bounded chords in curved slabs.
+    const int count=affine?1:CurvedTransition::Ramp::chord_segments(length,m_curved_domain->slope());
     const double area0=CurvedTransition::Ramp::bead_area(m_curved_width,m_curved_height);
     Vec3d previous=m_pos;
     // A descending first chord still deposits at its starting point.

@@ -39,7 +39,8 @@ TEST_CASE("Regional selection retains useful roofs above protected undersides", 
     Regions f({-10.,10.,-10.,10.,11.,0.},p,.08);
     REQUIRE(f.identity_on_box(-10.,10.,-10.,10.,0.,3.6));
     REQUIRE(f.slope_bound()<=.08);
-    // Its only useful broad patch cannot fit inside this thin sparse top shell.
+    // No candidate may reach below the thin sparse top shell, including when
+    // its seed is near a facet edge and its disk covers a higher roof point.
     REQUIRE(select_regions(faces,.2,.2,.08,1.,true).empty());
     for(auto& v:faces[1]) v[2]=10.5;
     REQUIRE(select_regions(faces,.2,.2,.08,1.,false).empty());
@@ -62,4 +63,18 @@ TEST_CASE("Regional sparse selection ranks whole roof alignment instead of patch
     }
     REQUIRE(after<before);
     REQUIRE(f.identity_on_box(0.,2.,0.,2.,0.,9.));
+}
+
+TEST_CASE("Regional contact bounds use the facet height inside the patch", "[curved-blend][regions][automatic]")
+{
+    const Ramp::Triangle contact{{{-10.,-10.,1.},{0.,10.,20.},{10.,-10.,1.}}};
+    REQUIRE(regional_contact_height(contact,-2.,2.,-9.,-8.)==Catch::Approx(2.9));
+    REQUIRE(regional_contact_height(contact,-2.,2.,8.,9.)==Catch::Approx(19.05));
+    REQUIRE(std::isinf(regional_contact_height(contact,20.,21.,20.,21.)));
+    // A high remote end of this underside used to suppress the lower roof.
+    std::vector<Ramp::Triangle> faces{{{{-10.,-10.,10.},{10.,-10.,10.},{0.,-2.,10.4}}},contact};
+    REQUIRE_FALSE(select_regions(faces,.2,.2,.08,1.,false).empty());
+    // A genuinely close local contact must still suppress that same roof.
+    faces[1]={{{-10.,-10.,10.3},{0.,-2.,10.3},{10.,-10.,10.3}}};
+    REQUIRE(select_regions(faces,.2,.2,.08,1.,false).empty());
 }

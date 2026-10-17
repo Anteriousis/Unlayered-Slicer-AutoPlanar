@@ -108,13 +108,42 @@ private:
     double m_reference=0.,m_amplitude=0.,m_jmin=1.,m_jmax=1.,m_g=0.,m_hessian=0.;
 };
 
+// Clip a contact facet to a conservative XY patch box. A remote high vertex
+// must not reserve its height over the whole triangle's bounding rectangle.
+inline double regional_contact_height(const Ramp::Triangle& triangle,
+    double xmin,double xmax,double ymin,double ymax)
+{
+    std::vector<Ramp::Vertex> polygon(triangle.begin(),triangle.end());
+    for(const auto& edge:std::array<std::array<double,3>,4>{{
+            {{0.,xmin,1.}},{{0.,xmax,-1.}},{{1.,ymin,1.}},{{1.,ymax,-1.}}}}) {
+        if(polygon.empty()) return -std::numeric_limits<double>::infinity();
+        const size_t axis=size_t(edge[0]);const double bound=edge[1],sign=edge[2];
+        std::vector<Ramp::Vertex> clipped;
+        auto a=polygon.back();double da=sign*(a[axis]-bound);
+        for(const auto& b:polygon) {
+            const double db=sign*(b[axis]-bound);
+            if((da>=0.)!=(db>=0.)) {
+                const double t=da/(da-db);Ramp::Vertex point{};
+                for(size_t k=0;k<3;++k) point[k]=a[k]+t*(b[k]-a[k]);
+                clipped.push_back(point);
+            }
+            if(db>=0.) clipped.push_back(b);
+            a=b;da=db;
+        }
+        polygon=std::move(clipped);
+    }
+    double height=-std::numeric_limits<double>::infinity();
+    for(const auto& p:polygon) height=std::max(height,p[2]);
+    return height;
+}
+
 // Roof selection is a heuristic. Accepted fields have analytic bounds above;
 // bridge/support toolpaths are checked against their full bead boxes at export.
 inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triangle>& mesh,
     double first,double step,double allowed,double solid_depth,bool sparse,const std::function<void()>& cancel={})
 {
     struct Face {double x,y,z,gx,gy,area,xmin,xmax,ymin,ymax,zmax;const Ramp::Triangle* triangle;};
-    struct Box {double xmin,xmax,ymin,ymax,zmax;};
+    struct Box {double xmin,xmax,ymin,ymax,zmax;const Ramp::Triangle* triangle;};
     std::vector<Face> roofs,surfaces;std::vector<Box> contacts;
     size_t inspected=0;
     for(const auto& t:mesh) {
@@ -127,7 +156,7 @@ inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triang
             throw std::invalid_argument("Invalid regional mesh facet");
         const double zmax=std::max({a[2],b[2],c[2]});
         if(nz<0. && zmax>2e-5) contacts.push_back({std::min({a[0],b[0],c[0]})-1.,std::max({a[0],b[0],c[0]})+1.,
-            std::min({a[1],b[1],c[1]})-1.,std::max({a[1],b[1],c[1]})+1.,zmax});
+            std::min({a[1],b[1],c[1]})-1.,std::max({a[1],b[1],c[1]})+1.,zmax,&t});
         if(nz<=0.) continue;
         const double gx=-nx/nz,gy=-ny/nz,g=std::hypot(gx,gy);
         if(g>std::tan(30.*3.14159265358979323846/180.)) continue;
@@ -168,7 +197,16 @@ inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triang
         return before>1e-12 && after<before*.98?before-after:0.;
     };
     size_t proposals=0;
-    for(const auto& f:roofs) {
+    for(const auto& source:roofs) {
+      if(proposals>=256 || patches.size()>=64) break;
+      // A long triangle's centroid may sit over its thinnest/unsupported area.
+      // Check bounded interior seeds nearer its vertices and edges as well.
+      for(const auto& weights:std::array<std::array<double,3>,7>{{
+              {{1./3.,1./3.,1./3.}},{{.8,.1,.1}},{{.1,.8,.1}},{{.1,.1,.8}},
+              {{.45,.45,.1}},{{.45,.1,.45}},{{.1,.45,.45}}}}) {
+        Face f=source;f.x=f.y=f.z=0.;
+        for(size_t k=0;k<3;++k) {f.x+=weights[k]*(*f.triangle)[k][0];
+            f.y+=weights[k]*(*f.triangle)[k][1];f.z+=weights[k]*(*f.triangle)[k][2];}
         if(cancel) cancel();
         const double g=std::hypot(f.gx,f.gy),scale=std::min(1.,.70*allowed/g);
         const double gx=f.gx*scale,gy=f.gy*scale;
@@ -187,9 +225,16 @@ inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triang
             const double amplitude=.17*std::hypot(gx,gy)*radius;
             const double depth=std::max(sparse?step:3.*step,1.875*amplitude/.20);
             double lo=first;
-            if(sparse) lo=std::max(lo,f.z-solid_depth+step);
-            for(const auto& b:contacts) if(f.x+radius>b.xmin && f.x-radius<b.xmax && f.y+radius>b.ymin && f.y-radius<b.ymax)
-                lo=std::max(lo,b.zmax+3.*step);
+            if(sparse) for(const auto& roof:surfaces) {
+                const double local=regional_contact_height(*roof.triangle,
+                    f.x-radius,f.x+radius,f.y-radius,f.y+radius);
+                lo=std::max(lo,local-solid_depth+step);
+            }
+            for(const auto& b:contacts) if(f.x+radius>b.xmin && f.x-radius<b.xmax && f.y+radius>b.ymin && f.y-radius<b.ymax) {
+                const double local=regional_contact_height(*b.triangle,
+                    f.x-radius-1.,f.x+radius+1.,f.y-radius-1.,f.y+radius+1.);
+                lo=std::max(lo,local+3.*step);
+            }
             if(lo+depth+step*.5>f.z) continue;
             const Regions::Patch p{f.x,f.y,radius,lo,lo+depth,gx,gy};
             const double gain=benefit(p);
@@ -198,6 +243,7 @@ inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triang
         if(best_gain<=0.) continue;
         patches.push_back(best);
         if(patches.size()==64) break;
+      }
     }
     return patches;
 }

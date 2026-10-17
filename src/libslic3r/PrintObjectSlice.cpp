@@ -1242,7 +1242,7 @@ static void validate_underside_deposition(const PrintObject& object,const std::f
                         throw SlicingError("A generated underside support starts without a lower deposition foundation.");
             }
         } else if(is_bridge(path.role())) {
-            const double contact_gap=object.config().enable_support.value?
+            const double contact_gap=object.has_support_material()?
                 std::max(0.,object.config().support_top_z_distance.value):0.;
             Polygons anchor=anchors(w,path.height,contact_gap);
             append(anchor,perimeter_anchors);anchor=union_(anchor);
@@ -1445,19 +1445,19 @@ void PrintObject::slice()
                     ModelDomain domain{xmin,xmax,ymin,ymax,top,0.};
                     std::shared_ptr<Field> program;
                     if(patches.empty() && selected_planes.empty() &&
-                       (!m_config.enable_support.value || m_config.support_type.value==stNormalAuto)) {
+                       (!has_support_material() || m_config.support_type.value==stNormalAuto)) {
                         const double support_limit=virtual_tilt_limit_enforced_deg(envelope,pc.nonplanar_gantry_height.value,
                             pc.nonplanar_virtual_max_angle.value,std::hypot(xmax-xmin+20.,ymax-ymin+20.));
                         auto underside=select_underside_program(triangles,*underside_analysis,
                             m_slicing_params.first_object_layer_height,m_config.layer_height.value,limits.max_layer,
                             std::min(allowed,std::tan(support_limit*PI/180.)),10.,
-                            m_config.enable_support.value?std::max({0.,m_config.support_top_z_distance.value,m_config.support_bottom_z_distance.value}):0.,
+                            has_support_material()?std::max({0.,m_config.support_top_z_distance.value,m_config.support_bottom_z_distance.value}):0.,
                             [this]{m_print->throw_if_canceled();});
                         if(underside) {domain=underside->domain();program=std::move(underside);}
                     }
                     if(!program && !patches.empty()) program=std::make_shared<Regions>(domain,std::move(patches),allowed);
                     if(!program) {
-                        if(underside_analysis->has_candidate && m_config.enable_support.value && m_config.support_type.value!=stNormalAuto)
+                        if(underside_analysis->has_candidate && has_support_material() && m_config.support_type.value!=stNormalAuto)
                             throw std::invalid_argument("an underside direction was found, but mapped support generation currently supports Normal (auto), not the selected support type; support settings were retained");
                         throw std::invalid_argument("no useful regional roof or underside field fits the foundation, support and transition bounds");
                     }

@@ -100,8 +100,8 @@ TEST_CASE("Plane field certifies exact affine physical slabs without skipping tr
     const double start=p.slice_z(-8.,-5.,z),end=p.slice_z(8.,5.,z+.1);
     for(int i=0;i<=20;++i) {
         const double t=i/20.;
-        REQUIRE(p.slice_z(-8.+16.*t,-5.+10.*t,z+.1*t)==
-            Catch::Approx(start+t*(end-start)).margin(1e-12));
+        REQUIRE(std::abs(p.slice_z(-8.+16.*t,-5.+10.*t,z+.1*t)-
+            (start+t*(end-start)))<1e-12);
     }
     const double w=b.hi+p.max_displacement_mm()+1.;
     REQUIRE(p.affine_on_box(-10.,10.,-8.,8.,w-.2,w));

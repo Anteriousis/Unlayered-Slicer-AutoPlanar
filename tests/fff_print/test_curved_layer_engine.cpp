@@ -424,8 +424,19 @@ TEST_CASE("Support-free underside mapping uses actual generated paths rather tha
 {
     auto config=curved_config();config.set_deserialize_strict({{"curved_layer_blend","0"},
         {"automatic_layer_strategy","1"},{"enable_support","0"},{"support_threshold_angle","30"}});
-    const TriangleMesh mesh(AutoPlanesFixtures::heightfield_block(8.,4.,8,
-        [](double){return 24.;},[](double x){return x<2.?0.:15.+std::tan(28.*PI/180.)*(x-2.);}));
+    // Extruded polygon with a truly vertical step: sampling a bottom heightfield
+    // across the step would instead introduce a sloped facet touching the bed,
+    // leaving no height for the foundation transition.
+    indexed_triangle_set its;
+    const std::array<Vec2d,6> outline{{{0.,0.},{2.,0.},{2.,15.},
+        {8.,15.+6.*std::tan(28.*PI/180.)},{8.,24.},{0.,24.}}};
+    for(double y:{0.,4.}) for(const auto& p:outline) its.vertices.emplace_back(float(p.x()),float(y),float(p.y()));
+    for(const auto& face:std::array<Vec3i,4>{{{0,1,2},{0,2,5},{2,3,4},{2,4,5}}}) {
+        its.indices.push_back(face);its.indices.emplace_back(face.z()+6,face.y()+6,face.x()+6);
+    }
+    for(int i=0;i<6;++i) {const int j=(i+1)%6;
+        its.indices.emplace_back(i,i+6,j+6);its.indices.emplace_back(i,j+6,j);}
+    const TriangleMesh mesh(std::move(its));
     Print print;Model model;Test::init_print({mesh},print,model,config);
     // This test exercises the OFF branch directly; the native generated-path
     // guard, not an enable-support prerequisite, decides whether it can export.

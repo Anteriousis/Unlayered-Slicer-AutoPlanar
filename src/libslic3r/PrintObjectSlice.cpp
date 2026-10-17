@@ -1422,6 +1422,19 @@ void PrintObject::slice()
                 const double limit=virtual_tilt_limit_enforced_deg(envelope,pc.nonplanar_gantry_height.value,
                     pc.nonplanar_virtual_max_angle.value,std::hypot(xmax-xmin,ymax-ymin));
                 const double allowed=std::tan(limit*PI/180.);
+                // Regional logical-height fields certify their entire compact
+                // footprint against every hotend corner. Keep the independent
+                // gantry/user angle cap, without imposing the unrelated worst
+                // azimuth a second time. Other field types retain that cap.
+                HotendEnvelope gantry_only=envelope;gantry_only.height=0.;
+                const double regional_limit=virtual_tilt_limit_enforced_deg(gantry_only,
+                    pc.nonplanar_gantry_height.value,pc.nonplanar_virtual_max_angle.value,
+                    std::hypot(xmax-xmin,ymax-ymin));
+                const double regional_allowed=std::tan(regional_limit*PI/180.);
+                CurvedTransition::RegionalClearance regional_clearance;
+                if(envelope.enabled()) for(double x:{envelope.spread(HotendEnvelope::XPos),-envelope.spread(HotendEnvelope::XNeg)})
+                    for(double y:{envelope.spread(HotendEnvelope::YPos),-envelope.spread(HotendEnvelope::YNeg)})
+                        regional_clearance.corners.push_back({x,y});
                 underside_analysis=CurvedTransition::analyze_undersides(triangles,allowed,m_config.support_threshold_angle.value,
                     [this]{m_print->throw_if_canceled();});
                 const auto target=CurvedTransition::automatic_target(triangles,allowed);
@@ -1437,8 +1450,11 @@ void PrintObject::slice()
                     (selected_planes.empty() && !target.useful) || sparse || has_support_material();
                 if(regional) {
                     using namespace CurvedTransition;
+                    if(!envelope.enabled() || pc.nonplanar_gantry_height.value<=0.)
+                        throw std::invalid_argument("Regional curved layers require a measured configured hotend and gantry envelope");
                     auto patches=select_regions(triangles,m_slicing_params.first_object_layer_height,
-                        m_config.layer_height.value,allowed,solid_depth,sparse,[this]{m_print->throw_if_canceled();});
+                        m_config.layer_height.value,regional_allowed,solid_depth,sparse,
+                        [this]{m_print->throw_if_canceled();},regional_clearance);
                     patches.erase(std::remove_if(patches.begin(),patches.end(),[&](const Regions::Patch& p) {
                         return std::find(m_curved_rejected_centres.begin(),m_curved_rejected_centres.end(),Vec2d(p.x,p.y))!=m_curved_rejected_centres.end();
                     }),patches.end());
@@ -1455,7 +1471,7 @@ void PrintObject::slice()
                             [this]{m_print->throw_if_canceled();});
                         if(underside) {domain=underside->domain();program=std::move(underside);}
                     }
-                    if(!program && !patches.empty()) program=std::make_shared<Regions>(domain,std::move(patches),allowed);
+                    if(!program && !patches.empty()) program=std::make_shared<Regions>(domain,std::move(patches),regional_allowed,regional_clearance);
                     if(!program) {
                         if(underside_analysis->has_candidate && has_support_material() && m_config.support_type.value!=stNormalAuto)
                             throw std::invalid_argument("an underside direction was found, but mapped support generation currently supports Normal (auto), not the selected support type; support settings were retained");

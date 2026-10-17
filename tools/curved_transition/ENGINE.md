@@ -40,6 +40,24 @@ sparse proposals also reserve the highest roof in their whole footprint so the
 field cannot reach below the configured top shell. These remain candidate
 heuristics: full generated bead-box checks decide which patches survive.
 
+Regional layers use `z = w + S(w) F(x,y)`, with compact C2 roof fields.
+At fixed logical layer height `w`, the slope is `S(w) grad F`: it cannot
+overshoot the target slope during a transition. This removes the old fixed
+70% angular reserve. The inverse Jacobian and inverse Hessian still bound
+spacing and mesh error; a safeguarded inverse retains a monotone bracket.
+
+The regional angle cap retains the configured maximum and gantry reach.
+Every candidate additionally bounds the entire disk, including diagonal and
+opposite taper slopes, against all four signed corners of the configured
+hotend envelope. For `phi=(1-r)^4(1+4r)`, the proof uses
+`-r phi' <= 432/625` and the angular bound
+`-(a.e)(g.e) <= (|a||g|-a.g)/2`. A centre-direction check alone is insufficient.
+Thus a target such as 5 degrees can be reached where this envelope and the
+available transition height permit it, even if a scalar worst-azimuth limit
+would be smaller. Tighter envelopes still reduce the target or reject it.
+This is a configured-envelope certificate, not a new physical measurement;
+manual global plane blends and underside fields retain their existing caps.
+
 The decision and reason are displayed as a slicing notification and recorded in
 the `layer_strategy` G-code header. A later extrusion or motion safety refusal
 still stops slicing: automatic mode does not conceal such errors or export a
@@ -202,7 +220,7 @@ even when automatic selection falls back to planar. The score is a geometric
 ranking heuristic, not support material saved, measured printability, or a bridge
 span or collision check.
 
-If no roof patch fits and Normal (auto) supports are enabled, automatic mode can
+If no roof patch fits, automatic mode can
 apply a whole-object underside field. It requires a candidate that does not worsen
 another threshold-relevant surface. The field blends above a flat first layer and
 finishes below all elevated downward faces, with bead, contact-gap and displacement

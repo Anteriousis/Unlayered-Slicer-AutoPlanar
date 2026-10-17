@@ -7,11 +7,41 @@ namespace Slic3r::CurvedTransition {
 
 // Disjoint compact C2 fields. Each roof patch has its own direction; the rest
 // of the model (including protected underside/contact regions) stays planar.
-// w=z-S(z)*g.(x-c)*phi(|x-c|/r), phi=(1-r)^4(1+4r).
+// z=w+S(w)*g.(x-c)*phi(|x-c|/r), phi=(1-r)^4(1+4r).
+// Blending in logical height keeps |grad z| <= |g|, including transitions.
+// The physical-height formulation divided that slope by a varying Jacobian
+// and needed an additional angular reserve to prevent intermediate overshoot.
+struct RegionalClearance {
+    // Signed corners of the configured four-face hotend pyramid, per mm of Z.
+    // Empty means the caller has already supplied an all-direction slope cap.
+    std::vector<Gradient> corners;
+    double target_limit(double gx,double gy,double allowed) const {
+        const double g=std::hypot(gx,gy);
+        if(!(std::isfinite(g) && std::isfinite(allowed) && allowed>0.))
+            throw std::invalid_argument("Invalid regional clearance direction");
+        if(g==0.) return 0.;
+        double result=allowed;
+        for(const auto& a:corners) {
+            if(!std::isfinite(a.dx) || !std::isfinite(a.dy))
+                throw std::invalid_argument("Invalid regional clearance corner");
+            const double dot=(a.dx*gx+a.dy*gy)/g;
+            // grad(F) = phi*g + r*phi'*(g.e)*e. For every unit e,
+            // -(g.e)*(a.e) <= (|a||g|-a.g)/2. Also phi<=1 and
+            // -r*phi'=20*r^2*(1-r)^3 <= 432/625, for ALL 0<=r<=1.
+            // This bounds the complete disk, including opposite/diagonal
+            // taper directions, rather than checking only its centre slope.
+            const double projection=std::max(0.,dot)+(432./625.)*
+                std::max(0.,(std::hypot(a.dx,a.dy)-dot)*.5);
+            if(projection>0.) result=std::min(result,1./projection);
+        }
+        return result;
+    }
+};
+
 class Regions final : public Field {
 public:
     struct Patch { double x,y,radius,lo,hi,gx,gy; };
-    Regions(ModelDomain domain,std::vector<Patch> patches,double allowed)
+    Regions(ModelDomain domain,std::vector<Patch> patches,double allowed,const RegionalClearance& clearance={})
         : Field(Options{},{}),m_domain(domain),m_patches(std::move(patches))
     {
         if(m_patches.empty() || !std::isfinite(allowed) || allowed<=0.)
@@ -25,23 +55,29 @@ public:
             for(size_t j=0;j<i;++j) if(std::hypot(p.x-m_patches[j].x,p.y-m_patches[j].y)<p.radius+m_patches[j].radius)
                 throw std::invalid_argument("Curved region footprints must not overlap");
             const double g=std::hypot(p.gx,p.gy),depth=p.hi-p.lo;
+            if(g>clearance.target_limit(p.gx,p.gy,allowed)+1e-10)
+                throw std::invalid_argument("Regional slope exceeds a configured toolhead face or angle limit");
             // max r*phi(r)<0.17. The eigenvalues of grad(u*phi) are
             // phi in [0,1] and phi+r*phi' in [-7/16,1]. Thus |grad L|<=|g|.
             const double a=.17*g*p.radius,d=1.875*a/depth;
             m_amplitude=std::max(m_amplitude,a);
-            m_jmin=std::min(m_jmin,1.-d);m_jmax=std::max(m_jmax,1.+d);
+            if(d>.25) throw std::invalid_argument("Regional blend exceeds monotonicity allowance");
+            m_jmin=std::min(m_jmin,1./(1.+d));m_jmax=std::max(m_jmax,1./(1.-d));
             m_g=std::max(m_g,g);
-            m_hessian=std::max(m_hessian,22.*g/p.radius+3.75*g/depth+
-                (10.*std::sqrt(3.)/3.)*a/(depth*depth));
+            // Implicit inverse w+S(w)F(x,y)-z=0. The full inverse gradient
+            // has norm <= sqrt(1+g^2)/(1-d). Bound all mixed and ZZ terms.
+            const double inverse_gradient=std::hypot(1.,g)/(1.-d);
+            m_hessian=std::max(m_hessian,(22.*g/p.radius+3.75*g/depth*inverse_gradient+
+                (10.*std::sqrt(3.)/3.)*a/(depth*depth)*inverse_gradient*inverse_gradient)/(1.-d));
         }
-        if(m_jmin<.75 || m_g/m_jmin>allowed+1e-10)
+        if(m_jmin<.75 || m_g>allowed+1e-10)
             throw std::invalid_argument("Regional blend exceeds monotonicity or slope clearance");
         m_reference=domain.top_max+m_amplitude;
     }
     bool enabled() const override {return true;}
     double reference_top_mm() const override {return m_reference;}
     void set_reference_top(double z) {m_reference=z;}
-    double slope_bound() const override {return m_g/m_jmin;}
+    double slope_bound() const override {return m_g;}
     double jacobian_min() const override {return m_jmin;}
     double jacobian_max() const override {return m_jmax;}
     double max_displacement_mm() const override {return m_amplitude;}
@@ -61,28 +97,41 @@ public:
     const std::vector<Patch>& patches() const {return m_patches;}
     LayerMode layer_mode(double x,double y,double physical_z) const override {
         for(const auto& p:m_patches) if(physical_z>p.lo && std::hypot(x-p.x,y-p.y)<p.radius)
-            return physical_z<p.hi?LayerMode::Transition:LayerMode::Curved;
+            return slice_z(x,y,physical_z)<p.hi?LayerMode::Transition:LayerMode::Curved;
         return LayerMode::Planar;
     }
     double slice_z(double x,double y,double z) const override {
-        const auto q=displacement(x,y,z);return z-q.value;
+        check(x,y,z);
+        if(identity_on_box(x,x,y,y,z,z)) return z;
+        double lo=z-m_amplitude,hi=z+m_amplitude;
+        // A safeguarded inverse: most roofs are in the terminal slab and
+        // changing-height samples converge in a few Newton steps. The bracket
+        // is retained, so a rejected step cannot jump across layers.
+        double w=z;
+        for(int i=0;i<12;++i) {
+            const auto q=displacement(x,y,w);
+            const double residual=w+q.value-z;
+            if(std::abs(residual)<1e-12) return w;
+            if(residual<0.) lo=w;else hi=w;
+            const double candidate=w-residual/(1.+q.dz);
+            w=candidate>lo && candidate<hi?candidate:(lo+hi)*.5;
+        }
+        for(int i=0;i<48;++i) {const double mid=(lo+hi)*.5;if(world_z(x,y,mid)<z) lo=mid;else hi=mid;}
+        return (lo+hi)*.5;
     }
     double world_z(double x,double y,double w) const override {
         check(x,y,w);
-        if(identity_on_box(x,x,y,y,w-m_amplitude,w+m_amplitude)) return w;
-        double lo=w-m_amplitude,hi=w+m_amplitude;
-        for(int i=0;i<48;++i) {const double mid=(lo+hi)*.5;if(slice_z(x,y,mid)<w) lo=mid;else hi=mid;}
-        return (lo+hi)*.5;
+        return w+displacement(x,y,w).value;
     }
     Gradient gradient(double x,double y,double w) const override {
-        const auto q=displacement(x,y,world_z(x,y,w));
-        return {q.dx/(1.-q.dz),q.dy/(1.-q.dz)};
+        const auto q=displacement(x,y,w);
+        return {q.dx,q.dy};
     }
     // Gradient of a physical roof after mapping into the logical slice frame.
     // Used only to rank candidate usefulness; field bounds are independent.
     Gradient logical_roof_gradient(double x,double y,double z,double gx,double gy) const {
-        const auto q=displacement(x,y,z);
-        return {(1.-q.dz)*gx-q.dx,(1.-q.dz)*gy-q.dy};
+        const auto q=displacement(x,y,slice_z(x,y,z));
+        return {(gx-q.dx)/(1.+q.dz),(gy-q.dy)/(1.+q.dz)};
     }
 private:
     struct Sample {double value=0.,dx=0.,dy=0.,dz=0.;};
@@ -140,7 +189,8 @@ inline double regional_contact_height(const Ramp::Triangle& triangle,
 // Roof selection is a heuristic. Accepted fields have analytic bounds above;
 // bridge/support toolpaths are checked against their full bead boxes at export.
 inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triangle>& mesh,
-    double first,double step,double allowed,double solid_depth,bool sparse,const std::function<void()>& cancel={})
+    double first,double step,double allowed,double solid_depth,bool sparse,const std::function<void()>& cancel={},
+    const RegionalClearance& clearance={})
 {
     struct Face {double x,y,z,gx,gy,area,xmin,xmax,ymin,ymax,zmax;const Ramp::Triangle* triangle;};
     struct Box {double xmin,xmax,ymin,ymax,zmax;const Ramp::Triangle* triangle;};
@@ -171,7 +221,7 @@ inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triang
     // taper. Include adjacent flat roofs in the cost and require a positive
     // sampled reduction. This is a ranking heuristic, not a finish certificate.
     const auto benefit=[&](const Regions::Patch& p) {
-        const Regions trial({p.x-p.radius,p.x+p.radius,p.y-p.radius,p.y+p.radius,p.hi,0.},{p},allowed);
+        const Regions trial({p.x-p.radius,p.x+p.radius,p.y-p.radius,p.y+p.radius,p.hi,0.},{p},allowed,clearance);
         double before=0.,after=0.;
         constexpr int divisions=16,samples=divisions*divisions;
         for(const auto& f:surfaces) {
@@ -208,7 +258,7 @@ inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triang
         for(size_t k=0;k<3;++k) {f.x+=weights[k]*(*f.triangle)[k][0];
             f.y+=weights[k]*(*f.triangle)[k][1];f.z+=weights[k]*(*f.triangle)[k][2];}
         if(cancel) cancel();
-        const double g=std::hypot(f.gx,f.gy),scale=std::min(1.,.70*allowed/g);
+        const double g=std::hypot(f.gx,f.gy),scale=std::min(1.,clearance.target_limit(f.gx,f.gy,allowed)/g);
         const double gx=f.gx*scale,gy=f.gy*scale;
         if(std::hypot(gx,gy)<std::tan(.5*3.14159265358979323846/180.) || scale<.10) continue;
         bool covered=false;

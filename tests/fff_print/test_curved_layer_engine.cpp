@@ -409,14 +409,19 @@ TEST_CASE("Automatic coupon roofs generate nonplanar top extrusion with supports
     if(!config.opt_bool("enable_support")) REQUIRE(o->support_layers().empty());
     ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;
     print.export_gcode(output.string(),&result,nullptr);
-    size_t top_xyz=0;Vec3f previous=Vec3f::Zero();
+    size_t top_xyz=0;double top_angle=0.;Vec3f previous=Vec3f::Zero();
     for(const auto& move:result.moves) {
+        if(move.type==EMoveType::Extrude && move.delta_extruder>0. && move.extrusion_role==erTopSolidInfill) {
+            const auto& normal=result.tool_axes[move.tool_axis_id];
+            top_angle=std::max(top_angle,std::atan2(double(normal.head<2>().norm()),std::abs(double(normal.z())))*180./PI);
+        }
         if(move.type==EMoveType::Extrude && move.delta_extruder>0. && move.extrusion_role==erTopSolidInfill &&
            (move.position.head<2>()-previous.head<2>()).norm()>.01 &&
            std::abs(move.position.z()-previous.z())>.0001) ++top_xyz;
         previous=move.position;
     }
     REQUIRE(top_xyz>20);
+    REQUIRE(top_angle>4.5);REQUIRE(top_angle<=5.0001);
     REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==original);
 }
 

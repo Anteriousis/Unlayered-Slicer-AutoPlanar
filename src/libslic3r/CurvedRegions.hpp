@@ -226,6 +226,9 @@ inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triang
             const double depth=std::max(sparse?step:3.*step,1.875*amplitude/.20);
             double lo=first;
             if(sparse) for(const auto& roof:surfaces) {
+                if(cancel && (++inspected%4096)==0) cancel();
+                if(f.x+radius<roof.xmin || f.x-radius>roof.xmax ||
+                   f.y+radius<roof.ymin || f.y-radius>roof.ymax) continue;
                 const double local=regional_contact_height(*roof.triangle,
                     f.x-radius,f.x+radius,f.y-radius,f.y+radius);
                 lo=std::max(lo,local-solid_depth+step);

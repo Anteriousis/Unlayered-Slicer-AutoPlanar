@@ -431,8 +431,8 @@ TEST_CASE("Support-free underside mapping uses actual generated paths rather tha
     const std::array<Vec2d,6> outline{{{0.,0.},{2.,0.},{2.,15.},
         {8.,15.+6.*std::tan(28.*PI/180.)},{8.,24.},{0.,24.}}};
     for(double y:{0.,4.}) for(const auto& p:outline) its.vertices.emplace_back(float(p.x()),float(y),float(p.y()));
-    for(const auto& face:std::array<Vec3i,4>{{{0,1,2},{0,2,5},{2,3,4},{2,4,5}}}) {
-        its.indices.push_back(face);its.indices.emplace_back(face.z()+6,face.y()+6,face.x()+6);
+    for(const auto& face:std::array<std::array<int,3>,4>{{{{0,1,2}},{{0,2,5}},{{2,3,4}},{{2,4,5}}}}) {
+        its.indices.emplace_back(face[0],face[1],face[2]);its.indices.emplace_back(face[2]+6,face[1]+6,face[0]+6);
     }
     for(int i=0;i<6;++i) {const int j=(i+1)%6;
         its.indices.emplace_back(i,i+6,j+6);its.indices.emplace_back(i,j+6,j);}

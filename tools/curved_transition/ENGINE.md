@@ -173,14 +173,18 @@ float rounding and normal slicer simplification. Resource limits fail explicitly
 rather than silently coarsening the mesh. The ramp boundary maps exactly. The
 user's model and Prepare geometry are unchanged.
 
-Regional mode uses `w=z-S(z)*g.(x-c)*phi(|x-c|/r)` with
+Regional mode uses `z=w+S(w)*g.(x-c)*phi(|x-c|/r)` with
 `phi(t)=(1-t)^4*(1+4t)` inside disjoint disks and zero outside. Both the spatial
 taper and temporal blend are C2. The spatial gradient operator has eigenvalues
 `phi` in [0,1] and `phi+t*phi'` in [-7/16,1]; displacement is bounded by
 `0.17*|g|*r`. Temporal derivative and Hessian bounds establish monotonicity, slope,
 normal spacing, conforming mesh error and emitted path subdivision. Local Hessian
 boxes avoid refining identity facets unnecessarily, with shared edge splits still
-propagated to neighbours. The selector tries several patch radii and uses equal-area
+propagated to neighbours. The selector compares full, three-quarter, half and
+quarter amplitudes of the locally permitted gradient, each at several patch radii.
+The configured maximum is a ceiling; a lower angle may fit a thinner shell or
+improve a larger footprint. At each seed the feasible angle/radius pair with the
+largest sampled gain wins. The selector uses equal-area
 barycentric quadrature over affected upward facets, including adjacent flat roofs.
 It requires at least a 2% sampled reduction in projected squared roof slope in the
 logical slice frame. This rejects compact patches that merely move stair-stepping

@@ -259,39 +259,49 @@ inline std::vector<Regions::Patch> select_regions(const std::vector<Ramp::Triang
             f.y+=weights[k]*(*f.triangle)[k][1];f.z+=weights[k]*(*f.triangle)[k][2];}
         if(cancel) cancel();
         const double g=std::hypot(f.gx,f.gy),scale=std::min(1.,clearance.target_limit(f.gx,f.gy,allowed)/g);
-        const double gx=f.gx*scale,gy=f.gy*scale;
-        if(std::hypot(gx,gy)<std::tan(.5*3.14159265358979323846/180.) || scale<.10) continue;
+        if(g*scale<std::tan(.5*3.14159265358979323846/180.) || scale<.10) continue;
         bool covered=false;
         for(const auto& p:patches) if(std::hypot(f.x-p.x,f.y-p.y)<p.radius+1.) {covered=true;break;}
         if(covered) continue;
         if(++proposals>256) break;
         const double base=std::clamp(std::sqrt(f.area)*.7,1.,12.);
         Regions::Patch best{};double best_gain=0.;
-        for(double factor:{.75,1.,1.5,2.,4.,8.,16.}) {
-            const double radius=std::clamp(base*factor,1.,24.);
-            bool overlap=false;
-            for(const auto& p:patches) if(std::hypot(f.x-p.x,f.y-p.y)<radius+p.radius) {overlap=true;break;}
-            if(overlap) continue;
-            const double amplitude=.17*std::hypot(gx,gy)*radius;
-            const double depth=std::max(sparse?step:3.*step,1.875*amplitude/.20);
-            double lo=first;
-            if(sparse) for(const auto& roof:surfaces) {
-                if(cancel && (++inspected%4096)==0) cancel();
-                if(f.x+radius<roof.xmin || f.x-radius>roof.xmax ||
-                   f.y+radius<roof.ymin || f.y-radius>roof.ymax) continue;
-                const double local=regional_contact_height(*roof.triangle,
-                    f.x-radius,f.x+radius,f.y-radius,f.y+radius);
-                lo=std::max(lo,local-solid_depth+step);
-            }
-            for(const auto& b:contacts) if(f.x+radius>b.xmin && f.x-radius<b.xmax && f.y+radius>b.ymin && f.y-radius<b.ymax) {
-                const double local=regional_contact_height(*b.triangle,
-                    f.x-radius-1.,f.x+radius+1.,f.y-radius-1.,f.y+radius+1.);
-                lo=std::max(lo,local+3.*step);
-            }
-            if(lo+depth+step*.5>f.z) continue;
-            const Regions::Patch p{f.x,f.y,radius,lo,lo+depth,gx,gy};
-            const double gain=benefit(p);
-            if(gain>best_gain) {best=p;best_gain=gain;}
+        // The maximum permitted angle is a ceiling, not a target to force.
+        // A smaller direction can fit a thin shell or a larger useful footprint.
+        // Compare the same whole-surface alignment score at bounded angle levels.
+        for(double fraction:{1.,.75,.5,.25}) {
+          const double gx=f.gx*scale*fraction,gy=f.gy*scale*fraction;
+          if(std::hypot(gx,gy)<std::tan(.5*3.14159265358979323846/180.)) continue;
+          double previous_radius=0.;
+          for(double factor:{.75,1.,1.5,2.,4.,8.,16.}) {
+              const double radius=std::clamp(base*factor,1.,24.);
+              if(radius==previous_radius) continue;
+              previous_radius=radius;
+              if(cancel) cancel();
+              bool overlap=false;
+              for(const auto& p:patches) if(std::hypot(f.x-p.x,f.y-p.y)<radius+p.radius) {overlap=true;break;}
+              if(overlap) continue;
+              const double amplitude=.17*std::hypot(gx,gy)*radius;
+              const double depth=std::max(sparse?step:3.*step,1.875*amplitude/.20);
+              double lo=first;
+              if(sparse) for(const auto& roof:surfaces) {
+                  if(cancel && (++inspected%4096)==0) cancel();
+                  if(f.x+radius<roof.xmin || f.x-radius>roof.xmax ||
+                     f.y+radius<roof.ymin || f.y-radius>roof.ymax) continue;
+                  const double local=regional_contact_height(*roof.triangle,
+                      f.x-radius,f.x+radius,f.y-radius,f.y+radius);
+                  lo=std::max(lo,local-solid_depth+step);
+              }
+              for(const auto& b:contacts) if(f.x+radius>b.xmin && f.x-radius<b.xmax && f.y+radius>b.ymin && f.y-radius<b.ymax) {
+                  const double local=regional_contact_height(*b.triangle,
+                      f.x-radius-1.,f.x+radius+1.,f.y-radius-1.,f.y+radius+1.);
+                  lo=std::max(lo,local+3.*step);
+              }
+              if(lo+depth+step*.5>f.z) continue;
+              const Regions::Patch p{f.x,f.y,radius,lo,lo+depth,gx,gy};
+              const double gain=benefit(p);
+              if(gain>best_gain) {best=p;best_gain=gain;}
+          }
         }
         if(best_gain<=0.) continue;
         patches.push_back(best);

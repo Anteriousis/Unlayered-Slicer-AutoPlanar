@@ -1661,14 +1661,26 @@ void PrintObject::slice()
                 m_slicing_params.max_suport_layer_height=std::min(m_slicing_params.max_suport_layer_height,
                     limits.max_layer*m_curved_field->jacobian_min());
             }
-            if (automatic) m_layer_strategy_decision="Automatic selection: curved. "+
-                (std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field)?
-                 std::to_string(std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field)->patches().size())+" local roof regions; bridge and support-contact zones remain planar. ":
-                 m_curved_field->maps_supports()?"Underside field applied at "+std::to_string(std::dynamic_pointer_cast<const CurvedTransition::UndersideProgram>(m_curved_field)->angle_deg())+
-                 " deg; "+(has_support_material()?std::string("native normal supports regenerated in the same field. "):
-                    std::string("supports off; no support paths requested. "))+
-                 "Bridge and foundation checks follow path generation. ":std::string())+
-                "Continuous transitions passed configured geometry and layer-spacing checks; physical clearance and finish are unverified.";
+            if (automatic) {
+                std::string selection;
+                if(const auto regions=std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field)) {
+                    double low=INFINITY,high=0.;
+                    for(const auto& p:regions->patches()) {
+                        const double angle=std::atan(std::hypot(p.gx,p.gy))*180./PI;
+                        low=std::min(low,angle);high=std::max(high,angle);
+                    }
+                    selection=std::to_string(regions->patches().size())+" local roof regions; selected centre tilts "+
+                        std::to_string(low)+" to "+std::to_string(high)+
+                        " deg after comparing local angles and region sizes. Bridge and support-contact zones remain planar. ";
+                } else if(m_curved_field->maps_supports()) {
+                    selection="Underside field applied at "+std::to_string(std::dynamic_pointer_cast<const CurvedTransition::UndersideProgram>(m_curved_field)->angle_deg())+
+                        " deg; "+(has_support_material()?std::string("native normal supports regenerated in the same field. "):
+                            std::string("supports off; no support paths requested. "))+
+                        "Bridge and foundation checks follow path generation. ";
+                }
+                m_layer_strategy_decision="Automatic selection: curved. "+selection+
+                    "Continuous transitions passed configured geometry and layer-spacing checks; physical clearance and finish are unverified.";
+            }
             if(automatic && !m_curved_rejected_centres.empty()) m_layer_strategy_decision+=" "+std::to_string(m_curved_rejected_centres.size())+" regions left planar after inspecting generated bridge/support beads.";
         } catch (const std::invalid_argument& e) {
             if (!automatic) throw SlicingError(e.what());

@@ -39,9 +39,16 @@ TEST_CASE("Regional selection retains useful roofs above protected undersides", 
     Regions f({-10.,10.,-10.,10.,11.,0.},p,.08);
     REQUIRE(f.identity_on_box(-10.,10.,-10.,10.,0.,3.6));
     REQUIRE(f.slope_bound()<=.08);
-    // No candidate may reach below the thin sparse top shell, including when
-    // its seed is near a facet edge and its disk covers a higher roof point.
-    REQUIRE(select_regions(faces,.2,.2,.08,1.,true).empty());
+    // Smaller local angles can now fit this shell. They still must not reach
+    // below it, including where a disk covers a higher point than its seed.
+    const auto sparse=select_regions(faces,.2,.2,.08,1.,true);
+    REQUIRE_FALSE(sparse.empty());
+    Regions shell({-10.,10.,-10.,10.,11.,0.},sparse,.08);
+    for(int i=0;i<40;++i) for(int j=0;j<40-i;++j) {
+        const double u=(i+.3)/40.,v=(j+.3)/40.;
+        const double x=-10.+20.*u+10.*v,y=-10.+20.*v,z=10.+u+.5*v;
+        REQUIRE(shell.world_z(x,y,z-1.)==z-1.);
+    }
     for(auto& v:faces[1]) v[2]=10.5;
     REQUIRE(select_regions(faces,.2,.2,.08,1.,false).empty());
 }
@@ -77,6 +84,31 @@ TEST_CASE("Regional contact bounds use the facet height inside the patch", "[cur
     // A genuinely close local contact must still suppress that same roof.
     faces[1]={{{-10.,-10.,10.3},{0.,-2.,10.3},{10.,-10.,10.3}}};
     REQUIRE(select_regions(faces,.2,.2,.08,1.,false).empty());
+}
+
+TEST_CASE("Regional selection chooses a useful lower local angle inside a thin roof shell", "[curved-blend][regions][automatic]")
+{
+    const double allowed=std::tan(5.*3.14159265358979323846/180.);
+    const std::vector<Ramp::Triangle> roof{{{{0.,0.,10.},{40.,0.,12.},{40.,20.,12.}}},
+        {{{0.,0.,10.},{40.,20.,12.},{0.,20.,10.}}}};
+    const auto patches=select_regions(roof,.2,.2,allowed,1.,true);
+    REQUIRE_FALSE(patches.empty());
+    Regions field({0.,40.,0.,20.,12.,0.},patches,allowed);
+    // The selected local tilt is below both the roof slope and printer ceiling.
+    REQUIRE(field.slope_bound()<.05);
+    REQUIRE(field.slope_bound()>std::tan(.5*3.14159265358979323846/180.));
+    double before=0.,after=0.;size_t changed=0;
+    // Denser independent Cartesian integration includes the taper and all of
+    // the roof, rather than reusing the selector's per-triangle samples.
+    for(int i=0;i<200;++i) for(int j=0;j<100;++j) {
+        const double x=(i+.5)*.2,y=(j+.5)*.2,z=10.+.05*x;
+        const auto q=field.logical_roof_gradient(x,y,z,.05,0.);
+        before+=.05*.05;after+=q.dx*q.dx+q.dy*q.dy;
+        if(std::abs(field.slice_z(x,y,z)-z)>1e-5) ++changed;
+        REQUIRE(field.world_z(x,y,z-1.)==z-1.);
+    }
+    REQUIRE(changed>100);
+    REQUIRE(after<before);
 }
 
 TEST_CASE("Regional logical-height blends reach five degrees without transition slope overshoot", "[curved-blend][regions][clearance]")

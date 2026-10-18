@@ -16,6 +16,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  planner_geometry:
+    # No GUI/dependency build is needed for field, score and metadata checks.
+    # Keep this independent of the portable leg for quick feedback.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure focused planner tests
+        run: cmake -S tools/curved_transition -B build-planner -DCMAKE_BUILD_TYPE=Release
+      - name: Build and test planner
+        run: |
+          cmake --build build-planner --parallel 2
+          ctest --test-dir build-planner --output-on-failure
   calibration_geometry:
     runs-on: ubuntu-24.04
     steps:

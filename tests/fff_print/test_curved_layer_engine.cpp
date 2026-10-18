@@ -623,9 +623,10 @@ TEST_CASE("Full Centauri MCT-1 retains curved roof regions alongside planar supp
     REQUIRE(load_stl(path.c_str(),&input));REQUIRE(input.objects.size()==1);
     const auto& mesh=input.objects.front()->volumes.front()->mesh();
     REQUIRE(mesh.its.indices.size()==22146);
-    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"curved_layer_blend","0"},
+    auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","0"},{"curved_layer_blend","0"},
         {"sparse_infill_density","15%"},{"top_shell_thickness","1"},{"enable_support","1"},
-        {"support_type","normal(auto)"},{"support_style","grid"},{"support_on_build_plate_only","1"}});
+        {"support_type","normal(auto)"},{"support_style","grid"},{"support_on_build_plate_only","0"},
+        {"support_threshold_angle","60"},{"support_remove_small_overhang","0"}});
     Print print;Model model;Test::init_print({mesh},print,model,config);
     // The imported mesh is centred about Z=0. Preserve ensure_on_bed()'s
     // vertical lift while moving XY; zeroing Z would sink half of the Temple.
@@ -638,6 +639,15 @@ TEST_CASE("Full Centauri MCT-1 retains curved roof regions alongside planar supp
     REQUIRE(placed_bounds.size().z()==Catch::Approx(28.));
     print.apply(model,config);
     const auto original=model.objects.front()->volumes.front()->mesh().its.vertices;
+    // This regression needs real supports alongside the curved roofs. The
+    // Temple's base blocks build-plate-only columns from reaching its roofs.
+    // Verify the unmodified planar control generates support before enabling
+    // the automatic field; do not infer support from the settings checkbox.
+    print.process();
+    REQUIRE_FALSE(print.objects().front()->curved_field());
+    REQUIRE_FALSE(print.objects().front()->support_layers().empty());
+    config.set_deserialize_strict({{"automatic_layer_strategy","1"}});
+    print.apply(model,config);
     print.process();
     INFO(print.objects().front()->layer_strategy_decision());
     REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(print.objects().front()->curved_field()));
@@ -647,7 +657,11 @@ TEST_CASE("Full Centauri MCT-1 retains curved roof regions alongside planar supp
     size_t curved=0,support=0;
     for(const auto& move:result.moves) if(move.type==EMoveType::Extrude && move.extrusion_role!=erCustom) {
         if(result.tool_axes[move.tool_axis_id].z()<.999999) ++curved;
-        if(is_support(move.extrusion_role)) ++support;
+        if(is_support(move.extrusion_role)) {
+            ++support;
+            REQUIRE(move.layer_mode==0);
+            REQUIRE(result.tool_axes[move.tool_axis_id].head<2>().norm()<1e-6f);
+        }
     }
     REQUIRE(curved>0);REQUIRE(support>0);
 }

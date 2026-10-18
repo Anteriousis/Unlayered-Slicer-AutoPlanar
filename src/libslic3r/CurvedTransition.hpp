@@ -76,6 +76,7 @@ public:
     virtual ~Field() = default;
     virtual bool enabled() const { return m_options.enabled; }
     virtual double reference_top_mm() const { return m_options.reference_top_mm; }
+    virtual void set_reference_top(double z) {m_options.reference_top_mm=z;}
     virtual double slope_bound() const { return m_slope_max; }
     virtual LayerMode layer_mode(double x,double y,double physical_z) const {
         if(!enabled() || physical_z<=m_options.flat_height_mm) return LayerMode::Planar;

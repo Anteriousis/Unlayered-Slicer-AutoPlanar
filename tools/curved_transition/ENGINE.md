@@ -1,5 +1,52 @@
 # Experimental native curved layer blend
 
+## Joint planning and decision overlay
+
+Automatic selection now compares roof-only, underside-only, up to two joint
+roof/underside slope allocations, and a genuine native planar reference. Both
+stages of a joint candidate operate on the same solid: `z=U(x,y,R(x,y,w))`.
+Roof proposals are made in the underside field's logical domain. Combined
+slope and Jacobian bounds reserve headroom for both stages before slicing.
+The composition's inverse Hessian uses the chain rule over expanded boxes;
+conforming mesh tolerance, spacing, printer envelope and travel checks remain.
+This is a bounded joint search, not a global optimum over arbitrary fields.
+
+Each feasible trial generates native contours, infill and supports. Generated
+bridge/support bead conflicts prune roof patches and regenerate the solid.
+Mapped support foundations and affine bridge slabs are checked for joint
+candidates too. An unsafe candidate is rejected. A selected candidate is
+regenerated and independently checked again before export; a failed final
+reconstruction stops output. User support/process/printer settings are retained.
+
+The balanced policy compares against that object's generated planar control:
+normalized roof angular-alignment improvement + normalized underside angular
+deficit improvement + 0.5 times the relative generated support-volume saving,
+minus 0.15 times the relative motion-cost increase and 0.10 times the relative
+model-volume increase. A score must exceed 0.0001 to beat planar. Surface
+integrals retain original physical facet areas and evaluate actual local field
+normals, including flat roofs and opposing features. These are geometric finish
+and overhang estimates, not measured Ra, strength or support removability.
+
+Material cost samples the generated paths with the same physical bead-area
+correction as the writer. Motion cost includes generated path lengths, configured
+role/Z speeds, path connections and the retained raised nonplanar travel. At most
+16 samples per native segment bound evaluation work. The traversal used during
+planning is not the final G-code ordering; acceleration, retractions, firmware,
+warmup and plate-wide inter-object travel are not simulated. Costs are labelled
+estimates and must not be presented as measured print time or certified savings.
+Ramp/global candidates also compete against a native planar control.
+
+**Preview > Layer mode > Region overlay** shows labelled XY planning footprints.
+**Include rejected regions** adds dashed outlines. Hover a label, or select a
+row under **Region decisions**, to read its reason, candidate surface gain,
+generated support volume, motion estimate and net score. Selecting a row isolates
+that region. Footprints are displayed at transition heights; they are not cut
+planes, exact surface masks or collision meshes. The bounded versioned
+`layer_region` G-code headers retain this overlay when a file is imported.
+
+The current development changes require exact-source native/package/GUI
+validation before replacing a previously validated desktop build.
+
 The engine slices the original mesh through one continuous coordinate field,
 generates contours and infill in that domain, and emits physical XYZ paths through
 the inverse field. This is native slicing and Preview integration. It is not a
@@ -27,9 +74,9 @@ Symmetric curved surfaces, unsupported undersides, supports and sparse infill us
 independent compact roof fields instead of requiring a single global direction.
 Roof-region downward-face contacts have protected planar zones. Native bridge/support bead
 boxes are inspected after path generation; intersecting local patches are removed
-and the original solid is re-sliced, up to 64 bounded retries. An object with no
-remaining useful roof region tries the bounded underside strategy below before
-falling back to planar. No process setting or printer limit is
+and the original solid is re-sliced, up to 64 bounded retries. The joint search
+also compares the bounded underside strategy and planar control even when useful
+roof regions exist. No process setting or printer limit is
 changed. Explicit B/C rotations or directed parts conflict with
 automatic selection and require the user to choose manual mode instead.
 

@@ -7,6 +7,7 @@
 #include "libslic3r/CurvedPlaneProgram.hpp"
 #include "libslic3r/CurvedMesh.hpp"
 #include "libslic3r/CurvedRegions.hpp"
+#include "libslic3r/CurvedJointPlanning.hpp"
 #include "libslic3r/CurvedFixedNozzle.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -496,6 +497,53 @@ TEST_CASE("Automatic slicing checks explicit plane transitions and rejects ambig
     REQUIRE(print.objects().front()->layer_strategy_decision().find("intersecting")!=std::string::npos);
     config.set_deserialize_strict({{"layer_rotation_b","2"}});print.apply(model,config);
     REQUIRE_FALSE(print.validate().string.empty());
+}
+
+TEST_CASE("Automatic planning compares generated joint roof underside and planar candidates", "[curved-engine][automatic][joint]")
+{
+    auto config=curved_config();config.set_deserialize_strict({{"curved_layer_blend","0"},
+        {"automatic_layer_strategy","1"},{"enable_support","1"},{"support_threshold_angle","30"},
+        {"support_type","normal(auto)"},{"support_style","grid"}});
+    // Elevated underside leaves enough foundation space for a joint field.
+    // A faceted roof supplies two different finish directions on the same solid.
+    indexed_triangle_set its;
+    const std::array<Vec2d,7> outline{{{0.,0.},{2.,0.},{2.,15.},
+        {12.,15.+10.*std::tan(28.*PI/180.)},{12.,27.},{6.,27.5},{0.,27.}}};
+    for(double y:{0.,6.}) for(const auto& p:outline) its.vertices.emplace_back(float(p.x()),float(y),float(p.y()));
+    // A valid fan about the upper-left vertex stays inside this polygon.
+    for(int i=0;i<5;++i) {
+        its.indices.emplace_back(6,i,i+1);its.indices.emplace_back(i+1+7,i+7,6+7);
+    }
+    for(int i=0;i<7;++i) {const int j=(i+1)%7;its.indices.emplace_back(i,i+7,j+7);its.indices.emplace_back(i,j+7,j);}
+    Print print;Model model;Test::init_print({TriangleMesh(std::move(its))},print,model,config);
+    const auto original=model.objects.front()->volumes.front()->mesh().its.vertices;
+    print.process();const auto* object=print.objects().front();
+    INFO(object->layer_strategy_decision());
+    REQUIRE(object->layer_strategy_decision().find("Generated benefit/cost choice:")!=std::string::npos);
+    REQUIRE(object->layer_strategy_decision().find("Joint half budget:")!=std::string::npos);
+    REQUIRE(object->layer_strategy_decision().find("Planar:")!=std::string::npos);
+    REQUIRE_FALSE(object->layer_region_records().empty());
+    double chosen_score=-INFINITY;bool chosen_roof=false,chosen_under=false;
+    std::vector<CurvedTransition::RegionDecision> regions;
+    for(const auto& record:object->layer_region_records()) {
+        CurvedTransition::RegionDecision r;REQUIRE(CurvedTransition::RegionDecision::decode(record,r));
+        REQUIRE(r.motion_seconds>=0.);REQUIRE(r.support_mm3>=0.);
+        if(r.selected) {chosen_score=r.gain;chosen_roof|=r.kind==0;chosen_under|=r.kind==1;}
+        regions.push_back(std::move(r));
+    }
+    REQUIRE(std::isfinite(chosen_score));REQUIRE(chosen_score>=0.);
+    for(const auto& r:regions) if(!r.selected) REQUIRE(r.gain<=chosen_score+1e-5);
+    if(std::dynamic_pointer_cast<const CurvedTransition::JointField>(object->curved_field())) {
+        REQUIRE(chosen_roof);REQUIRE(chosen_under);REQUIRE(object->curved_field()->maps_supports());
+    }
+    ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;print.export_gcode(output.string(),&result,nullptr);
+    REQUIRE_FALSE(result.layer_region_records.empty());
+    for(const auto& move:result.moves) if(move.type==EMoveType::Extrude && move.delta_extruder>0.) {
+        const auto& normal=result.tool_axes[move.tool_axis_id];
+        REQUIRE(std::atan2(normal.head<2>().norm(),std::abs(normal.z()))*180./PI<=5.001);
+    }
+    REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==original);
+    REQUIRE(object->config().enable_support.value);
 }
 
 TEST_CASE("Automatic slicing selects independent fields for different models and sparse infill", "[curved-engine][automatic][multi-model]")
@@ -1168,6 +1216,9 @@ TEST_CASE("Imported Preview preserves explicit layer modes and bounded selection
     {
         std::ofstream out(temp.string());
         out<<"; layer_strategy: Automatic selection: curved. Fixture region\n"
+              "; layer_region: v1 4 0 1 10 20 4 3 2.5 0.25 45 12 chosen roof fixture\n"
+              "; layer_region: v1 5 0 0 12 22 4 3 2.5 0 50 14 rejected contact fixture\n"
+              "; layer_region: v1 6 0 3 10 20 4 3 2.5 0 45 12 invalid boolean\n"
               "M83\nG90\n;TYPE:Outer wall\n;HEIGHT:0.2\n;WIDTH:0.45\n"
               "G1 X0 Y0 Z0.2 F600\n"
               ";LAYER_MODE:1\nG1 X10 Y0 Z0.3 E1\n"
@@ -1183,8 +1234,14 @@ TEST_CASE("Imported Preview preserves explicit layer modes and bounded selection
     REQUIRE(modes==std::vector<unsigned>{1,2,255,255});
     REQUIRE(replay.get_result().layer_strategy_decisions.size()==1);
     REQUIRE(replay.get_result().layer_strategy_decisions.front()=="Automatic selection: curved. Fixture region");
+    REQUIRE(replay.get_result().layer_region_records.size()==2);
+    CurvedTransition::RegionDecision region;
+    REQUIRE(CurvedTransition::RegionDecision::decode(replay.get_result().layer_region_records.front(),region));
+    REQUIRE(region.selected);REQUIRE(region.id==4);REQUIRE(region.x==10.);REQUIRE(region.y==20.);
     GCodeProcessorResult copied;copied=replay.get_result();
     REQUIRE(copied.layer_strategy_decisions==replay.get_result().layer_strategy_decisions);
+    REQUIRE(copied.layer_region_records==replay.get_result().layer_region_records);
     REQUIRE(copied.moves.size()==replay.get_result().moves.size());
     copied.reset();REQUIRE(copied.layer_strategy_decisions.empty());
+    REQUIRE(copied.layer_region_records.empty());
 }

@@ -135,6 +135,10 @@ public:
         }
         return {m_terminal_x,m_terminal_y};
     }
+    double forward_vertical_scale(double x,double y,double w) const {
+        const auto d=direction_derivative(world_z(x,y,w));
+        return 1./(1.-d.dx*(x-m_cx)-d.dy*(y-m_cy));
+    }
 
 private:
     Gradient direction_derivative(double z) const {

@@ -4,6 +4,7 @@
 #include "Polygon.hpp"
 #include "PrintConfig.hpp"
 #include "CurvedFixedNozzle.hpp"
+#include "CurvedPlanningReport.hpp"
 #include "libslic3r.h"
 #include "I18N.hpp"
 #include "GCode.hpp"
@@ -3610,12 +3611,22 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         file.writeln(filament_diameter_list);
 
         coordf_t max_height_z = -1;
+        int planning_region_id=0;
         for (const auto& object : print.objects()) {
             if (!object->layer_strategy_decision().empty()) {
                 std::string decision=object->layer_strategy_decision();
                 std::replace(decision.begin(),decision.end(),'\n',' ');
                 std::replace(decision.begin(),decision.end(),'\r',' ');
                 file.writeln("; layer_strategy: "+decision);
+            }
+            for(const auto& instance:object->instances()) {
+                const Vec2d shift=unscale(instance.shift);
+                for(const auto& record:object->layer_region_records()) {
+                    CurvedTransition::RegionDecision r;
+                    if(planning_region_id>=1024 || !CurvedTransition::RegionDecision::decode(record,r)) continue;
+                    r.id=planning_region_id++;r.x+=shift.x();r.y+=shift.y();
+                    file.writeln("; layer_region: "+r.encode());
+                }
             }
             // Curved print_z is a reference-field coordinate. Report the
             // physical deposition bound instead of that logical layer height.

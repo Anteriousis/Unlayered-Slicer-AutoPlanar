@@ -279,6 +279,7 @@ class Print;
         // multiplanar orientation is piecewise constant per chunk, so this stays tiny.
         std::vector<Vec3f> tool_axes;
         std::vector<std::string> layer_strategy_decisions;
+        std::vector<std::string> layer_region_records;
         // UNLAYERED_MOD: the print was sliced for virtual-5-axis (3-axis) output -- B/C words are
         // suppressed and the physical nozzle stays vertical, so the preview's hotend marker must
         // not tilt even though tool_axes carries the layers' (tilted) build directions.
@@ -374,6 +375,7 @@ class Print;
             // stays at its default in the destination (which is how the tilted preview first broke).
             tool_axes = other.tool_axes;
             layer_strategy_decisions = other.layer_strategy_decisions;
+            layer_region_records = other.layer_region_records;
             virtual_5axis = other.virtual_5axis;
             lines_ends = other.lines_ends;
             printable_area = other.printable_area;

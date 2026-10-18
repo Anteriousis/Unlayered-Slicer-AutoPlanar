@@ -21,6 +21,7 @@
 #include "AutomaticCurvedSelection.hpp"
 #include "UndersideAnalysis.hpp"
 #include "CurvedUnderside.hpp"
+#include "CurvedJointPlanning.hpp"
 #include "AutoPlanes.hpp"
 //BBS
 #include "ShortestPath.hpp"
@@ -1285,18 +1286,16 @@ static void validate_underside_deposition(const PrintObject& object,const std::f
 bool PrintObject::refine_curved_regions_for_paths()
 {
     if(!m_config.automatic_layer_strategy.value) return false;
-    if(m_curved_field && m_curved_field->maps_supports()) {
-        validate_underside_deposition(*this,[this]{m_print->throw_if_canceled();});return false;
-    }
-    const auto regions=std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field);
-    if(!regions) return false;
+    using namespace CurvedTransition;
+    const auto regions=roof_part(m_curved_field);
     std::vector<std::array<double,6>> boxes;
     const auto path_box=[&](const ExtrusionPath& path,double z) {
         if(!is_bridge(path.role()) && !is_support(path.role())) return;
         const auto bb=get_extents(path.polyline.to_polyline()).inflated(scale_(path.width*.5+.02));
         const Vec2d lo=unscale(bb.min),hi=unscale(bb.max);
-        if(!regions->identity_on_box(lo.x(),hi.x(),lo.y(),hi.y(),z-path.height,z))
-            boxes.push_back({lo.x(),hi.x(),lo.y(),hi.y(),z-path.height,z});
+        const double a=regions->max_displacement_mm();
+        if(!regions->identity_on_box(lo.x(),hi.x(),lo.y(),hi.y(),z-path.height-a,z+a))
+            boxes.push_back({lo.x(),hi.x(),lo.y(),hi.y(),z-path.height-a,z+a});
     };
     std::function<void(const ExtrusionEntity&,double)> visit;
     visit=[&](const ExtrusionEntity& e,double z) {
@@ -1305,10 +1304,11 @@ bool PrintObject::refine_curved_regions_for_paths()
         else if(const auto* l=dynamic_cast<const ExtrusionLoop*>(&e)) for(const auto& p:l->paths) path_box(p,z);
         else if(const auto* m=dynamic_cast<const ExtrusionMultiPath*>(&e)) for(const auto& p:m->paths) path_box(p,z);
     };
-    for(const auto* layer:m_layers) for(const auto* r:layer->regions()) {visit(r->perimeters,layer->print_z);visit(r->fills,layer->print_z);}
-    for(const auto* layer:m_support_layers) visit(layer->support_fills,layer->print_z);
-    if(boxes.empty()) return false;
-    for(const auto& p:regions->patches()) for(const auto& b:boxes) {
+    if(regions) {
+      for(const auto* layer:m_layers) for(const auto* r:layer->regions()) {visit(r->perimeters,layer->print_z);visit(r->fills,layer->print_z);}
+      for(const auto* layer:m_support_layers) visit(layer->support_fills,layer->print_z);
+    }
+    for(const auto& p:regions?regions->patches():std::vector<Regions::Patch>{}) for(const auto& b:boxes) {
         const double dx=std::max({b[0]-p.x,0.,p.x-b[1]}),dy=std::max({b[2]-p.y,0.,p.y-b[3]});
         if(b[5]>p.lo && dx*dx+dy*dy<p.radius*p.radius) {
             const Vec2d centre(p.x,p.y);
@@ -1317,9 +1317,156 @@ bool PrintObject::refine_curved_regions_for_paths()
             break;
         }
     }
-    m_curved_planning_retry=true;
-    this->invalidate_step(posSlice);
-    return true;
+    const auto retry=[&] {m_curved_planning_retry=true;this->invalidate_step(posSlice);return true;};
+    if(!boxes.empty()) {
+        if(m_curved_plan && m_curved_plan->final) throw SlicingError("A selected roof now intersects generated bridge/support beads");
+        if(m_curved_plan) {
+            auto& trial=m_curved_plan->trials.at(m_curved_plan->current);
+            std::vector<std::array<double,2>> rejected;
+            for(const auto& xy:m_curved_rejected_centres) {
+                rejected.push_back({xy.x(),xy.y()});
+                for(const auto& p:regions->patches()) if(p.x==xy.x() && p.y==xy.y())
+                    trial.rejected.push_back({0,0,false,p.x,p.y,p.hi,p.radius,
+                        std::atan(std::hypot(p.gx,p.gy))*180./PI,0.,0.,0.,"Planar contact zone: generated bridge/support bead overlaps this roof"});
+            }
+            trial.field=without_roof_centres(m_curved_field,trial.domain,rejected,m_curved_plan->allowed);
+        }
+        return retry();
+    }
+    std::string invalid;
+    try {if(m_curved_field && m_curved_field->maps_supports())
+        validate_underside_deposition(*this,[this]{m_print->throw_if_canceled();});}
+    catch(const SlicingError& e) {if(!m_curved_plan || m_curved_plan->final) throw;invalid=e.what();}
+    if(!m_curved_plan || m_curved_plan->trials.empty()) return false;
+    auto& plan=*m_curved_plan;
+    const auto publish=[&] {
+        m_layer_region_records.clear();plan.decisions.clear();
+        std::ostringstream report;report.imbue(std::locale::classic());report<<std::fixed<<std::setprecision(2);
+        report<<" Generated benefit/cost choice: "<<plan.trials[plan.chosen].name<<". ";
+        for(size_t k=0;k<plan.trials.size();++k) {
+            const auto& t=plan.trials[k];
+            report<<t.name<<": ";
+            if(!t.valid) report<<"rejected ("<<t.reason<<"); ";
+            else report<<"score "<<t.score<<", support "<<t.cost.support_mm3<<" mm3, motion "<<t.cost.motion_seconds<<" s; ";
+            std::vector<RegionDecision> records;
+            if(const auto roof=roof_part(t.field)) for(const auto& p:roof->patches()) {
+                double z=p.hi;
+                if(auto joint=std::dynamic_pointer_cast<const JointField>(t.field)) z=joint->underside()->world_z(p.x,p.y,z);
+                records.push_back({0,0,k==plan.chosen,p.x,p.y,z,p.radius,std::atan(std::hypot(p.gx,p.gy))*180./PI,
+                    t.valid?t.score:0.,t.cost.motion_seconds,t.cost.support_mm3,{}});
+            }
+            if(t.field && !roof_part(t.field)) records.push_back({0,t.field->maps_supports()?1:0,k==plan.chosen,
+                (t.domain.xmin+t.domain.xmax)*.5,(t.domain.ymin+t.domain.ymax)*.5,t.domain.top_max,
+                .5*std::hypot(t.domain.xmax-t.domain.xmin,t.domain.ymax-t.domain.ymin),
+                std::atan(t.field->slope_bound())*180./PI,t.valid?t.score:0.,t.cost.motion_seconds,t.cost.support_mm3,{}});
+            if(!t.field) records.push_back({0,2,k==plan.chosen,(t.domain.xmin+t.domain.xmax)*.5,
+                (t.domain.ymin+t.domain.ymax)*.5,t.domain.top_max,
+                .5*std::hypot(t.domain.xmax-t.domain.xmin,t.domain.ymax-t.domain.ymin),0.,t.valid?t.score:0.,
+                t.cost.motion_seconds,t.cost.support_mm3,{}});
+            for(auto& r:records) {
+                r.reason=t.name+": "+(!t.valid?t.reason:k==plan.chosen?
+                    (t.field?"part of best net roof/underside candidate after generated material and motion cost":"no curved candidate repaid its generated cost"):
+                    "lower net benefit than chosen candidate");
+                if(t.valid) {
+                    const auto& base=plan.trials.back().surface;
+                    r.reason+="; candidate roof alignment gain "+std::to_string(100.*(base.roof_error-t.surface.roof_error)/std::max(.01,base.roof_error))+
+                        "%; underside deficit reduction "+std::to_string(base.underside_deficit_mm2-t.surface.underside_deficit_mm2)+" mm2";
+                }
+                if(plan.decisions.size()<256) {r.id=int(plan.decisions.size());plan.decisions.push_back(std::move(r));}
+            }
+            for(auto r:t.rejected) if(plan.decisions.size()<256) {r.id=int(plan.decisions.size());plan.decisions.push_back(std::move(r));}
+        }
+        for(const auto& r:plan.decisions) m_layer_region_records.push_back(r.encode());
+        // Keep the bounded import report below the processor's per-line limit.
+        m_layer_strategy_decision+=report.str().substr(0,1400)+
+            " Motion is a generated-path kinematic estimate; roof alignment and underside deficit are geometric estimates, not physical finish or support savings.";
+    };
+    if(plan.final) {
+        if(plan.trials.at(plan.current).field && !m_curved_field)
+            throw SlicingError("The selected generated-path candidate could not be reconstructed");
+        publish();return false;
+    }
+    auto& trial=plan.trials.at(plan.current);
+    trial.assessed=true;trial.reason=invalid;
+    if(trial.field && !m_curved_field) trial.reason=m_layer_strategy_decision;
+    trial.valid=trial.reason.empty();
+    if(trial.valid) {
+        trial.surface=surface_benefit(plan.mesh,m_curved_field.get(),plan.threshold,[this]{m_print->throw_if_canceled();});
+        // Measure the generated paths, including regenerated native supports.
+        // Use the writer's bead-area correction and actual field. Routing time
+        // is a kinematic estimate (no acceleration/firmware/startup model).
+        GeneratedCost cost;std::optional<Vec3d> last;double deposited=0.;
+        const auto& pc=m_print->config();const size_t nozzle=curved_nozzle_index();
+        const double vz=pc.machine_max_speed_z.get_at(nozzle),travel=std::max(1.,pc.travel_speed.get_at(nozzle));
+        const PrintRegionConfig* cost_region=&printing_region(0).config();
+        const auto physical=[&](double x,double y,double w) {return Vec3d(x,y,m_curved_field?m_curved_field->world_z(x,y,w):w);};
+        const auto measure=[&](const ExtrusionPath& p,double w) {
+            m_print->throw_if_canceled();const auto points=p.polyline.to_polyline().points;if(points.size()<2) return;
+            double speed=cost_region->inner_wall_speed.get_at(nozzle);
+            if(p.role()==erSupportMaterialInterface) speed=m_config.support_interface_speed.get_at(nozzle);
+            else if(is_support(p.role())) speed=m_config.support_speed.get_at(nozzle);
+            else if(is_bridge(p.role())) speed=cost_region->bridge_speed.get_at(nozzle);
+            else if(p.role()==erExternalPerimeter) speed=cost_region->outer_wall_speed.get_at(nozzle);
+            else if(p.role()==erInternalInfill) speed=cost_region->sparse_infill_speed.get_at(nozzle);
+            else if(p.role()==erSolidInfill) speed=cost_region->internal_solid_infill_speed.get_at(nozzle);
+            else if(p.role()==erTopSolidInfill) speed=cost_region->top_surface_speed.get_at(nozzle);
+            speed=std::max(1.,speed);++cost.paths;
+            Vec3d previous=physical(unscale<double>(points.front().x()),unscale<double>(points.front().y()),w);
+            if(last) {
+                const double xy=(previous.head<2>()-last->head<2>()).norm();
+                if(xy>1e-5) {
+                    if(m_curved_field) {
+                        const double safe=std::max({deposited,last->z(),previous.z()})+2.+p.width*.5*m_curved_field->slope_bound();
+                        cost.motion_seconds+=(2.*safe-last->z()-previous.z())/vz+xy/travel;
+                    } else cost.motion_seconds+=std::max(xy/travel,std::abs(previous.z()-last->z())/vz);
+                }
+            }
+            for(size_t i=1;i<points.size();++i) {
+                const Vec2d a=unscale(points[i-1]),b=unscale(points[i]);
+                const double logical=(b-a).norm();if(logical<1e-12) continue;
+                const int divisions=m_curved_field?std::min(16,Ramp::chord_segments(logical,m_curved_field->slope_bound())):1;
+                for(int j=1;j<=divisions;++j) {
+                    const Vec2d xy=a+(b-a)*(double(j)/divisions),mid=a+(b-a)*((double(j)-.5)/divisions);
+                    const Vec3d next=physical(xy.x(),xy.y(),w);const double length=(next-previous).norm();
+                    double ratio=1.;
+                    if(m_curved_field && !is_bridge(p.role())) {
+                        const auto g=m_curved_field->gradient(mid.x(),mid.y(),w);
+                        const double height=(m_curved_field->world_z(mid.x(),mid.y(),w)-
+                            m_curved_field->world_z(mid.x(),mid.y(),w-p.height))/std::hypot(1.,std::hypot(g.dx,g.dy));
+                        ratio=Ramp::bead_area(p.width,height)/Ramp::bead_area(p.width,p.height);
+                    }
+                    const double volume=p.mm3_per_mm*length*ratio;
+                    (is_support(p.role())?cost.support_mm3:cost.model_mm3)+=volume;
+                    cost.path_mm+=length;cost.motion_seconds+=std::max(length/speed,std::abs(next.z()-previous.z())/vz);
+                    deposited=std::max({deposited,next.z(),previous.z()});previous=next;
+                }
+            }
+            last=previous;
+        };
+        std::function<void(const ExtrusionEntity&,double)> accumulate;
+        accumulate=[&](const ExtrusionEntity& e,double z) {
+            if(const auto* p=dynamic_cast<const ExtrusionPath*>(&e)) measure(*p,z);
+            else if(const auto* c=dynamic_cast<const ExtrusionEntityCollection*>(&e)) for(const auto* child:c->entities) accumulate(*child,z);
+            else if(const auto* l=dynamic_cast<const ExtrusionLoop*>(&e)) for(const auto& p:l->paths) measure(p,z);
+            else if(const auto* m=dynamic_cast<const ExtrusionMultiPath*>(&e)) for(const auto& p:m->paths) measure(p,z);
+        };
+        for(const auto* layer:m_layers) for(const auto* r:layer->regions()) {
+            cost_region=&r->region().config();accumulate(r->perimeters,layer->print_z);accumulate(r->fills,layer->print_z);
+        }
+        for(const auto* layer:m_support_layers) accumulate(layer->support_fills,layer->print_z);
+        trial.cost=cost;
+    }
+    if(++plan.current<plan.trials.size()) {m_curved_rejected_centres.clear();return retry();}
+    const auto& baseline=plan.trials.back();
+    if(!baseline.valid || baseline.field) throw SlicingError("Automatic comparison could not generate its planar reference");
+    plan.chosen=plan.trials.size()-1;double best=1e-4;
+    for(size_t i=0;i<plan.trials.size();++i) if(plan.trials[i].valid) {
+        auto& t=plan.trials[i];t.score=planning_score(baseline.surface,t.surface,baseline.cost,t.cost);
+        if(t.score>best) {best=t.score;plan.chosen=i;}
+    }
+    plan.final=true;plan.current=plan.chosen;m_curved_rejected_centres.clear();
+    if(plan.chosen!=plan.trials.size()-1) return retry();
+    publish();return false;
 }
 
 void PrintObject::slice()
@@ -1336,7 +1483,9 @@ void PrintObject::slice()
 
     if (! this->set_started(posSlice))
         return;
-    if(!m_curved_planning_retry) m_curved_rejected_centres.clear();
+    if(!m_curved_planning_retry) {
+        m_curved_rejected_centres.clear();m_curved_plan.reset();m_layer_region_records.clear();
+    }
     else this->update_slicing_parameters();
     m_curved_planning_retry=false;
     //BBS: add flag to reload scene for shell rendering
@@ -1446,45 +1595,70 @@ void PrintObject::slice()
                 // An authored stack supplies its own target even on a flat roof.
                 // Support/contact and sparse-infill constraints still require
                 // the regional strategy before considering a whole-object stack.
-                const bool regional=target.needs_support_planning ||
+                const bool regional=bool(m_curved_plan) || target.needs_support_planning ||
                     (selected_planes.empty() && !target.useful) || sparse || has_support_material();
                 if(regional) {
                     using namespace CurvedTransition;
                     if(!envelope.enabled() || pc.nonplanar_gantry_height.value<=0.)
                         throw std::invalid_argument("Regional curved layers require a measured configured hotend and gantry envelope");
-                    auto patches=select_regions(triangles,m_slicing_params.first_object_layer_height,
-                        m_config.layer_height.value,regional_allowed,solid_depth,sparse,
-                        [this]{m_print->throw_if_canceled();},regional_clearance);
-                    patches.erase(std::remove_if(patches.begin(),patches.end(),[&](const Regions::Patch& p) {
-                        return std::find(m_curved_rejected_centres.begin(),m_curved_rejected_centres.end(),Vec2d(p.x,p.y))!=m_curved_rejected_centres.end();
-                    }),patches.end());
                     ModelDomain domain{xmin,xmax,ymin,ymax,top,0.};
                     std::shared_ptr<Field> program;
-                    if(patches.empty() && selected_planes.empty() &&
-                       (!has_support_material() || m_config.support_type.value==stNormalAuto)) {
+                    if(!m_curved_plan) {
+                      m_curved_plan=std::make_shared<PlanningState>();auto& plan=*m_curved_plan;
+                      plan.mesh=triangles;plan.allowed=allowed;plan.threshold=m_config.support_threshold_angle.value;
+                      const auto add=[&](std::shared_ptr<Field> field,const ModelDomain& d,const std::string& name) {
+                          PlanningTrial trial;trial.field=std::move(field);trial.domain=d;trial.name=name;
+                          plan.trials.push_back(std::move(trial));
+                      };
+                      auto patches=select_regions(triangles,m_slicing_params.first_object_layer_height,
+                          m_config.layer_height.value,regional_allowed,solid_depth,sparse,
+                          [this]{m_print->throw_if_canceled();},regional_clearance);
+                      if(!patches.empty()) add(std::make_shared<Regions>(domain,std::move(patches),regional_allowed,regional_clearance),domain,"Roof");
+                      if(selected_planes.empty() && (!has_support_material() || m_config.support_type.value==stNormalAuto)) {
                         const double support_limit=virtual_tilt_limit_enforced_deg(envelope,pc.nonplanar_gantry_height.value,
                             pc.nonplanar_virtual_max_angle.value,std::hypot(xmax-xmin+20.,ymax-ymin+20.));
-                        auto underside=select_underside_program(triangles,*underside_analysis,
+                        const double combined_limit=std::min(allowed,std::tan(support_limit*PI/180.));
+                        // Full underside-only plus two allocations that reserve
+                        // a real slope budget for simultaneous roof correction.
+                        for(double allocation:{1.,.5,.25}) {
+                          auto underside=select_underside_program(triangles,*underside_analysis,
                             m_slicing_params.first_object_layer_height,m_config.layer_height.value,limits.max_layer,
-                            std::min(allowed,std::tan(support_limit*PI/180.)),10.,
+                            combined_limit*allocation,10.,
                             has_support_material()?std::max({0.,m_config.support_top_z_distance.value,m_config.support_bottom_z_distance.value}):0.,
                             [this]{m_print->throw_if_canceled();});
-                        if(underside) {domain=underside->domain();program=std::move(underside);}
+                          if(!underside) continue;
+                          if(allocation==1.) {add(underside,underside->domain(),"Underside");continue;}
+                          const double headroom=(combined_limit-underside->slope_bound())*underside->jacobian_min();
+                          if(headroom<std::tan(.5*PI/180.)) continue;
+                          auto logical=triangles;
+                          for(auto& t:logical) for(auto& p:t) p[2]=underside->slice_z(p[0],p[1],p[2]);
+                          auto joint_patches=select_regions(logical,m_slicing_params.first_object_layer_height,
+                              m_config.layer_height.value,headroom,solid_depth,sparse,[this]{m_print->throw_if_canceled();});
+                          if(joint_patches.empty()) continue;
+                          auto roof=std::make_shared<Regions>(underside->domain(),std::move(joint_patches),headroom);
+                          add(std::make_shared<JointField>(underside,roof,combined_limit),underside->domain(),
+                              allocation==.5?"Joint half budget":"Joint quarter budget");
+                        }
+                      }
+                      // Always compare against a genuinely planar native slice,
+                      // rather than assuming extra supports or runtime from angles.
+                      if(!plan.trials.empty()) add({},domain,"Planar");
                     }
-                    if(!program && !patches.empty()) program=std::make_shared<Regions>(domain,std::move(patches),regional_allowed,regional_clearance);
-                    if(!program) {
+                    auto& plan=*m_curved_plan;
+                    if(plan.trials.empty()) {
                         if(underside_analysis->has_candidate && has_support_material() && m_config.support_type.value!=stNormalAuto)
                             throw std::invalid_argument("an underside direction was found, but mapped support generation currently supports Normal (auto), not the selected support type; support settings were retained");
                         throw std::invalid_argument("no useful regional roof or underside field fits the foundation, support and transition bounds");
                     }
+                    auto& trial=plan.trials.at(plan.current);program=trial.field;domain=trial.domain;
+                    if(!program) throw std::invalid_argument("Planar reference for generated benefit/cost comparison");
                     domain.slope_max=program->slope_bound();
                     indexed_triangle_set placed=volume.mesh().its;
                     for(auto& p:placed.vertices) p=(transform*p.cast<double>()).cast<float>();
                     if(transform.linear().determinant()<0.) its_flip_triangles(placed);
                     auto mapped=map_mesh(std::move(placed),*program,[this]{m_print->throw_if_canceled();});
                     double mapped_top=0.;for(const auto& p:mapped.vertices) mapped_top=std::max(mapped_top,double(p.z()));
-                    if(auto roof=std::dynamic_pointer_cast<Regions>(program)) roof->set_reference_top(mapped_top);
-                    else std::dynamic_pointer_cast<UndersideProgram>(program)->set_reference_top(mapped_top);
+                    program->set_reference_top(mapped_top);
                     object_layers=Ramp{}.schedule(*program,m_slicing_params.first_object_layer_height,m_config.layer_height.value,limits.min_layer,limits.max_layer);
                     double step=0.;for(size_t i=0;i+1<object_layers.size();i+=2) step=std::max(step,object_layers[i+1]-object_layers[i]);
                     domain.top_max+=program->spacing_bounds(step).max_vertical_mm+.02;
@@ -1653,6 +1827,17 @@ void PrintObject::slice()
                 catch (const SlicingError& e) {if (!automatic) throw;last_rejection=e.what();}
             }
             if (!m_curved_field) throw std::invalid_argument(last_rejection.empty()?"no useful curved direction was found":last_rejection);
+            if(automatic && !m_curved_plan) {
+                // The exact ramp/global plane paths also pay their measured
+                // native path cost; regional proposals are not the only ones
+                // that can lose to a planar control.
+                m_curved_plan=std::make_shared<CurvedTransition::PlanningState>();
+                auto& plan=*m_curved_plan;plan.mesh=triangles;plan.threshold=m_config.support_threshold_angle.value;
+                CurvedTransition::PlanningTrial curved;curved.field=std::const_pointer_cast<CurvedTransition::Field>(m_curved_field);
+                curved.domain=*m_curved_domain;curved.name="Global roof/plane";plan.trials.push_back(std::move(curved));
+                CurvedTransition::PlanningTrial planar;planar.domain=*m_curved_domain;planar.name="Planar";
+                plan.trials.push_back(std::move(planar));
+            }
             m_slicing_params.object_print_z_max = m_curved_field->reference_top_mm();
             m_slicing_params.object_print_z_uncompensated_max = m_slicing_params.object_print_z_max;
             if(m_curved_field->maps_supports()) {
@@ -1663,15 +1848,19 @@ void PrintObject::slice()
             }
             if (automatic) {
                 std::string selection;
-                if(const auto regions=std::dynamic_pointer_cast<const CurvedTransition::Regions>(m_curved_field)) {
+                const auto joint=std::dynamic_pointer_cast<const CurvedTransition::JointField>(m_curved_field);
+                if(const auto regions=CurvedTransition::roof_part(m_curved_field)) {
                     double low=INFINITY,high=0.;
                     for(const auto& p:regions->patches()) {
                         const double angle=std::atan(std::hypot(p.gx,p.gy))*180./PI;
                         low=std::min(low,angle);high=std::max(high,angle);
                     }
-                    selection=std::to_string(regions->patches().size())+" local roof regions; selected centre tilts "+
+                    selection=(joint?std::string("Joint roof and underside field; "):std::string{})+
+                        std::to_string(regions->patches().size())+" local roof regions; selected centre tilts "+
                         std::to_string(low)+" to "+std::to_string(high)+
-                        " deg after comparing local angles and region sizes. Bridge and support-contact zones remain planar. ";
+                        " deg after comparing local angles and region sizes. "+
+                        (joint?std::string("Native supports regenerated with both fields; generated bridge/contact checks follow. "):
+                               std::string("Bridge and support-contact zones remain planar. "));
                 } else if(m_curved_field->maps_supports()) {
                     selection="Underside field applied at "+std::to_string(std::dynamic_pointer_cast<const CurvedTransition::UndersideProgram>(m_curved_field)->angle_deg())+
                         " deg; "+(has_support_material()?std::string("native normal supports regenerated in the same field. "):

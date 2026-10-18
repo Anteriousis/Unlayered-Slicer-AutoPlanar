@@ -8,6 +8,7 @@
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/format.hpp"
 #include "GCodeProcessor.hpp"
+#include "libslic3r/CurvedPlanningReport.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -2555,6 +2556,7 @@ void GCodeProcessorResult::reset() {
     // UNLAYERED_MOD: index 0 must always exist and always be straight up.
     tool_axes.assign(1, Vec3f(0.0f, 0.0f, 1.0f));
     layer_strategy_decisions.clear();
+    layer_region_records.clear();
     virtual_5axis = false;
     lines_ends.clear();
     printable_area = Pointfs();
@@ -4332,6 +4334,13 @@ bool GCodeProcessor::tool_axis_is_vertical() const
 
 void GCodeProcessor::process_tags(const std::string_view comment, bool producers_enabled)
 {
+    if(boost::starts_with(comment," layer_region: ")) {
+        CurvedTransition::RegionDecision region;
+        if(comment.size()<=1039 && m_result.layer_region_records.size()<1024 &&
+           CurvedTransition::RegionDecision::decode(std::string(comment.substr(15)),region))
+            m_result.layer_region_records.push_back(region.encode());
+        return;
+    }
     if(boost::starts_with(comment," layer_strategy: ")) {
         // Untrusted G-code text is display data. Bound it before retaining it.
         if(m_result.layer_strategy_decisions.size()<256)

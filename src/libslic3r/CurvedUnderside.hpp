@@ -53,6 +53,7 @@ inline std::shared_ptr<UndersideProgram> select_underside_program(
         if(cancel) cancel();
         const double gx=analysis.best.gx*scale/32.,gy=analysis.best.gy*scale/32.;
         const double slope=std::hypot(gx,gy);
+        if(slope>=allowed) continue;
         if(std::atan(slope)*180./3.14159265358979323846<.25) continue; // usefulness heuristic
         const double budget=std::min(.25,.95*(1.-slope/allowed));
         const double projection=std::abs(gx)*((domain.xmax-domain.xmin)*.5+1e-4)+

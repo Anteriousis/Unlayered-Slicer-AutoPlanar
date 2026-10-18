@@ -47,6 +47,7 @@ class TreeSupportData;
 class TreeSupport;
 class ExtrusionLayers;
 namespace MultiNozzleUtils { class NozzleGroupResultBase; class LayeredNozzleGroupResult; }
+namespace CurvedTransition {struct PlanningState;}
 
 #define MAX_OUTER_NOZZLE_DIAMETER   4
 // BBS: move from PrintObjectSlice.cpp
@@ -507,6 +508,7 @@ public:
     size_t curved_nozzle_index() const;
     bool refine_curved_regions_for_paths();
     const std::string& layer_strategy_decision() const { return m_layer_strategy_decision; }
+    const std::vector<std::string>& layer_region_records() const {return m_layer_region_records;}
     // Centering offset of the sliced mesh from the scaled and rotated mesh of the model.
     const Point& 			     center_offset() const  { return m_center_offset; }
 
@@ -740,6 +742,8 @@ private:
     std::optional<CurvedTransition::ModelDomain> m_curved_domain;
     std::shared_ptr<const indexed_triangle_set> m_curved_mesh;
     std::string m_layer_strategy_decision;
+    std::vector<std::string> m_layer_region_records;
+    std::shared_ptr<CurvedTransition::PlanningState> m_curved_plan;
     std::vector<Vec2d> m_curved_rejected_centres;
     bool m_curved_planning_retry=false;
 

@@ -9,6 +9,7 @@ add_executable(curved_transition_tests
     ../../tests/libslic3r/test_curved_ramp.cpp
     ../../tests/libslic3r/test_curved_plane_program.cpp
     ../../tests/libslic3r/test_curved_regions.cpp
+    ../../tests/libslic3r/test_curved_joint_planning.cpp
     ../../tests/libslic3r/test_underside_analysis.cpp
     ../../tests/catch2/extras/catch_amalgamated.cpp)
 target_compile_features(curved_transition_tests PRIVATE cxx_std_17)

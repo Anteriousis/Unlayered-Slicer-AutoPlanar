@@ -66,9 +66,7 @@ public:
             m_g=std::max(m_g,g);
             // Implicit inverse w+S(w)F(x,y)-z=0. The full inverse gradient
             // has norm <= sqrt(1+g^2)/(1-d). Bound all mixed and ZZ terms.
-            const double inverse_gradient=std::hypot(1.,g)/(1.-d);
-            m_hessian=std::max(m_hessian,(22.*g/p.radius+3.75*g/depth*inverse_gradient+
-                (10.*std::sqrt(3.)/3.)*a/(depth*depth)*inverse_gradient*inverse_gradient)/(1.-d));
+            m_hessian=std::max(m_hessian,patch_hessian(p));
         }
         if(m_jmin<.75 || m_g>allowed+1e-10)
             throw std::invalid_argument("Regional blend exceeds monotonicity or slope clearance");
@@ -83,7 +81,19 @@ public:
     double max_displacement_mm() const override {return m_amplitude;}
     double inverse_hessian_bound() const override {return m_hessian;}
     double inverse_hessian_bound_box(double xmin,double xmax,double ymin,double ymax,double zmin,double zmax) const override {
-        return identity_on_box(xmin,xmax,ymin,ymax,zmin,zmax)?0.:m_hessian;
+        double result=0.;
+        for(const auto& p:m_patches) {
+            const double dx=std::max({xmin-p.x,0.,p.x-xmax});
+            const double dy=std::max({ymin-p.y,0.,p.y-ymax});
+            if(zmax<=p.lo || dx*dx+dy*dy>=p.radius*p.radius) continue;
+            const double g=std::hypot(p.gx,p.gy),amplitude=.17*g*p.radius;
+            // w >= z-amplitude. Above this physical height the blend is
+            // saturated everywhere in the box: w=z-F(x,y), with no mixed or
+            // vertical second derivatives. A distant thin transition must
+            // not impose its worst Hessian on every other roof patch.
+            result=std::max(result,zmin>=p.hi+amplitude?22.*g/p.radius:patch_hessian(p));
+        }
+        return result;
     }
     bool identity_on_box(double xmin,double xmax,double ymin,double ymax,double zmin,double zmax) const override {
         (void)zmin;
@@ -134,6 +144,13 @@ public:
         return {(gx-q.dx)/(1.+q.dz),(gy-q.dy)/(1.+q.dz)};
     }
 private:
+    static double patch_hessian(const Patch& p) {
+        const double g=std::hypot(p.gx,p.gy),depth=p.hi-p.lo;
+        const double a=.17*g*p.radius,d=1.875*a/depth;
+        const double inverse_gradient=std::hypot(1.,g)/(1.-d);
+        return (22.*g/p.radius+3.75*g/depth*inverse_gradient+
+            (10.*std::sqrt(3.)/3.)*a/(depth*depth)*inverse_gradient*inverse_gradient)/(1.-d);
+    }
     struct Sample {double value=0.,dx=0.,dy=0.,dz=0.;};
     static void check(double x,double y,double z) {
         if(!std::isfinite(x)||!std::isfinite(y)||!std::isfinite(z))

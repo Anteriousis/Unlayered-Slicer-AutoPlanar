@@ -179,8 +179,13 @@ taper and temporal blend are C2. The spatial gradient operator has eigenvalues
 `phi` in [0,1] and `phi+t*phi'` in [-7/16,1]; displacement is bounded by
 `0.17*|g|*r`. Temporal derivative and Hessian bounds establish monotonicity, slope,
 normal spacing, conforming mesh error and emitted path subdivision. Local Hessian
-boxes avoid refining identity facets unnecessarily, with shared edge splits still
-propagated to neighbours. The selector compares full, three-quarter, half and
+boxes use only intersected patches and avoid refining identity facets unnecessarily.
+For each patch, `w >= z-0.17*|g|*r`; when the whole physical box is above
+`hi+0.17*|g|*r`, the blend has saturated and the inverse is `w=z-F(x,y)`.
+Only the spatial Hessian bound `22*|g|/r` is then needed. A thin transition in
+another patch cannot force its mixed/vertical bound over the entire model.
+Shared edge splits are still propagated to neighbours; the mesh tolerance and
+resource ceilings are unchanged. The selector compares full, three-quarter, half and
 quarter amplitudes of the locally permitted gradient, each at several patch radii.
 The configured maximum is a ceiling; a lower angle may fit a thinner shell or
 improve a larger footprint. At each seed the feasible angle/radius pair with the

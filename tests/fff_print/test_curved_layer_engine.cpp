@@ -627,7 +627,16 @@ TEST_CASE("Full Centauri MCT-1 retains curved roof regions alongside planar supp
         {"sparse_infill_density","15%"},{"top_shell_thickness","1"},{"enable_support","1"},
         {"support_type","normal(auto)"},{"support_style","grid"},{"support_on_build_plate_only","1"}});
     Print print;Model model;Test::init_print({mesh},print,model,config);
-    model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
+    // The imported mesh is centred about Z=0. Preserve ensure_on_bed()'s
+    // vertical lift while moving XY; zeroing Z would sink half of the Temple.
+    auto* instance=model.objects.front()->instances.front();
+    Vec3d offset=instance->get_offset();offset.head<2>()=Vec2d(100.,100.);
+    instance->set_offset(offset);
+    model.objects.front()->invalidate_bounding_box();
+    const auto placed_bounds=model.objects.front()->instance_bounding_box(*instance);
+    REQUIRE(placed_bounds.min.z()==Catch::Approx(0.));
+    REQUIRE(placed_bounds.size().z()==Catch::Approx(28.));
+    print.apply(model,config);
     const auto original=model.objects.front()->volumes.front()->mesh().its.vertices;
     print.process();
     INFO(print.objects().front()->layer_strategy_decision());

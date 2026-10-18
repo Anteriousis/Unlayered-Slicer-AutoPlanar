@@ -159,3 +159,33 @@ TEST_CASE("Regional clearance bounds every taper direction for asymmetric and di
     REQUIRE(tight.target_limit(0.,-1.,g)<g);
     REQUIRE_THROWS(Regions({-4.,4.,-4.,4.,8.,0.},{{0.,0.,3.,2.,4.,0.,-g}},g,tight));
 }
+
+TEST_CASE("Regional inverse curvature bounds stay local to each patch and blend slab", "[curved-blend][regions][mesh]")
+{
+    Regions f({-12.,20.,-9.,9.,12.,0.},{{-10.,0.,1.,3.,3.2,.04,0.},
+        {10.,0.,8.,3.,5.,0.,-.04}},.08);
+    const double global=f.inverse_hessian_bound();
+    const double wide=f.inverse_hessian_bound_box(9.,11.,-1.,1.,3.,5.);
+    const double saturated=f.inverse_hessian_bound_box(9.,11.,-1.,1.,6.,10.);
+    REQUIRE(wide<global);
+    REQUIRE(saturated<wide);
+    REQUIRE(saturated==Catch::Approx(22.*.04/8.));
+    REQUIRE(f.inverse_hessian_bound_box(-12.,20.,-9.,9.,0.,3.)==0.);
+    REQUIRE(f.inverse_hessian_bound_box(-1.,1.,-1.,1.,3.,10.)==0.);
+    // Independent physical-space directional second differences check the
+    // inverse map, including mixed XY/Z curvature within both transitions.
+    const double e=2e-4;
+    const std::array<std::array<double,3>,6> directions{{{{1.,0.,0.}},{{0.,1.,0.}},{{0.,0.,1.}},
+        {{.7071067811865475,.7071067811865475,0.}},{{.7071067811865475,0.,.7071067811865475}},
+        {{0.,.7071067811865475,.7071067811865475}}}};
+    for(const auto& p:f.patches()) for(int i=-6;i<=6;++i) for(int j=-6;j<=6;++j) for(int k=0;k<=12;++k) {
+        const double x=p.x+i*p.radius/6.,y=p.y+j*p.radius/6.;
+        const double z=p.lo-.05+k*(p.hi-p.lo+.2)/12.;
+        const double bound=f.inverse_hessian_bound_box(x-e,x+e,y-e,y+e,z-e,z+e);
+        for(const auto& v:directions) {
+            const double difference=(f.slice_z(x+e*v[0],y+e*v[1],z+e*v[2])-
+                2.*f.slice_z(x,y,z)+f.slice_z(x-e*v[0],y-e*v[1],z-e*v[2]))/(e*e);
+            REQUIRE(std::abs(difference)<=bound+2e-4);
+        }
+    }
+}

@@ -409,7 +409,10 @@ jobs:
             # Reuse unchanged compiler outputs across review commits. The build
             # script disables PCH and normalizes debug paths for cacheability.
             # Keep Release optimization, all native tests and the final install.
-            .\build_win.bat -s -l -x --cache sccache --tests --no-gettext --install --build-dir build --deps-dir deps/build --arch $arch --slicer-args "-DSLIC3R_MSVC_PDB=OFF"
+            # Pass CMake definitions through the documented environment channel;
+            # PowerShell -> cmd.exe can split an '=' in a quoted batch argument.
+            $env:ORCA_SLICER_CMAKE_ARGS = '-DSLIC3R_MSVC_PDB=OFF'
+            .\build_win.bat -s -l -x --cache sccache --tests --no-gettext --install --build-dir build --deps-dir deps/build --arch $arch
           } elseif ($arch -eq "arm64") { .\build_release_vs.bat slicer arm64 @flags tests } else { .\build_release_vs.bat slicer @flags tests }
           if ($LASTEXITCODE -ne 0) { throw "Windows build failed: $LASTEXITCODE" }
         shell: pwsh

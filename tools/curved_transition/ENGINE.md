@@ -10,6 +10,9 @@ slope and Jacobian bounds reserve headroom for both stages before slicing.
 The composition's inverse Hessian uses the chain rule over expanded boxes;
 conforming mesh tolerance, spacing, printer envelope and travel checks remain.
 This is a bounded joint search, not a global optimum over arbitrary fields.
+Explicit authored global plane stacks retain the user's target instead of
+silently losing to the automatic cost policy. Their geometry and path safety
+checks still apply.
 
 Each feasible trial generates native contours, infill and supports. Generated
 bridge/support bead conflicts prune roof patches and regenerate the solid.

@@ -1355,7 +1355,10 @@ bool PrintObject::refine_curved_regions_for_paths()
                 records.push_back({0,0,k==plan.chosen,p.x,p.y,z,p.radius,std::atan(std::hypot(p.gx,p.gy))*180./PI,
                     t.valid?t.score:0.,t.cost.motion_seconds,t.cost.support_mm3,{}});
             }
-            if(t.field && !roof_part(t.field)) records.push_back({0,t.field->maps_supports()?1:0,k==plan.chosen,
+            // A joint choice has TWO region kinds; its roof patches must not
+            // hide the independently chosen underside field in Preview.
+            const auto joint=std::dynamic_pointer_cast<const JointField>(t.field);
+            if(t.field && (!roof_part(t.field) || joint)) records.push_back({0,t.field->maps_supports()?1:0,k==plan.chosen,
                 (t.domain.xmin+t.domain.xmax)*.5,(t.domain.ymin+t.domain.ymax)*.5,t.domain.top_max,
                 .5*std::hypot(t.domain.xmax-t.domain.xmin,t.domain.ymax-t.domain.ymin),
                 std::atan(t.field->slope_bound())*180./PI,t.valid?t.score:0.,t.cost.motion_seconds,t.cost.support_mm3,{}});
@@ -1378,6 +1381,9 @@ bool PrintObject::refine_curved_regions_for_paths()
         }
         for(const auto& r:plan.decisions) m_layer_region_records.push_back(r.encode());
         // Keep the bounded import report below the processor's per-line limit.
+        // A second process/export pass must not append the same report again.
+        const auto old_report=m_layer_strategy_decision.find(" Generated benefit/cost choice:");
+        if(old_report!=std::string::npos) m_layer_strategy_decision.resize(old_report);
         m_layer_strategy_decision+=report.str().substr(0,1400)+
             " Motion is a generated-path kinematic estimate; roof alignment and underside deficit are geometric estimates, not physical finish or support savings.";
     };
@@ -1827,7 +1833,9 @@ void PrintObject::slice()
                 catch (const SlicingError& e) {if (!automatic) throw;last_rejection=e.what();}
             }
             if (!m_curved_field) throw std::invalid_argument(last_rejection.empty()?"no useful curved direction was found":last_rejection);
-            if(automatic && !m_curved_plan) {
+            if(automatic && selected_planes.empty() && !m_curved_plan) {
+                // Explicit authored targets remain the user's choice. The
+                // generated-cost policy chooses only inferred strategies.
                 // The exact ramp/global plane paths also pay their measured
                 // native path cost; regional proposals are not the only ones
                 // that can lose to a planar control.
@@ -1859,7 +1867,9 @@ void PrintObject::slice()
                         std::to_string(regions->patches().size())+" local roof regions; selected centre tilts "+
                         std::to_string(low)+" to "+std::to_string(high)+
                         " deg after comparing local angles and region sizes. "+
-                        (joint?std::string("Native supports regenerated with both fields; generated bridge/contact checks follow. "):
+                        (joint?(has_support_material()?
+                                std::string("Native supports regenerated with both fields; generated bridge/contact checks follow. "):
+                                std::string("supports off; no support paths requested. Generated bridge/anchor checks follow. ")):
                                std::string("Bridge and support-contact zones remain planar. "));
                 } else if(m_curved_field->maps_supports()) {
                     selection="Underside field applied at "+std::to_string(std::dynamic_pointer_cast<const CurvedTransition::UndersideProgram>(m_curved_field)->angle_deg())+

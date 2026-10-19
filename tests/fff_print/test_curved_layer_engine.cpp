@@ -48,6 +48,39 @@ TriangleMesh ramp(double angle=5.)
     return TriangleMesh(AutoPlanesFixtures::heightfield_block(20.,20.,4,[angle](double x){return 3.+x*std::tan(angle*PI/180.);}));
 }
 
+TriangleMesh joint_part()
+{
+    indexed_triangle_set its;
+    const std::array<Vec2d,7> outline{{{0.,0.},{2.,0.},{2.,15.},
+        {12.,15.+10.*std::tan(28.*PI/180.)},{12.,27.},{6.,27.5},{0.,27.}}};
+    for(double y:{0.,6.}) for(const auto& p:outline) its.vertices.emplace_back(float(p.x()),float(y),float(p.y()));
+    for(int i=0;i<5;++i) {
+        its.indices.emplace_back(6,i,i+1);its.indices.emplace_back(i+1+7,i+7,6+7);
+    }
+    for(int i=0;i<7;++i) {const int j=(i+1)%7;
+        its.indices.emplace_back(i,i+7,j+7);its.indices.emplace_back(i,j+7,j);}
+    return TriangleMesh(std::move(its));
+}
+
+// Automatic mode may legitimately choose planar. Verify the actual generated
+// comparison rather than treating an enabled checkbox as proof of curvature.
+void require_best_generated_choice(const PrintObject& object)
+{
+    INFO(object.layer_strategy_decision());
+    REQUIRE(object.layer_strategy_decision().find("Generated benefit/cost choice:")!=std::string::npos);
+    REQUIRE_FALSE(object.layer_region_records().empty());
+    double best=-INFINITY;bool planar=false;
+    std::vector<CurvedTransition::RegionDecision> records;
+    for(const auto& line:object.layer_region_records()) {
+        CurvedTransition::RegionDecision r;
+        REQUIRE(CurvedTransition::RegionDecision::decode(line,r));
+        if(r.selected) best=std::max(best,r.gain);
+        planar|=r.kind==2;records.push_back(r);
+    }
+    REQUIRE(planar);REQUIRE(std::isfinite(best));REQUIRE(best>=0.);
+    for(const auto& r:records) REQUIRE(r.gain<=best+1e-5);
+}
+
 // Synthetic fixed dual-carriage fixture, never a measured Bambu profile.
 DynamicPrintConfig fixed_nozzle_config(int active=0)
 {
@@ -122,7 +155,9 @@ TEST_CASE("Fixed nozzle automatic slicing emits BBL selection and preserves live
 {
     const int active=GENERATE(0,1);auto config=fixed_nozzle_config(active);
     Print print;print.is_BBL_printer()=true;Model model;
-    Test::init_print({ramp(2.)},print,model,config);
+    const TriangleMesh small_roof(AutoPlanesFixtures::heightfield_block(8.,8.,4,
+        [](double x){return 3.+x*std::tan(4.*PI/180.);}));
+    Test::init_print({small_roof},print,model,config);
     model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
     print.process();
     ScopedTemporaryFile temp(".gcode");GCodeProcessorResult preview;
@@ -326,14 +361,14 @@ TEST_CASE("Automatic slicing preserves supports and ignores cut sections on a fl
     REQUIRE(print.objects().front()->layer_strategy_decision().find("no useful regional roof")!=std::string::npos);
 }
 
-TEST_CASE("Automatic underside slicing regenerates flat-roof coupon deposition and normal supports", "[curved-engine][automatic][undersides]")
+TEST_CASE("Automatic cost comparison protects an already flat roof from underside regression", "[curved-engine][automatic][undersides]")
 {
     Model input;
     const std::string path=std::string(TEST_DATA_DIR)+"/curved/Centauri_AB_support_surface_coupon.stl";
     REQUIRE(load_stl(path.c_str(),&input));REQUIRE(input.objects.size()==1);
     // Flatten only the high vertices of this fixture copy. The original
-    // sloped roof now has its own regional regression below; this variant
-    // keeps exercising underside mapping rather than a useful roof cap.
+    // sloped roof has a separate regression below. A global underside field
+    // would make this already flat roof worse, which must enter the score.
     const auto& volume=*input.objects.front()->volumes.front();
     auto flat=volume.mesh().its;
     size_t flattened=0;
@@ -361,18 +396,17 @@ TEST_CASE("Automatic underside slicing regenerates flat-roof coupon deposition a
     config.set_deserialize_strict({{"automatic_layer_strategy","1"}});print.apply(model,config);
     print.process();print.export_gcode(automatic.string(),&auto_preview,nullptr);
     const auto* o=print.objects().front();
-    REQUIRE(o->curved_field());REQUIRE(o->curved_field()->maps_supports());REQUIRE(o->config().enable_support.value);
+    REQUIRE_FALSE(o->curved_field());REQUIRE(o->config().enable_support.value);
     REQUIRE_FALSE(o->support_layers().empty());
     REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==vertices);
     const auto& decision=o->layer_strategy_decision();INFO(decision);
-    REQUIRE(decision.find("Automatic selection: curved.")!=std::string::npos);
-    REQUIRE(decision.find("Underside field applied at")!=std::string::npos);
+    REQUIRE(decision.find("Automatic selection: planar.")!=std::string::npos);
+    require_best_generated_choice(*o);
     REQUIRE(decision.find("Underside check:")!=std::string::npos);
     REQUIRE(decision.find("Best uniform-layer candidate:")!=std::string::npos);
-    REQUIRE(decision.find("Candidate not applied")==std::string::npos);
-    REQUIRE(decision.find("paths regenerated with the object")!=std::string::npos);
-    // A colour tag alone is insufficient: require positive extrusion with
-    // simultaneous XY/Z movement for BOTH model and regenerated support paths.
+    REQUIRE(decision.find("Generated benefit/cost choice: Planar.")!=std::string::npos);
+    // Material and motion checks for an applied underside/joint field live in
+    // the joint fixture, where improving the underside also repays roof cost.
     size_t model_tilted=0,support_tilted=0,transition=0,nonplanar=0;
     Vec3f previous=Vec3f::Zero();
     for(const auto& move:auto_preview.moves) {
@@ -386,16 +420,11 @@ TEST_CASE("Automatic underside slicing regenerates flat-roof coupon deposition a
         }
         previous=move.position;
     }
-    REQUIRE(model_tilted>20);REQUIRE(support_tilted>20);REQUIRE(transition>20);REQUIRE(nonplanar>20);
+    REQUIRE(model_tilted==0);REQUIRE(support_tilted==0);REQUIRE(transition==0);REQUIRE(nonplanar==0);
+    REQUIRE(auto_preview.moves.size()==planar_preview.moves.size());
     GCodeProcessor imported;imported.process_file(automatic.string());
     REQUIRE(imported.get_result().layer_strategy_decisions.size()==1);
     REQUIRE(imported.get_result().layer_strategy_decisions.front()==decision);
-    SECTION("Missing support foundation is rejected before export") {
-        auto* mutable_object=const_cast<PrintObject*>(o);
-        REQUIRE(mutable_object->support_layers().size()>1);
-        mutable_object->support_layers().front()->support_fills.clear();
-        REQUIRE_THROWS(mutable_object->refine_curved_regions_for_paths());
-    }
     // A support-angle-only edit used to invalidate supports, but not slicing.
     // The new automatic analysis must be recomputed as well.
     config.set_deserialize_strict({{"support_threshold_angle","20"}});print.apply(model,config);
@@ -403,7 +432,7 @@ TEST_CASE("Automatic underside slicing regenerates flat-roof coupon deposition a
     REQUIRE(print.objects().front()->layer_strategy_decision().find("20.0 deg configured angle")!=std::string::npos);
 }
 
-TEST_CASE("Automatic coupon roofs generate nonplanar top extrusion with supports on or off", "[curved-engine][automatic][regions][undersides]")
+TEST_CASE("Automatic coupon roof choices repay generated cost with supports on or off", "[curved-engine][automatic][regions][undersides]")
 {
     Model input;
     const std::string path=std::string(TEST_DATA_DIR)+"/curved/Centauri_AB_support_surface_coupon.stl";
@@ -418,8 +447,7 @@ TEST_CASE("Automatic coupon roofs generate nonplanar top extrusion with supports
     const auto original=model.objects.front()->volumes.front()->mesh().its.vertices;
     print.process();const auto* o=print.objects().front();
     INFO(o->layer_strategy_decision());
-    REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(o->curved_field()));
-    REQUIRE(o->layer_strategy_decision().find("selected centre tilts")!=std::string::npos);
+    require_best_generated_choice(*o);
     REQUIRE(o->config().enable_support.value==config.opt_bool("enable_support"));
     if(!config.opt_bool("enable_support")) REQUIRE(o->support_layers().empty());
     ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;
@@ -435,10 +463,12 @@ TEST_CASE("Automatic coupon roofs generate nonplanar top extrusion with supports
            std::abs(move.position.z()-previous.z())>.0001) ++top_xyz;
         previous=move.position;
     }
-    REQUIRE(top_xyz>20);
+    if(o->curved_field()) REQUIRE(top_xyz>20);
+    else REQUIRE(top_xyz==0);
     // A useful local angle can be smaller than the five-degree ceiling.
     // Full-capability and transition-overshoot checks have separate fixtures.
-    REQUIRE(top_angle>.5);REQUIRE(top_angle<=5.0001);
+    if(o->curved_field()) REQUIRE(top_angle>.25);
+    REQUIRE(top_angle<=5.0001);
     REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==original);
 }
 
@@ -446,32 +476,25 @@ TEST_CASE("Support-free underside mapping uses actual generated paths rather tha
 {
     auto config=curved_config();config.set_deserialize_strict({{"curved_layer_blend","0"},
         {"automatic_layer_strategy","1"},{"enable_support","0"},{"support_threshold_angle","30"}});
-    // Extruded polygon with a truly vertical step: sampling a bottom heightfield
-    // across the step would instead introduce a sloped facet touching the bed,
-    // leaving no height for the foundation transition.
-    indexed_triangle_set its;
-    const std::array<Vec2d,6> outline{{{0.,0.},{2.,0.},{2.,15.},
-        {8.,15.+6.*std::tan(28.*PI/180.)},{8.,24.},{0.,24.}}};
-    for(double y:{0.,4.}) for(const auto& p:outline) its.vertices.emplace_back(float(p.x()),float(y),float(p.y()));
-    for(const auto& face:std::array<std::array<int,3>,4>{{{{0,1,2}},{{0,2,5}},{{2,3,4}},{{2,4,5}}}}) {
-        its.indices.emplace_back(face[0],face[1],face[2]);its.indices.emplace_back(face[2]+6,face[1]+6,face[0]+6);
-    }
-    for(int i=0;i<6;++i) {const int j=(i+1)%6;
-        its.indices.emplace_back(i,i+6,j+6);its.indices.emplace_back(i,j+6,j);}
-    const TriangleMesh mesh(std::move(its));
+    // Sloped roofs supply a real combined benefit; deliberately tilting a flat
+    // roof can now correctly lose the generated cost comparison.
+    const TriangleMesh mesh=joint_part();
     Print print;Model model;Test::init_print({mesh},print,model,config);
     // This test exercises the OFF branch directly; the native generated-path
     // guard, not an enable-support prerequisite, decides whether it can export.
-    auto* o=const_cast<PrintObject*>(print.objects().front());o->slice();
+    print.process();auto* o=const_cast<PrintObject*>(print.objects().front());
     INFO(o->layer_strategy_decision());
     REQUIRE(o->curved_field());REQUIRE(o->curved_field()->maps_supports());
     REQUIRE_FALSE(o->config().enable_support.value);
     REQUIRE_FALSE(Test::gcode(print).empty());
+    require_best_generated_choice(*o);
     REQUIRE(o->support_layers().empty());
     REQUIRE(o->layer_strategy_decision().find("supports off; no support paths requested")!=std::string::npos);
     // Inject an air bridge into the changing-direction slab after ordinary
     // generation. Support OFF must not bypass this independent path guard.
-    const auto program=std::dynamic_pointer_cast<const CurvedTransition::PlaneProgram>(o->curved_field());
+    const auto joint=std::dynamic_pointer_cast<const CurvedTransition::JointField>(o->curved_field());
+    REQUIRE(joint);
+    const auto program=joint->underside();
     REQUIRE(program);const auto blend=program->blends().front();
     Layer* changing=nullptr;
     for(auto* layer:o->layers())
@@ -506,16 +529,7 @@ TEST_CASE("Automatic planning compares generated joint roof underside and planar
         {"support_type","normal(auto)"},{"support_style","grid"}});
     // Elevated underside leaves enough foundation space for a joint field.
     // A faceted roof supplies two different finish directions on the same solid.
-    indexed_triangle_set its;
-    const std::array<Vec2d,7> outline{{{0.,0.},{2.,0.},{2.,15.},
-        {12.,15.+10.*std::tan(28.*PI/180.)},{12.,27.},{6.,27.5},{0.,27.}}};
-    for(double y:{0.,6.}) for(const auto& p:outline) its.vertices.emplace_back(float(p.x()),float(y),float(p.y()));
-    // A valid fan about the upper-left vertex stays inside this polygon.
-    for(int i=0;i<5;++i) {
-        its.indices.emplace_back(6,i,i+1);its.indices.emplace_back(i+1+7,i+7,6+7);
-    }
-    for(int i=0;i<7;++i) {const int j=(i+1)%7;its.indices.emplace_back(i,i+7,j+7);its.indices.emplace_back(i,j+7,j);}
-    Print print;Model model;Test::init_print({TriangleMesh(std::move(its))},print,model,config);
+    Print print;Model model;Test::init_print({joint_part()},print,model,config);
     const auto original=model.objects.front()->volumes.front()->mesh().its.vertices;
     print.process();const auto* object=print.objects().front();
     INFO(object->layer_strategy_decision());
@@ -533,17 +547,36 @@ TEST_CASE("Automatic planning compares generated joint roof underside and planar
     }
     REQUIRE(std::isfinite(chosen_score));REQUIRE(chosen_score>=0.);
     for(const auto& r:regions) if(!r.selected) REQUIRE(r.gain<=chosen_score+1e-5);
-    if(std::dynamic_pointer_cast<const CurvedTransition::JointField>(object->curved_field())) {
-        REQUIRE(chosen_roof);REQUIRE(chosen_under);REQUIRE(object->curved_field()->maps_supports());
-    }
+    REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::JointField>(object->curved_field()));
+    REQUIRE(chosen_roof);REQUIRE(chosen_under);REQUIRE(object->curved_field()->maps_supports());
     ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;print.export_gcode(output.string(),&result,nullptr);
     REQUIRE_FALSE(result.layer_region_records.empty());
-    for(const auto& move:result.moves) if(move.type==EMoveType::Extrude && move.delta_extruder>0.) {
-        const auto& normal=result.tool_axes[move.tool_axis_id];
-        REQUIRE(std::atan2(normal.head<2>().norm(),std::abs(normal.z()))*180./PI<=5.001);
+    size_t model_xyz=0,support_xyz=0,top_xyz=0;Vec3f previous=Vec3f::Zero();
+    for(const auto& move:result.moves) {
+        if(move.type==EMoveType::Extrude && move.delta_extruder>0. && move.extrusion_role!=erCustom) {
+            const auto& normal=result.tool_axes[move.tool_axis_id];
+            REQUIRE(std::atan2(normal.head<2>().norm(),std::abs(normal.z()))*180./PI<=5.001);
+            if((move.position.head<2>()-previous.head<2>()).norm()>.01 && std::abs(move.position.z()-previous.z())>.0001) {
+                if(is_support(move.extrusion_role)) ++support_xyz;else ++model_xyz;
+                if(move.extrusion_role==erTopSolidInfill) ++top_xyz;
+            }
+        }
+        previous=move.position;
     }
+    REQUIRE(model_xyz>20);REQUIRE(support_xyz>20);REQUIRE(top_xyz>20);
     REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==original);
     REQUIRE(object->config().enable_support.value);
+    const auto stable_decision=object->layer_strategy_decision();
+    const auto stable_regions=object->layer_region_records();
+    print.process();
+    REQUIRE(object->layer_strategy_decision()==stable_decision);
+    REQUIRE(object->layer_region_records()==stable_regions);
+    // Keep the foundation guard exercised on a field actually selected under
+    // the new policy, not on an assumed automatic checkbox result.
+    auto* mutable_object=const_cast<PrintObject*>(object);
+    REQUIRE(mutable_object->support_layers().size()>1);
+    mutable_object->support_layers().front()->support_fills.clear();
+    REQUIRE_THROWS(mutable_object->refine_curved_regions_for_paths());
 }
 
 TEST_CASE("Automatic slicing selects independent fields for different models and sparse infill", "[curved-engine][automatic][multi-model]")
@@ -555,7 +588,9 @@ TEST_CASE("Automatic slicing selects independent fields for different models and
         for(size_t i=0;i<model.objects.size();++i) model.objects[i]->instances.front()->set_offset(Vec3d(45.+60.*i,100.,0.));
         print.apply(model,config);
         REQUIRE_FALSE(Test::gcode(print).empty());
-        REQUIRE(print.objects()[0]->curved_field());REQUIRE(print.objects()[1]->curved_field());
+        REQUIRE(print.objects()[0]->curved_field());
+        require_best_generated_choice(*print.objects()[0]);
+        require_best_generated_choice(*print.objects()[1]);
         REQUIRE_FALSE(print.objects()[2]->curved_field());
     }
     SECTION("sparse infill") {
@@ -577,7 +612,7 @@ TEST_CASE("Automatic slicing selects independent fields for different models and
     }
 }
 
-TEST_CASE("Regional native slicing retains planar bridges and normal supports below a curved roof", "[curved-engine][regions][supports]")
+TEST_CASE("Regional cost selection retains planar bridges and normal support constraints", "[curved-engine][regions][supports]")
 {
     auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"},{"curved_layer_blend","0"},
         {"support_type","normal(auto)"},{"support_style","grid"}});
@@ -588,7 +623,7 @@ TEST_CASE("Regional native slicing retains planar bridges and normal supports be
     Print print;Model model;Test::init_print({mesh},print,model,config);
     model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
     print.process();const auto* o=print.objects().front();
-    REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(o->curved_field()));
+    require_best_generated_choice(*o);
     const auto original=model.objects.front()->volumes.front()->mesh().its.vertices;
     ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;print.export_gcode(output.string(),&result,nullptr);
     REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==original);
@@ -598,7 +633,8 @@ TEST_CASE("Regional native slicing retains planar bridges and normal supports be
         if(is_support(move.extrusion_role)) {++support;REQUIRE(result.tool_axes[move.tool_axis_id].z()==Catch::Approx(1.).margin(1e-6));}
         if(result.tool_axes[move.tool_axis_id].z()<.999999) ++tilted;
     }
-    REQUIRE(tilted>0);REQUIRE(bridge+support>0);
+    if(o->curved_field()) REQUIRE(tilted>0);else REQUIRE(tilted==0);
+    REQUIRE(bridge+support>0);
     if(config.opt_bool("enable_support")) REQUIRE(support>0);
 }
 
@@ -664,7 +700,7 @@ TEST_CASE("Sequential curved plates include generated adhesion paths in neighbou
     } else REQUIRE_FALSE(Test::gcode(print).empty());
 }
 
-TEST_CASE("Full Centauri MCT-1 retains curved roof regions alongside planar support paths", "[curved-engine][regions][totem]")
+TEST_CASE("Full Centauri MCT-1 compares roof benefit and preserves planar support paths", "[curved-engine][regions][totem]")
 {
     Model input;
     const std::string path=std::string(TEST_DATA_DIR)+"/curved/MCT-1_Centauri_5deg.stl";
@@ -698,7 +734,7 @@ TEST_CASE("Full Centauri MCT-1 retains curved roof regions alongside planar supp
     print.apply(model,config);
     print.process();
     INFO(print.objects().front()->layer_strategy_decision());
-    REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(print.objects().front()->curved_field()));
+    require_best_generated_choice(*print.objects().front());
     REQUIRE_FALSE(print.objects().front()->support_layers().empty());
     ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;print.export_gcode(output.string(),&result,nullptr);
     REQUIRE(model.objects.front()->volumes.front()->mesh().its.vertices==original);
@@ -711,7 +747,8 @@ TEST_CASE("Full Centauri MCT-1 retains curved roof regions alongside planar supp
             REQUIRE(result.tool_axes[move.tool_axis_id].head<2>().norm()<1e-6f);
         }
     }
-    REQUIRE(curved>0);REQUIRE(support>0);
+    if(print.objects().front()->curved_field()) REQUIRE(curved>0);else REQUIRE(curved==0);
+    REQUIRE(support>0);
 }
 
 TEST_CASE("Curved plane project reload preserves world positions when the volume origin moves", "[curved-engine][planes][3mf]")

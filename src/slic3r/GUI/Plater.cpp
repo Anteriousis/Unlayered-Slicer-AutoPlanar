@@ -73,6 +73,7 @@
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/GCode/ImportedPrintStatistics.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
@@ -17419,11 +17420,13 @@ void Plater::load_gcode(const wxString& filename)
 
     // process gcode
     GCodeProcessor processor;
+    PrintStatistics imported_statistics;
     processor.init_filament_maps_and_nozzle_type_when_import_only_gcode();
     try
     {
         GCodeProcessor::s_IsBBLPrinter = wxGetApp().preset_bundle->is_bbl_vendor();
         processor.process_file(filename.ToUTF8().data());
+        imported_statistics = imported_print_statistics(processor.get_result());
     }
     catch (const std::exception& ex)
     {
@@ -17444,17 +17447,10 @@ void Plater::load_gcode(const wxString& filename)
 
     current_print.apply_config_for_render(processor.export_config_for_render());
 
-    //BBS: add cost info when drag in gcode
-    auto& ps = current_result->print_statistics;
-    double total_cost = 0.0;
-    for (auto volume : ps.total_volumes_per_extruder) {
-        size_t extruder_id = volume.first;
-        double density = current_result->filament_densities.at(extruder_id);
-        double cost = current_result->filament_costs.at(extruder_id);
-        double weight = volume.second * density * 0.001;
-        total_cost += weight * cost * 0.001;
-    }
-    current_print.print_statistics().total_cost = total_cost;
+    // Populate length and weight as well as cost. An imported file has no
+    // native slice to fill them; leaving zero totals made Model Filament
+    // negative when Preview subtracted support, flush or wipe-tower usage.
+    current_print.print_statistics() = std::move(imported_statistics);
 
     current_print.set_gcode_file_ready();
 

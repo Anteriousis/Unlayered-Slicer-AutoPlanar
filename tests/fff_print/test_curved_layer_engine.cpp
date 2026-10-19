@@ -577,6 +577,34 @@ TEST_CASE("Automatic planning compares generated joint roof underside and planar
     REQUIRE_THROWS(mutable_object->refine_curved_regions_for_paths());
 }
 
+TEST_CASE("Mixed joint plates reset the prior object's field before each physical brim", "[curved-engine][joint][brim][multi-model]")
+{
+    const size_t automatic=GENERATE(0,1);
+    auto config=curved_config();config.set_deserialize_strict({{"curved_layer_blend","0"},
+        {"automatic_layer_strategy","0"},{"print_sequence","by layer"},
+        {"brim_type","outer_only"},{"brim_width","5"},{"enable_support","0"},
+        {"support_threshold_angle","30"}});
+    Print print;Model model;Test::init_print({joint_part(),joint_part()},print,model,config);
+    for(size_t i=0;i<2;++i) {
+        model.objects[i]->instances.front()->set_offset(Vec3d(80.+60.*i,100.,0.));
+        model.objects[i]->config.set_key_value("automatic_layer_strategy",new ConfigOptionBool(i==automatic));
+    }
+    print.apply(model,config);print.process();
+    REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::JointField>(print.objects()[automatic]->curved_field()));
+    REQUIRE_FALSE(print.objects()[1-automatic]->curved_field());
+    ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;
+    REQUIRE_NOTHROW(print.export_gcode(output.string(),&result,nullptr));
+    size_t brim=0,curved=0;
+    for(const auto& move:result.moves) if(move.type==EMoveType::Extrude && move.delta_extruder>0.) {
+        const auto& normal=result.tool_axes[move.tool_axis_id];
+        if(move.extrusion_role==erBrim) {
+            ++brim;REQUIRE(normal.head<2>().norm()<1e-6f);
+            REQUIRE(move.position.z()==Catch::Approx(.2).margin(.001));
+        } else if(normal.head<2>().norm()>1e-5f) ++curved;
+    }
+    REQUIRE(brim>20);REQUIRE(curved>20);
+}
+
 TEST_CASE("Automatic slicing selects independent fields for different models and sparse infill", "[curved-engine][automatic][multi-model]")
 {
     auto config=curved_config();config.set_deserialize_strict({{"automatic_layer_strategy","1"}});

@@ -413,3 +413,8 @@ checks above. Rafts remain excluded. The
 selector does not promise that every model has a useful curved region, nor that
 its limited local adjustment improves the printed finish.
 Software tests and physical prints are separate evidence.
+
+On mixed plates, physical skirts and brims reset to the identity mapping before
+each instance visit. A previous object's bounded curved field must not map the
+next object's adhesion coordinates. This reset retains the same plate-wide
+raised-travel bound; it does not bypass machine, bed, or neighbour checks.

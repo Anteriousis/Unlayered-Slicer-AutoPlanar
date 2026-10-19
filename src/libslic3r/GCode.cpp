@@ -7429,6 +7429,18 @@ LayerResult GCode::process_layer(
                 const auto& inst = instance_to_print.print_object.instances()[instance_to_print.instance_id];
                 const LayerToPrint &layer_to_print = layers[instance_to_print.layer_id];
                 if (visit.first_visit && print_wipe_extrusions == (is_anything_overridden ? 1 : 0)) {
+                    if(has_curved_objects(print)) {
+                        // Adhesion belongs to the physical bed. A previous
+                        // instance can leave its bounded field active, even
+                        // on the first layer. Reset before EACH instance's
+                        // skirt/brim, retaining plate-wide raised travel.
+                        const auto& object=instance_to_print.print_object;
+                        m_writer.set_curved_blend(std::make_shared<CurvedTransition::Identity>(),
+                            {0.,0.,0.,0.,curved_plate_top(print),0.},Vec2d::Zero(),
+                            std::max(2.,std::max(m_config.nonplanar_approach_distance.value,m_config.nonplanar_departure_distance.value)),
+                            CurvedTransition::FixedNozzleLimits::from_config(print.config(),object.curved_nozzle_index()).z_speed,
+                            print.config().nozzle_diameter.size()==2?int(object.curved_nozzle_index()):-1);
+                    }
                     gcode += generate_object_skirt_group(print, instance_to_print.print_object, instance_to_print.instance_id, layer_tools, layer, extruder_id);
                     // BELT_MOD -- a belt object's brim bands live on its layers; one emission per
                     // (layer, instance), in the brim filament's pass.

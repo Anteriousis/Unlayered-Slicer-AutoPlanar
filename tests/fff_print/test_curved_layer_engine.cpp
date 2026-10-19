@@ -155,9 +155,7 @@ TEST_CASE("Fixed nozzle automatic slicing emits BBL selection and preserves live
 {
     const int active=GENERATE(0,1);auto config=fixed_nozzle_config(active);
     Print print;print.is_BBL_printer()=true;Model model;
-    const TriangleMesh small_roof(AutoPlanesFixtures::heightfield_block(8.,8.,4,
-        [](double x){return 3.+x*std::tan(4.*PI/180.);}));
-    Test::init_print({small_roof},print,model,config);
+    Test::init_print({ramp(2.)},print,model,config);
     model.objects.front()->instances.front()->set_offset(Vec3d(100.,100.,0.));print.apply(model,config);
     print.process();
     ScopedTemporaryFile temp(".gcode");GCodeProcessorResult preview;

@@ -1403,7 +1403,10 @@ bool PrintObject::refine_curved_regions_for_paths()
         // is a kinematic estimate (no acceleration/firmware/startup model).
         GeneratedCost cost;std::optional<Vec3d> last;double deposited=0.;
         const auto& pc=m_print->config();const size_t nozzle=curved_nozzle_index();
-        const double vz=pc.machine_max_speed_z.get_at(nozzle),travel=std::max(1.,pc.travel_speed.get_at(nozzle));
+        // Machine limit arrays include normal/silent mode entries. They are
+        // not indexed by active tip; a silent-mode zero would make cost infinite.
+        const double vz=CurvedTransition::FixedNozzleLimits::from_config(pc,nozzle).z_speed;
+        const double travel=std::max(1.,pc.travel_speed.get_at(nozzle));
         const PrintRegionConfig* cost_region=&printing_region(0).config();
         const auto physical=[&](double x,double y,double w) {return Vec3d(x,y,m_curved_field?m_curved_field->world_z(x,y,w):w);};
         const auto measure=[&](const ExtrusionPath& p,double w) {

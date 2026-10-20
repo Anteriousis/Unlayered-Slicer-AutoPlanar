@@ -48,6 +48,7 @@ void GCodeWriter::set_curved_blend(std::shared_ptr<const CurvedTransition::Field
     if (!field || !std::isfinite(travel_clearance) || !std::isfinite(z_speed) ||
         travel_clearance<=0. || z_speed<=0.)
         throw RuntimeError("Curved blend needs positive travel clearance and Z speed");
+    if(!m_curved_field && m_max_extrusion_z>0.) m_curved_obstacles.invalidate();
     if(fixed_nozzle>=0 && (!filament() || int(filament()->extruder_id())!=fixed_nozzle))
         throw RuntimeError("The writer active nozzle differs from the planned fixed nozzle.");
     m_curved_fixed_nozzle=fixed_nozzle;
@@ -127,17 +128,29 @@ std::string GCodeWriter::curved_travel(const std::vector<Vec3d>& points, const s
 {
     if(std::any_of(points.begin(),points.end(),[](const Vec3d& p){return !p.allFinite();}))
         throw RuntimeError("Curved travel requires finite coordinates");
+    if(points.empty()) return {};
     const Vec3d& target=points.back();
     if(is_current_position_clear() && points.size()==1 && (target-m_pos).norm()<1e-9) {
         m_lifted=0.;m_to_lift=0.;
         return {};
     }
-    const double safe=curved_travel_height(target);
+    double safe=curved_travel_height(target);
+    bool local_route=false;
+    if(is_current_position_clear()) {
+        std::vector<CurvedTransition::TravelClearance::Point> route;
+        for(const auto& p:points) route.push_back({p.x(),p.y(),p.z()});
+        const auto local=m_curved_obstacles.height({m_pos.x(),m_pos.y(),m_pos.z()},route,m_curved_travel_clearance+.001);
+        if(local) {
+            // Never lower an already emitted staging height; include the tip's
+            // departure/approach levels, upward rounding and the same allowance.
+            const double lower=std::ceil(std::max({*local,target.z()+m_curved_travel_clearance+.001,
+                m_pos.z()})*1000.)/1000.;
+            if(lower<safe) {safe=lower;local_route=true;}
+        }
+    }
     if(!std::isfinite(safe)) throw RuntimeError("Curved travel height is not finite");
     const double xy_speed=this->travel_xy_speed(false)*60.;
-    double configured_z=this->config.travel_speed_z.get_at(m_cached_extruder_idx);
-    if (configured_z<=0.) configured_z=this->travel_xy_speed(false);
-    const double z_speed=std::min(configured_z,m_curved_z_speed)*60.;
+    const double z_speed=curved_effective_z_speed()*60.;
     std::string out;
     GCodeG1Formatter lift;
     lift.emit_z(safe); lift.emit_f(z_speed);
@@ -146,7 +159,8 @@ std::string GCodeWriter::curved_travel(const std::vector<Vec3d>& points, const s
     for(const auto& point:points) {
         GCodeG1Formatter across;
         across.emit_xyz(Vec3d(point.x()-m_x_offset,point.y()-m_y_offset,safe)); across.emit_f(xy_speed);
-        across.emit_comment(GCodeWriter::full_gcode_comment,"curved blend: traverse above printed material");
+        across.emit_comment(GCodeWriter::full_gcode_comment,local_route?
+            "curved blend: traverse above route envelope":"curved blend: traverse above printed material");
         out+=across.string();
     }
     GCodeG1Formatter descend;
@@ -182,7 +196,11 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
     Vec3d previous=m_pos;
     // A descending first chord still deposits at its starting point.
     m_max_extrusion_z=std::max(m_max_extrusion_z,previous.z());
-    std::string out;
+    struct Fine {Vec3d physical;CurvedTransition::Gradient gradient;double height,cumulative_e;int mode;};
+    std::vector<Fine> fine;fine.reserve(count+1);
+    fine.push_back({previous,{0.,0.},m_curved_height,0.,-1});
+    std::vector<std::array<double,3>> local_points;
+    local_points.push_back({previous.x()-m_curved_origin.x(),previous.y()-m_curved_origin.y(),previous.z()});
     for (int i=1;i<=count;++i) {
         const Vec3d logical=start+(target-start)*(double(i)/count);
         const Vec3d physical=curved_physical_point(logical);
@@ -199,14 +217,40 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
         // area as if it were a flattened layer bead would change bridge flow.
         const double h=m_curved_round_bead?m_curved_height:dz/normal_length;
         const int preview_mode=int(m_curved_field->layer_mode(mx,my,midpoint_z));
-        if(preview_mode!=m_curved_preview_mode) {
-            out+=";LAYER_MODE:"+std::to_string(preview_mode)+"\n";
-            m_curved_preview_mode=preview_mode;
-        }
         // Physical bead area times physical path length. Upstream's dE already
         // contains material/role ratios; preserve those, replacing only geometry.
         const double ratio=(m_curved_round_bead?1.:CurvedTransition::Ramp::bead_area(m_curved_width,h)/area0) *
                            (physical-previous).norm()/(length/count);
+        fine.push_back({physical,gradient,h,fine.back().cumulative_e+dE/count*ratio,preview_mode});
+        local_points.push_back({physical.x()-m_curved_origin.x(),physical.y()-m_curved_origin.y(),physical.z()});
+        previous=physical;
+        m_max_extrusion_z=std::max(m_max_extrusion_z,physical.z());
+    }
+    const auto chord_ends=CurvedTransition::bounded_chord_ends(*m_curved_field,local_points);
+    std::vector<size_t> ends;
+    size_t first=0;
+    for(size_t end:chord_ends) {
+        // Do not average across mode changes or appreciable bead/normal
+        // variation. Extrusion volume is still the OLD fine-grid integral.
+        size_t begin=first;
+        for(size_t i=first+2;i<=end;++i) {
+            const auto& a=fine[begin+1];const auto& b=fine[i];
+            if(a.mode!=b.mode || std::abs(a.height-b.height)>.001 ||
+               std::hypot(a.gradient.dx-b.gradient.dx,a.gradient.dy-b.gradient.dy)>.002) {
+                ends.push_back(i-1);begin=i-1;
+            }
+        }
+        ends.push_back(end);first=end;
+    }
+    std::string out;first=0;
+    for(size_t end:ends) {
+        const auto& sample=fine[first+(end-first+1)/2];
+        const auto& physical=fine[end].physical;
+        const auto& gradient=sample.gradient;const double h=sample.height;
+        const double normal_length=std::sqrt(1.+gradient.dx*gradient.dx+gradient.dy*gradient.dy);
+        if(sample.mode!=m_curved_preview_mode) {
+            out+=";LAYER_MODE:"+std::to_string(sample.mode)+"\n";m_curved_preview_mode=sample.mode;
+        }
         char height_tag[64];
         std::snprintf(height_tag,sizeof(height_tag),";%s%.6f\n",
                       GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height).c_str(),h);
@@ -220,10 +264,13 @@ std::string GCodeWriter::curved_extrude(const Vec3d& target, double dE, const st
         out+=normal_tag;
         GCodeG1Formatter move;
         move.emit_xyz(Vec3d(physical.x()-m_x_offset,physical.y()-m_y_offset,physical.z()));
-        if (!no_extrusion) { filament()->extrude(dE/count*ratio); move.emit_e(filament()->E()); }
+        if (!no_extrusion) { filament()->extrude(fine[end].cumulative_e-fine[first].cumulative_e); move.emit_e(filament()->E()); }
         move.emit_comment(GCodeWriter::full_gcode_comment,comment);
-        out+=move.string(); previous=physical;
-        if (!no_extrusion) m_max_extrusion_z=std::max(m_max_extrusion_z,physical.z());
+        out+=move.string();
+        const auto& a=fine[first].physical;
+        m_curved_obstacles.add({a.x(),a.y(),a.z()},{physical.x(),physical.y(),physical.z()},
+            m_curved_width*.5,m_curved_width*.5*m_curved_domain->slope());
+        first=end;
     }
     m_pos=previous; m_lifted=0.; m_to_lift=0.;
     return out;
@@ -286,6 +333,12 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
     m_curved_max_z=m_curved_common_max_z;
     m_curved_nozzle_heights=print_config.extruder_printable_height.values;
     m_curved_fixed_nozzle=-1;
+    const auto envelope=HotendEnvelope::from_config(print_config);
+    // A parked second tip has additional geometry beyond this upright active
+    // head envelope. Retain global travel until its swept volume is modelled.
+    m_curved_obstacles.configure(print_config.axis_selection.value==AxisSelection::Virtual &&
+        !print_config.belt_printer.value && print_config.nozzle_diameter.size()==1?
+        envelope.height:0.,envelope.angle,print_config.nonplanar_gantry_height.value);
     m_fixed_dual_enabled=print_config.nozzle_diameter.size()==2 && print_config.nonplanar_fixed_nozzle.value>0;
     this->config.apply(print_config, true);
 
@@ -1590,6 +1643,7 @@ std::string GCodeWriter::extrude_to_xy(const Vec2d &point, double dE, const std:
 
     if (!force_no_extrusion) {
         filament()->extrude(dE);
+        m_curved_obstacles.invalidate();
         m_max_extrusion_z = std::max(m_max_extrusion_z, m_pos.z());   // UNLAYERED_MOD
     }
 
@@ -1663,6 +1717,7 @@ std::string GCodeWriter::extrude_arc_to_xy(const Vec2d& point, const Vec2d& cent
     m_pos(1) = point(1);
     if (!force_no_extrusion) {
         filament()->extrude(dE);
+        m_curved_obstacles.invalidate();
         m_max_extrusion_z = std::max(m_max_extrusion_z, m_pos.z());   // UNLAYERED_MOD
     }
 
@@ -1714,6 +1769,7 @@ std::string GCodeWriter::extrude_to_xyz(const Vec3d &point, double dE, const std
     m_lifted = 0;
     if (!force_no_extrusion) {
         filament()->extrude(dE);
+        m_curved_obstacles.invalidate();
         m_max_extrusion_z = std::max(m_max_extrusion_z, m_pos.z());   // UNLAYERED_MOD
     }
 

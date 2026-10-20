@@ -80,6 +80,9 @@ public:
     double jacobian_max() const override {return m_jmax;}
     double max_displacement_mm() const override {return m_amplitude;}
     double inverse_hessian_bound() const override {return m_hessian;}
+    double world_hessian_bound_box(double x0,double x1,double y0,double y1,double z0,double z1) const override {
+        return implicit_world_hessian_bound_box(x0,x1,y0,y1,z0,z1);
+    }
     double inverse_hessian_bound_box(double xmin,double xmax,double ymin,double ymax,double zmin,double zmax) const override {
         double result=0.;
         for(const auto& p:m_patches) {

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -103,6 +104,18 @@ public:
     // Hessian norm of the inverse map over the physical model. Zero is reserved
     // for a boundary known to map exactly (the certified ramp).
     virtual double inverse_hessian_bound() const { return 0.; }
+    // A bound for D^2_xy world_z at constant logical height. The base callback
+    // does not declare roof curvature: zero inverse_hessian_bound there is a
+    // special mesh-boundary contract, not permission to merge curved paths.
+    virtual double world_hessian_bound_box(double,double,double,double,double,double) const {
+        return std::numeric_limits<double>::infinity();
+    }
+    double implicit_world_hessian_bound_box(double x0,double x1,double y0,double y1,double z0,double z1) const {
+        // w=F(x,y,z), F_z>=jmin. Differentiate F(x,y,z(x,y)) twice:
+        // ||D^2 z|| <= ||D^2 F|| (1+||grad z||^2) / jmin.
+        return inverse_hessian_bound_box(x0,x1,y0,y1,z0,z1)*
+            (1.+slope_bound()*slope_bound())/jacobian_min();
+    }
 
     // Contract: the callback's height bounds and Lipschitz slope bound must be
     // established over the WHOLE model domain by its caller. Checking individual
@@ -230,6 +243,7 @@ public:
     LayerMode layer_mode(double,double,double) const override {return LayerMode::Planar;}
     Gradient gradient(double,double,double) const override {return {0.,0.};}
     bool identity_on_box(double,double,double,double,double,double) const override {return true;}
+    double world_hessian_bound_box(double,double,double,double,double,double) const override {return 0.;}
 };
 
 } // namespace Slic3r::CurvedTransition

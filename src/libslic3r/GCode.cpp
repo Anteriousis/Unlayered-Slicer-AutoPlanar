@@ -8788,6 +8788,33 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
     return gcode;
 }
 
+void GCode::refine_curved_infill_order(ExtrusionEntitiesPtr& entities)
+{
+    if(!m_writer.has_curved_blend() || !m_layer || entities.size()<3 || entities.size()>2048) return;
+    const auto role=entities.front()->role();
+    // Surface/bridge direction, wall/seam dependencies, and no_sort groups
+    // retain the upstream sequence. Only interchangeable internal infill moves.
+    if(role!=erInternalInfill && role!=erSolidInfill) return;
+    std::vector<CurvedTransition::PathEnds> endpoints;endpoints.reserve(entities.size());
+    const auto point=[&](const Point& p) {
+        const Vec2d xy=point_to_gcode(p);
+        const auto q=m_writer.curved_map_point(Vec3d(xy.x(),xy.y(),m_layer->print_z));
+        return std::array<double,3>{q.x(),q.y(),q.z()};
+    };
+    double safe=m_writer.max_extrusion_z()+
+        std::max(2.,std::max(m_config.nonplanar_approach_distance.value,m_config.nonplanar_departure_distance.value));
+    for(const auto* entity:entities) {
+        if(entity->role()!=role || !dynamic_cast<const ExtrusionPath*>(entity)) return;
+        endpoints.push_back({point(entity->first_point()),point(entity->last_point())});
+        safe=std::max({safe,endpoints.back().first[2]+2.,endpoints.back().last[2]+2.});
+    }
+    const Vec3d start=m_writer.get_position();
+    const auto order=CurvedTransition::refine_path_order(endpoints,{start.x(),start.y(),start.z()},
+        std::max(1.,NOZZLE_CONFIG(travel_speed)),m_writer.curved_effective_z_speed(),safe);
+    const auto original=entities;
+    for(size_t i=0;i<order.size();++i) entities[i]=original[order[i]];
+}
+
 // Chain the paths hierarchically by a greedy algorithm to minimize a travel distance.
 std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool ironing, const Transform3d &trafo)
 {
@@ -8808,7 +8835,9 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
                     auto *eec = dynamic_cast<const ExtrusionEntityCollection*>(fill);
                     if (eec) {
 
-                        for (ExtrusionEntity* ee : eec->chained_path_from(m_last_pos.to_point()).entities)
+                        auto chained=eec->chained_path_from(m_last_pos.to_point());
+                        if(eec->can_sort()) refine_curved_infill_order(chained.entities);
+                        for (ExtrusionEntity* ee : chained.entities)
                             gcode += this->extrude_entity(*ee, extrusion_name, -1., ExtrusionEntitiesPtr(), trafo);
                     } else
                         gcode += this->extrude_entity(*fill, extrusion_name, -1., ExtrusionEntitiesPtr(), trafo);

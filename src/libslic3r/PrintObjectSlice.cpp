@@ -1407,6 +1407,8 @@ bool PrintObject::refine_curved_regions_for_paths()
         // not indexed by active tip; a silent-mode zero would make cost infinite.
         const double vz=CurvedTransition::FixedNozzleLimits::from_config(pc,nozzle).z_speed;
         const double travel=std::max(1.,pc.travel_speed.get_at(nozzle));
+        const double configured_z=pc.travel_speed_z.get_at(nozzle);
+        const double travel_z=std::min(vz,configured_z>0.?configured_z:travel);
         const PrintRegionConfig* cost_region=&printing_region(0).config();
         const auto physical=[&](double x,double y,double w) {return Vec3d(x,y,m_curved_field?m_curved_field->world_z(x,y,w):w);};
         const auto measure=[&](const ExtrusionPath& p,double w) {
@@ -1426,7 +1428,7 @@ bool PrintObject::refine_curved_regions_for_paths()
                 if(xy>1e-5) {
                     if(m_curved_field) {
                         const double safe=std::max({deposited,last->z(),previous.z()})+2.+p.width*.5*m_curved_field->slope_bound();
-                        cost.motion_seconds+=(2.*safe-last->z()-previous.z())/vz+xy/travel;
+                        cost.motion_seconds+=(2.*safe-last->z()-previous.z())/travel_z+xy/travel;
                     } else cost.motion_seconds+=std::max(xy/travel,std::abs(previous.z()-last->z())/vz);
                 }
             }

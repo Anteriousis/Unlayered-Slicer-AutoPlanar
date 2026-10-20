@@ -64,6 +64,9 @@ public:
         return m_roof->inverse_hessian_bound()*(2.+j*j*(1.+s*s))+
             m_roof->jacobian_max()*m_under->inverse_hessian_bound();
     }
+    double world_hessian_bound_box(double x0,double x1,double y0,double y1,double z0,double z1) const override {
+        return implicit_world_hessian_bound_box(x0,x1,y0,y1,z0,z1);
+    }
     double inverse_hessian_bound_box(double x0,double x1,double y0,double y1,double z0,double z1) const override {
         // w=R^-1(x,y,U^-1(x,y,z)); ||D U^-1|| <= its Frobenius
         // bound. Chain rule: H_R ||DU||^2 + J_R H_U. Physical boxes

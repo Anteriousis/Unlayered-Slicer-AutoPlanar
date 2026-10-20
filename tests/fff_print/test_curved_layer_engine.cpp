@@ -1142,8 +1142,19 @@ TEST_CASE("Affine tilted extrusion uses one exact segment while blends retain bo
     const auto output=writer.extrude_to_xy(Vec2d(19.,10.),1.);
     size_t count=0;double total_e=0.;std::string line;std::istringstream lines(output);
     const std::regex eword(R"( E(-?\d*\.?\d+))");
+    const std::regex xword(R"( X(-?\d*\.?\d+))"),zword(R"( Z(-?\d*\.?\d+))");
+    Vec2d previous(1.,field->world_z(1.,10.,w));
     while(std::getline(lines,line)) if(line.rfind("G1 ",0)==0) {
-        std::smatch e;if(std::regex_search(line,e,eword)) {++count;total_e+=std::stod(e[1]);}
+        std::smatch e;if(std::regex_search(line,e,eword)) {
+            ++count;total_e+=std::stod(e[1]);
+            std::smatch x,z;REQUIRE(std::regex_search(line,x,xword));REQUIRE(std::regex_search(line,z,zword));
+            const Vec2d end(std::stod(x[1]),std::stod(z[1]));
+            for(int i=0;i<=100;++i) {
+                const double t=i/100.;const Vec2d p=previous+t*(end-previous);
+                REQUIRE(std::abs(field->world_z(p.x(),10.,w)-p.y())<=.0056);
+            }
+            previous=end;
+        }
     }
     if(terminal) {
         REQUIRE(count==1);
@@ -1154,7 +1165,21 @@ TEST_CASE("Affine tilted extrusion uses one exact segment while blends retain bo
         const double area=.45*h-h*h*(1.-PI/4.);
         const double baseline=.45*.2-.2*.2*(1.-PI/4.);
         REQUIRE(total_e==Catch::Approx(std::sqrt(1.+.03*.03)*area/baseline).margin(2e-5));
-    } else REQUIRE(count>20);
+    } else {
+        REQUIRE(count>1);REQUIRE(count<1000);
+        // An independent, much finer integral verifies retained volume, rather
+        // than trusting the subdivision routine's own integration samples.
+        double expected=0.;constexpr int n=10000;const double dx=18./n;
+        for(int i=0;i<n;++i) {
+            const double x=1.+(i+.5)*dx;
+            const auto gradient=field->gradient(x,10.,w);
+            const double h=(field->world_z(x,10.,w)-field->world_z(x,10.,w-.2))/
+                std::sqrt(1.+gradient.dx*gradient.dx+gradient.dy*gradient.dy);
+            const double dz=field->world_z(x+dx*.5,10.,w)-field->world_z(x-dx*.5,10.,w);
+            expected+=Ramp::bead_area(.45,h)/Ramp::bead_area(.45,.2)*std::hypot(dx,dz)/18.;
+        }
+        REQUIRE(total_e==Catch::Approx(expected).margin(1e-4));
+    }
     REQUIRE(writer.get_position().x()==19.);
     REQUIRE(writer.get_position().z()==Catch::Approx(field->world_z(19.,10.,w)).margin(1e-9));
 }
@@ -1209,6 +1234,63 @@ TEST_CASE("Curved travel clears prior deposition and batches an XY detour", "[cu
     REQUIRE(writer.get_position().z()==staged);
     writer.set_current_position_clear(false);
     REQUIRE(writer.travel_to_xyz(Vec3d(0.,10.,2.)).find("Z30")!=std::string::npos);
+}
+
+TEST_CASE("Route-specific writer clearance retains other objects and unknown-motion fallback", "[curved-engine][travel][motion]")
+{
+    using namespace CurvedTransition;
+    PrintConfig config;config.apply(curved_config(),true);
+    config.travel_speed_z.values={3.};
+    GCodeWriter writer;writer.apply_print_config(config);writer.set_extruders({0});writer.set_extruder(0);
+    const auto identity=std::make_shared<Identity>();
+    const ModelDomain domain{0.,200.,0.,200.,40.,0.};
+    writer.set_curved_plate_bound(45.);writer.set_curved_blend(identity,domain,Vec2d::Zero(),2.,5.);
+    REQUIRE(writer.curved_effective_z_speed()==3.);
+    writer.set_curved_path(30.,.45,.2);
+    writer.travel_to_xyz(Vec3d(190.,190.,30.));writer.extrude_to_xy(Vec2d(195.,190.),1.);
+    // A second object's identity mapping must not clear the first object's map.
+    writer.set_curved_blend(identity,domain,Vec2d::Zero(),2.,5.);
+    writer.set_curved_path(2.,.45,.2);
+    writer.travel_to_xyz(Vec3d(10.,10.,2.));writer.extrude_to_xy(Vec2d(15.,10.),1.);
+    const std::string clear=writer.travel_to_curved_path({Vec3d(15.,12.,2.),Vec3d(10.,12.,2.)});
+    REQUIRE(clear.find("traverse above route envelope")!=std::string::npos);
+    const std::regex zword(R"( Z(-?\d*\.?\d+))");std::smatch z;
+    REQUIRE(std::regex_search(clear,z,zword));
+    const double low=std::stod(z[1]);
+    // Remote material still restricts gantry clearance at all XY positions.
+    REQUIRE(low>=30.-14.+2.);REQUIRE(low<30.+2.);
+    const std::string crossing=writer.travel_to_curved_path({Vec3d(192.,190.,2.)});
+    REQUIRE(std::regex_search(crossing,z,zword));
+    REQUIRE(std::stod(z[1])>=32.);
+    writer.set_current_position_clear(false);
+    const auto unknown=writer.travel_to_xyz(Vec3d(10.,10.,2.));
+    REQUIRE(unknown.find("traverse above printed material")!=std::string::npos);
+    REQUIRE(std::regex_search(unknown,z,zword));REQUIRE(std::stod(z[1])>=45.);
+    // A known position cannot restore material omitted during unknown motion.
+    writer.extrude_to_xy(Vec2d(15.,10.),1.);
+    const auto still_global=writer.travel_to_xyz(Vec3d(10.,12.,2.));
+    REQUIRE(still_global.find("traverse above route envelope")==std::string::npos);
+    REQUIRE(std::regex_search(still_global,z,zword));REQUIRE(std::stod(z[1])>=32.);
+}
+
+TEST_CASE("Route-specific writer clearance covers bead width and off-axis deposition", "[curved-engine][travel][motion]")
+{
+    using namespace CurvedTransition;
+    PrintConfig config;config.apply(curved_config(),true);
+    GCodeWriter writer;writer.apply_print_config(config);writer.set_extruders({0});writer.set_extruder(0);
+    writer.set_curved_plate_bound(45.);
+    writer.set_curved_blend(std::make_shared<Identity>(),{0.,200.,0.,200.,40.,0.},Vec2d::Zero(),2.,5.);
+    writer.set_curved_path(20.,4.,.2);
+    writer.travel_to_xyz(Vec3d(10.,20.,20.));writer.extrude_to_xy(Vec2d(15.,20.),1.);
+    writer.set_curved_path(2.,.45,.2);
+    writer.travel_to_xyz(Vec3d(5.,17.,2.));writer.extrude_to_xy(Vec2d(6.,17.),1.);
+    const auto route=writer.travel_to_curved_path({Vec3d(18.,17.,2.)});
+    const std::regex zword(R"( Z(-?\d*\.?\d+))");std::smatch z;
+    REQUIRE(std::regex_search(route,z,zword));
+    // The broad bead reaches y=18: a tip-line-only test would miss it.
+    const double limit=20.-.5*std::tan(15.*PI/180.)+2.;
+    REQUIRE(std::stod(z[1])>=limit);
+    REQUIRE(writer.get_position().z()==2.);
 }
 
 TEST_CASE("Empty curved layers preserve an already rounded staging height", "[curved-engine][travel]")

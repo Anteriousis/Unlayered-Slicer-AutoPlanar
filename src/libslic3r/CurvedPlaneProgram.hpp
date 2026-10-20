@@ -84,6 +84,9 @@ public:
         // Direct Hessian of physical-to-logical w; mixed XY/Z terms plus ZZ.
         return m_second_projection+2.*m_grad_derivative;
     }
+    double world_hessian_bound_box(double x0,double x1,double y0,double y1,double z0,double z1) const override {
+        return implicit_world_hessian_bound_box(x0,x1,y0,y1,z0,z1);
+    }
     double inverse_hessian_bound_box(double,double,double,double,double zmin,double zmax) const override {
         // map_mesh supplies PHYSICAL bounds. Outside all direction-changing
         // slabs the map is affine, so its exact Hessian is zero.

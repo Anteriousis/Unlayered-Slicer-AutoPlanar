@@ -366,13 +366,24 @@ layer plus 0.02 mm for mapping/path/rounding error; output outside that envelope
 is refused. That inflated height is also checked against machine and Virtual Z
 limits. This is a toolpath bound, not a measured allowance for material swelling.
 
-Travel leaves vertically, traverses above the whole plate's bounded printed paths by at least 2 mm and
-descends vertically. Its height uses the greatest physical deposition Z emitted
+Travel leaves vertically, traverses at a bounded height, and descends vertically.
+The fallback height uses the greatest physical deposition Z emitted
 so far, plus a bound on tilted bead-edge rise, 0.001 mm for output rounding,
 and the configured clearance
 (at least 2 mm). The same bound survives changes between objects, instances,
 planar support paths and curved fields; future unprinted layers do not raise it.
 Unknown positions after custom code retain the full final-plate height fallback.
+For a single-nozzle Virtual profile with a declared four-sided envelope and
+gantry height, a conservative height map tracks the entire width and tilted
+edge rise of every emitted object, support and adhesion chord. A route checks
+the swept XY rectangles of all its waypoints against every occupied height
+cell, with an additional 0.5 mm lateral envelope margin. The gantry and the top
+of the envelope remain globally blocking, even for distant tall objects.
+Only a complete map can lower a traverse; unknown motion, untracked native
+extrusion, invalid geometry or excessive query work retains the global fallback.
+The route keeps the same configured vertical allowance of at least 2 mm,
+upward output rounding, and vertical departure/approach. Multiple physical
+nozzles retain the global route because this check does not model a parked tip.
 Custom machine-start routines must finish with a prepared bed and may not leave
 unmodeled obstructions; firmware macros and material swelling are not inferred.
 An XY detour retains all planned waypoints at one raised height, with one
@@ -380,7 +391,17 @@ departure and one final approach. Exact repeated destinations emit no motion.
 These changes do not reduce the configured clearance or raise motion limits.
 Completed affine tilted slabs emit each straight extrusion as one exact segment;
 mesh mapping likewise avoids refining affine physical slabs. Changing-direction
-and regional curved paths retain their bounded chord subdivision. This reduces
+and regional curved paths use interval Hessian bounds to merge fine chords only
+when the full curve remains within the existing 0.005 mm chord tolerance.
+The original fine-grid volume integral is retained, and layer-mode boundaries,
+normal variation and bead-height variation further limit merging. Generic
+callbacks without a curvature bound retain the original fine subdivision.
+Sortable internal and solid infill additionally receive a bounded relocation
+pass over the existing greedy chain, scored by physical XYZ travel time.
+This preserves each path's direction and volume; perimeters, top surfaces,
+bridges, support order, seams and explicit no-sort collections retain their order.
+Candidate cost uses the configured Z travel speed capped by machine limits.
+This reduces
 redundant rounded moves without flattening a curved path or changing its bead
 volume, and does not promise the same elapsed print time as planar output.
 The writer refuses a computed height above the common machine/Virtual Z ceiling

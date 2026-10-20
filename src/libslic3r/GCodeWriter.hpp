@@ -10,6 +10,8 @@
 #include "Polygon.hpp"
 #include "PrintConfig.hpp"
 #include "CurvedRamp.hpp"
+#include "CurvedPathOptimization.hpp"
+#include "CurvedTravelClearance.hpp"
 #include "GCode/CoolingBuffer.hpp"
 #include "GCode/MachineKinematics.hpp"
 #include <memory>
@@ -144,6 +146,11 @@ public:
     }
     void set_curved_path(double w, double width, double height, bool round_bead=false);
     double curved_max_flow_scale() const;
+    Vec3d curved_map_point(const Vec3d& p) const {return curved_physical_point(p);}
+    double curved_effective_z_speed() const {
+        const double configured=config.travel_speed_z.get_at(m_cached_extruder_idx);
+        return std::min(configured>0.?configured:travel_xy_speed(false),m_curved_z_speed);
+    }
     Vec2f get_xy_offset() { return Vec2f{m_x_offset, m_y_offset}; };
 
     // UNLAYERED_MOD — the active extruder's XY nozzle offset, in the MACHINE frame.
@@ -183,7 +190,10 @@ public:
     void add_object_change_labels(std::string& gcode);
 
     //BBS:
-    void set_current_position_clear(bool clear) { m_is_current_pos_clear = clear; };
+    void set_current_position_clear(bool clear) {
+        m_is_current_pos_clear = clear;
+        if(!clear && !m_curved_obstacles.empty()) m_curved_obstacles.invalidate();
+    };
     bool is_current_position_clear() const { return m_is_current_pos_clear; };
     // UNLAYERED_MOD — emit a collision-safe hop to a destination given in the part's local frame:
     // traverse in XY at the current (already-lifted) machine-vertical height, then descend straight
@@ -266,6 +276,7 @@ public:
     std::vector<double> m_curved_nozzle_heights;
     int m_curved_preview_mode=-1;
     bool m_curved_round_bead=false;
+    CurvedTransition::TravelClearance m_curved_obstacles;
 	// Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_filament_extruders;
     bool            m_single_extruder_multi_material;

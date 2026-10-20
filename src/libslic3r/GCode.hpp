@@ -557,6 +557,7 @@ private:
 
     std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first, const Transform3d &trafo = Transform3d::Identity());
     std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing, const Transform3d &trafo = Transform3d::Identity());
+    void refine_curved_infill_order(ExtrusionEntitiesPtr& entities);
     // trafo un-rotates support toolpaths out of the owning segment's slice frame, exactly as the
     // object body is un-rotated (see the post_trafo_inverse() use in process_layer). Support and
     // object extrusion for one segment MUST share these frame semantics: mixing them prints the

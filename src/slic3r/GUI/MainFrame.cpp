@@ -1,5 +1,9 @@
 #include "MainFrame.hpp"
 
+#include <climits>
+#include <mutex>
+#include <thread>
+
 #include <wx/panel.h>
 #include <wx/notebook.h>
 #include <wx/listbook.h>
@@ -58,6 +62,9 @@
 #include "UnsavedChangesDialog.hpp"
 #include "PublishSettingsDialog.hpp"
 #include "MsgDialog.hpp"
+#include "OtherSlicerImportDialog.hpp"
+#include "libslic3r/OtherSlicerImport.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "Notebook.hpp"
 #include "GUI_Factories.hpp"
 #include "MenuMnemonics.hpp"
@@ -82,6 +89,7 @@
 #include <gtk/gtk.h>
 #endif // __WXGTK__
 #include <slic3r/GUI/CreatePresetsDialog.hpp>
+#include <wx/filesys.h>
 
 
 namespace Slic3r {
@@ -2816,7 +2824,7 @@ static wxMenu* generate_help_menu()
     // like the Calibration Guide. Also reachable from the Cut Planes gizmo panel.
     append_menu_item(helpMenu, wxID_ANY, _L("Multiplanar Tutorial"), _L("How to print one object in several build directions"),
         [](wxCommandEvent&) {
-            wxLaunchDefaultBrowser(wxString::Format("file://%s/web/tutorial/multiplanar.html", from_u8(Slic3r::resources_dir())), wxBROWSER_NEW_WINDOW);
+            wxLaunchDefaultBrowser(wxFileSystem::FileNameToURL(wxFileName(from_u8(Slic3r::resources_dir() + "/web/tutorial/multiplanar.html"))), wxBROWSER_NEW_WINDOW);
         });
 
     helpMenu->AppendSeparator();
@@ -2866,22 +2874,32 @@ static wxMenu* generate_help_menu()
             auto *u = wxGetApp().auto_updater();
             return u && u->update_ready();
         });
-    append_menu_item(helpMenu, wxID_ANY, _L("Sign in to Unlayered..."), _L("Sign in so the slicer can update itself"),
+    // One item that reads "Sign in" or "Sign out", never both. The two separate
+    // items this replaces had enable conditions that were never connected (append_menu_item binds
+    // cb_condition only when given a parent window), so both always showed and both were clickable.
+    wxMenuItem *account_item = append_menu_item(helpMenu, wxID_ANY, _L("Sign in to Unlayered..."),
+        _L("Sign in so the slicer can update itself"),
         [](wxCommandEvent&) {
-            if (auto *u = wxGetApp().auto_updater())
-                u->sign_in(wxGetApp().mainframe);
-        }, "", nullptr, []() {
             auto *u = wxGetApp().auto_updater();
-            return u && !u->account().signed_in();
-        });
-    append_menu_item(helpMenu, wxID_ANY, _L("Sign out of Unlayered"), _L("Sign out of your Unlayered account"),
-        [](wxCommandEvent&) {
-            if (auto *u = wxGetApp().auto_updater())
+            if (u == nullptr)
+                return;
+            if (u->account().signed_in())
                 u->sign_out();
-        }, "", nullptr, []() {
-            auto *u = wxGetApp().auto_updater();
-            return u && u->account().signed_in();
+            else
+                u->sign_in(wxGetApp().mainframe);
         });
+    auto relabel_account_item = [account_item]() {
+        auto      *u  = wxGetApp().auto_updater();
+        const bool in = u && u->account().signed_in();
+        account_item->SetItemLabel(in ? _L("Sign out of Unlayered") : _L("Sign in to Unlayered..."));
+        account_item->SetHelp(in ? _L("Sign out of your Unlayered account") : _L("Sign in so the slicer can update itself"));
+        account_item->Enable(u != nullptr);
+    };
+    // Relabelled whenever the Help menu opens, which covers a sign-in or sign-out from anywhere.
+    helpMenu->Bind(wxEVT_MENU_OPEN, [relabel_account_item](wxMenuEvent& evt) {
+        relabel_account_item();
+        evt.Skip();
+    });
 
     // About
 #ifndef __APPLE__
@@ -2996,7 +3014,11 @@ void MainFrame::init_menubar_as_editor()
         {
             m_recent_projects.AddFileToHistory(from_u8(project));
         }
-        m_recent_projects.LoadThumbnails();
+        // Off the main thread: the home page shows the list now and the pictures when they are read.
+        m_recent_projects.LoadThumbnails([this]() {
+            if (m_webview)
+                m_webview->SendRecentList(INT_MAX);
+        });
 
         Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& evt) { evt.Enable(can_open_project() && (m_recent_projects.GetCount() > 0)); }, recent_projects_submenu->GetId());
 
@@ -3056,6 +3078,11 @@ void MainFrame::init_menubar_as_editor()
             [this]() { return can_add_models(); });
         append_menu_item(import_menu, wxID_ANY, _L("Import Configs") + dots /*+ "\t" + ctrl + "I"*/, _L("Load configs"),
             [this](wxCommandEvent&) { load_config_file(); }, "menu_import", nullptr,
+            [](){return true; }, this);
+        // Unlayered 0.1.7
+        append_menu_item(import_menu, wxID_ANY, _L("Import Settings from Other Slicers") + dots,
+            _L("Import your printer, filament and process presets from PrusaSlicer, OrcaSlicer, Bambu Studio and other slicers"),
+            [this](wxCommandEvent&) { OtherSlicerImportDialog::run(this); }, "menu_import", nullptr,
             [](){return true; }, this);
 
         append_submenu(fileMenu, import_menu, wxID_ANY, _L("Import"), "");
@@ -4069,14 +4096,11 @@ void MainFrame::export_config()
     }
 }
 
-// Load a config file containing a Print, Filament & Printer preset.
-namespace {
 // Unlayered: a preset bundle exported elsewhere inherits from that machine's vendor presets. If
 // the vendor is not installed here but ships with the application, install it (and enable the
-// printer model, as the setup wizard would) before importing, with the user's consent. Without
-// this every preset inheriting from the vendor is skipped and the import appears to do nothing.
-// Returns true when presets were reloaded.
-bool install_missing_import_parents(wxWindow *parent, const std::vector<std::string> &files)
+// printer model, as the setup wizard would) before importing. Without this every preset inheriting
+// from the vendor is skipped and the import appears to do nothing.
+bool install_preset_parents_from_resources(wxWindow *parent, const std::vector<std::pair<std::string, std::string>> &parents, bool ask)
 {
     PresetBundle &bundle = *wxGetApp().preset_bundle;
     AppConfig    &cfg    = *wxGetApp().app_config;
@@ -4084,7 +4108,7 @@ bool install_missing_import_parents(wxWindow *parent, const std::vector<std::str
     std::vector<std::string> to_install;
     std::set<std::string>    declined;
     bool                     enabled_model = false;
-    for (const auto &[subdir, parent_name] : PresetBundle::collect_import_parents(files)) {
+    for (const auto &[subdir, parent_name] : parents) {
         PresetCollection &collection = subdir == PRESET_PRINTER_NAME ? bundle.printers :
                                        subdir == PRESET_PRINT_NAME   ? bundle.prints :
                                                                        bundle.filaments;
@@ -4098,14 +4122,16 @@ bool install_missing_import_parents(wxWindow *parent, const std::vector<std::str
         if (installed && model.empty())
             continue; // vendor is there, the parent just does not exist in it
         if (std::find(to_install.begin(), to_install.end(), vendor) == to_install.end() && !installed) {
-            MessageDialog dlg(parent,
-                wxString::Format(_L("The presets being imported are based on \"%s\" from the %s printer profiles, which are not installed.\n\n"
-                                    "Install the %s profiles now? Otherwise those presets will be skipped."),
-                                 from_u8(parent_name), from_u8(vendor), from_u8(vendor)),
-                _L("Import result"), wxYES_NO | wxICON_QUESTION);
-            if (dlg.ShowModal() != wxID_YES) {
-                declined.insert(vendor);
-                continue;
+            if (ask) {
+                MessageDialog dlg(parent,
+                    wxString::Format(_L("The presets being imported are based on \"%s\" from the %s printer profiles, which are not installed.\n\n"
+                                        "Install the %s profiles now? Otherwise those presets will be skipped."),
+                                     from_u8(parent_name), from_u8(vendor), from_u8(vendor)),
+                    _L("Import result"), wxYES_NO | wxICON_QUESTION);
+                if (dlg.ShowModal() != wxID_YES) {
+                    declined.insert(vendor);
+                    continue;
+                }
             }
             to_install.push_back(vendor);
         }
@@ -4124,6 +4150,13 @@ bool install_missing_import_parents(wxWindow *parent, const std::vector<std::str
     cfg.save();
     bundle.load_presets(cfg, ForwardCompatibilitySubstitutionRule::EnableSilent);
     return true;
+}
+
+// Load a config file containing a Print, Filament & Printer preset.
+namespace {
+bool install_missing_import_parents(wxWindow *parent, const std::vector<std::string> &files)
+{
+    return install_preset_parents_from_resources(parent, PresetBundle::collect_import_parents(files), true);
 }
 } // namespace
 
@@ -4556,18 +4589,65 @@ size_t MainFrame::FileHistory::FindFileInHistory(const wxString & file)
     return m_fileHistory.Index(file);
 }
 
-void MainFrame::FileHistory::LoadThumbnails()
+// Shared by a FileHistory and its thumbnail thread. The thread hands its results to the main thread
+// only while the history is alive; the destructor clears `alive` under the same lock.
+struct MainFrame::FileHistory::Pending
 {
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, GetCount()), [this](tbb::blocked_range<size_t> range) {
-        for (size_t i = range.begin(); i < range.end(); ++i) {
-            auto thumbnail = bbs_3mf_get_thumbnail(into_u8(GetHistoryFile(i)).c_str());
-            if (!thumbnail.empty()) {
-                m_thumbnails[i] = thumbnail;
-            }
-            m_published_files[i] = bbs_3mf_is_published(into_u8(GetHistoryFile(i)));
-        }
-    });
+    std::mutex mutex;
+    bool       alive = true;
+};
+
+MainFrame::FileHistory::~FileHistory()
+{
+    if (m_pending) {
+        std::lock_guard<std::mutex> lock(m_pending->mutex);
+        m_pending->alive = false;
+    }
+}
+
+void MainFrame::FileHistory::LoadThumbnails(std::function<void()> on_loaded)
+{
+    std::vector<std::string> files;
+    for (size_t i = 0; i < GetCount(); ++i)
+        files.push_back(into_u8(GetHistoryFile(i)));
+    // A project opened from now on reads its own thumbnail as it is added (AddFileToHistory).
     m_load_called = true;
+    if (files.empty())
+        return;
+    if (!m_pending)
+        m_pending = std::make_shared<Pending>();
+    std::thread([this, files = std::move(files), pending = m_pending, on_loaded = std::move(on_loaded)]() {
+        std::vector<std::string> thumbnails(files.size());
+        std::vector<char>        published(files.size(), 0);
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, files.size()), [&](tbb::blocked_range<size_t> range) {
+            for (size_t i = range.begin(); i < range.end(); ++i) {
+                thumbnails[i] = bbs_3mf_get_thumbnail(files[i].c_str());
+                published[i]  = bbs_3mf_is_published(files[i]) ? 1 : 0;
+            }
+        });
+        std::lock_guard<std::mutex> lock(pending->mutex);
+        if (!pending->alive || wxTheApp == nullptr)
+            return;
+        wxTheApp->CallAfter([this, files, thumbnails = std::move(thumbnails), published = std::move(published), pending, on_loaded]() {
+            {
+                std::lock_guard<std::mutex> lock(pending->mutex);
+                if (!pending->alive)
+                    return;
+            }
+            // The list may have changed meanwhile (a project opened or removed): match by file.
+            for (size_t i = 0; i < GetCount() && i < m_thumbnails.size(); ++i) {
+                const auto it = std::find(files.begin(), files.end(), into_u8(GetHistoryFile(i)));
+                if (it == files.end())
+                    continue;
+                const size_t j = size_t(it - files.begin());
+                if (!thumbnails[j].empty())
+                    m_thumbnails[i] = thumbnails[j];
+                m_published_files[i] = published[j] != 0;
+            }
+            if (on_loaded)
+                on_loaded();
+        });
+    }).detach();
 }
 
 inline void MainFrame::FileHistory::SetMaxFiles(int max)
@@ -4578,13 +4658,95 @@ inline void MainFrame::FileHistory::SetMaxFiles(int max)
         RemoveFileFromHistory(--numFiles);
 }
 
+void MainFrame::load_other_recent()
+{
+    m_other_recent_loaded = true;
+    // At most this many per app: the list is for picking up recent work, not an archive.
+    constexpr size_t PER_APP = 10;
+    for (const Slic3r::OtherSlicers::AppLocation &loc : Slic3r::OtherSlicers::find(boost::filesystem::path(data_dir()))) {
+        size_t taken = 0;
+        for (const std::string &path : Slic3r::OtherSlicers::recent_projects(loc)) {
+            if (taken == PER_APP)
+                break;
+            boost::system::error_code ec;
+            if (!boost::filesystem::is_regular_file(boost::filesystem::path(from_u8(path).ToStdWstring()), ec)) {
+                if (!ec || ec == boost::system::errc::no_such_file_or_directory || ec == boost::system::errc::not_a_directory)
+                    continue; // moved or deleted since: nothing to open
+                // Any other error is not "gone": macOS folder privacy refuses even a look at a file in
+                // Documents or Desktop until the person allows it, and opening the project asks for that.
+                BOOST_LOG_TRIVIAL(info) << "other slicers: cannot check a recent " << Slic3r::OtherSlicers::app_name(loc.app)
+                                        << " project (" << ec.message() << "); listing it anyway";
+            }
+            m_other_recent.push_back({Slic3r::OtherSlicers::app_name(loc.app), path, {}});
+            ++taken;
+        }
+    }
+    // The pictures are read off the main thread, as for our own recent projects: a project in a
+    // folder macOS protects (Documents, Desktop, Downloads) makes open() wait for the folder-access
+    // prompt, and the home page must not hang on it. It shows the entries now, pictures when read.
+    std::vector<std::string> paths;
+    for (const OtherRecent &other : m_other_recent)
+        paths.push_back(boost::iends_with(other.path, ".3mf") ? other.path : std::string());
+    if (std::all_of(paths.begin(), paths.end(), [](const std::string &p) { return p.empty(); }))
+        return;
+    std::thread([this, paths, token = m_other_recent_guard.token]() {
+        std::vector<std::string> thumbnails(paths.size());
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, paths.size()), [&](tbb::blocked_range<size_t> range) {
+            for (size_t i = range.begin(); i < range.end(); ++i)
+                if (!paths[i].empty())
+                    thumbnails[i] = bbs_3mf_get_thumbnail(paths[i].c_str());
+        });
+        std::lock_guard<std::mutex> lock(token->mutex);
+        if (!token->alive || wxTheApp == nullptr)
+            return;
+        wxTheApp->CallAfter([this, paths, thumbnails = std::move(thumbnails), token]() {
+            {
+                std::lock_guard<std::mutex> lock(token->mutex);
+                if (!token->alive)
+                    return;
+            }
+            // Matched by file: an entry may have been hidden from the home page meanwhile.
+            for (OtherRecent &other : m_other_recent) {
+                const auto it = std::find(paths.begin(), paths.end(), other.path);
+                if (it != paths.end() && !thumbnails[size_t(it - paths.begin())].empty())
+                    other.thumbnail = thumbnails[size_t(it - paths.begin())];
+            }
+            if (m_webview)
+                m_webview->SendRecentList(INT_MAX);
+        });
+    }).detach();
+}
+
+std::set<std::string> MainFrame::other_recent_hidden() const
+{
+    std::set<std::string> out;
+    const nlohmann::json j = nlohmann::json::parse(wxGetApp().app_config->get("other_slicer_recent_hidden"), nullptr, false);
+    if (j.is_array())
+        for (const auto &p : j)
+            if (p.is_string())
+                out.insert(p.get<std::string>());
+    return out;
+}
+
+void MainFrame::hide_other_recent(const std::vector<std::string> &paths)
+{
+    std::set<std::string> hidden = other_recent_hidden();
+    hidden.insert(paths.begin(), paths.end());
+    nlohmann::json j = nlohmann::json::array();
+    for (const std::string &p : hidden)
+        j.push_back(p);
+    wxGetApp().app_config->set("other_slicer_recent_hidden", j.dump());
+}
+
 void MainFrame::get_recent_projects(boost::property_tree::wptree &tree, int images)
 {
+    const std::wstring own = from_u8(SLIC3R_APP_NAME).ToStdWstring();
     for (size_t i = 0; i < m_recent_projects.GetCount(); ++i) {
         boost::property_tree::wptree item;
         std::wstring proj = m_recent_projects.GetHistoryFile(i).ToStdWstring();
         item.put(L"project_name", proj.substr(proj.find_last_of(L"/\\") + 1));
         item.put(L"path", proj);
+        item.put(L"source", own);
         item.put(L"published", m_recent_projects.GetPublished(i) ? L"1" : L"0");
         boost::system::error_code ec;
         std::time_t t = boost::filesystem::last_write_time(proj, ec);
@@ -4598,6 +4760,29 @@ void MainFrame::get_recent_projects(boost::property_tree::wptree &tree, int imag
         } else {
             item.put(L"time", _L("File is missing"));
         }
+        tree.push_back({L"", item});
+    }
+
+    // Other slicers' recent projects, after our own, each tagged with its app for the home page's
+    // filter. One already in our list, or hidden from the home page, is left out.
+    if (!m_other_recent_loaded)
+        load_other_recent();
+    const std::set<std::string> hidden = other_recent_hidden();
+    for (const OtherRecent &other : m_other_recent) {
+        if (hidden.count(other.path) > 0 || m_recent_projects.FindFileInHistory(from_u8(other.path)) != size_t(-1))
+            continue;
+        boost::property_tree::wptree item;
+        const std::wstring proj = from_u8(other.path).ToStdWstring();
+        item.put(L"project_name", proj.substr(proj.find_last_of(L"/\\") + 1));
+        item.put(L"path", proj);
+        item.put(L"source", from_u8(other.app).ToStdWstring());
+        item.put(L"other", L"1");
+        item.put(L"published", L"0");
+        boost::system::error_code ec;
+        const std::time_t t = boost::filesystem::last_write_time(boost::filesystem::path(proj), ec);
+        item.put(L"time", ec ? std::wstring() : wxDateTime(t).FormatISOCombined(' ').ToStdWstring());
+        if (!other.thumbnail.empty())
+            item.put(L"image", L"data:image/png;base64," + wxBase64Encode(other.thumbnail.data(), other.thumbnail.size()).ToStdWstring());
         tree.push_back({L"", item});
     }
 }
@@ -4634,11 +4819,20 @@ void MainFrame::open_recent_project(size_t file_id, wxString const & filename)
 void MainFrame::remove_recent_project(size_t file_id, wxString const &filename)
 {
     if (file_id == size_t(-1)) {
-        if (filename.IsEmpty())
+        if (filename.IsEmpty()) {
             while (m_recent_projects.GetCount() > 0)
                 m_recent_projects.RemoveFileFromHistory(0);
-        else
+            // "Clear all" clears the other slicers' entries from the home page too (their own lists
+            // are not touched).
+            std::vector<std::string> others;
+            for (const OtherRecent &other : m_other_recent)
+                others.push_back(other.path);
+            hide_other_recent(others);
+        } else {
             file_id = m_recent_projects.FindFileInHistory(filename);
+            if (file_id == size_t(-1))
+                hide_other_recent({into_u8(filename)}); // another slicer's entry: hide it here
+        }
     }
     if (file_id != size_t(-1))
         m_recent_projects.RemoveFileFromHistory(file_id);

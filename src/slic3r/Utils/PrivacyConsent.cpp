@@ -21,8 +21,10 @@ const LegalApprovals &legal_approvals()
 {
     // A flag is only turned on once counsel has approved it; see docs/privacy/LEGAL_REVIEW_CHECKLIST.md.
     // Changing one is a code change, reviewed like any other.
-    //   us_preselect_share: approved by counsel per Alex, 2026-10-14 (written confirmation pending, A1).
-    static const LegalApprovals approvals{/* us_preselect_share */ true, /* privacy_choice_stats */ false};
+    //   us_preselect_share: on since 2026-10-14.
+    //   crash_report_prompt: a one-time upload the person agrees to (privacy policy section 3.6).
+    static const LegalApprovals approvals{/* us_preselect_share */ true, /* privacy_choice_stats */ false,
+                                          /* crash_report_prompt */ true};
     return approvals;
 }
 
@@ -210,7 +212,7 @@ RegionPolicy policy_for(const std::string &region, const std::string &country, c
     }
 
     if (region == "north_america" && country.empty()) {
-        // "Central America & Caribbean": one choice for many jurisdictions (Alex 2026-10-13, one-click
+        // "Central America & Caribbean": one choice for many jurisdictions (2026-10-13, one-click
         // region page). The strict reading applies; which laws exactly is on the legal review list.
         p.jurisdiction = Jurisdiction::OtherNorthAmerica;
     } else if (region == "north_america") {

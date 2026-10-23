@@ -154,12 +154,22 @@ void FirmwareUpdateDialog::build_ui()
     m_display_choice->Hide();
     m_display_note->Hide();
 
+    // The printer's web page. Each release carries an Unlayered Web Control built for exactly its
+    // firmware version; any other web interface shows "Incompatible software versions" after the
+    // update. RRF reports no version for it, so like a display it is installed whenever ticked.
+    m_www_check = new wxCheckBox(cbox, wxID_ANY, _L("Web interface"));
+    m_www_check->SetToolTip(_L("Replaces the printer's web page (Unlayered Web Control) with the one made for "
+                               "this firmware, after the firmware is installed."));
+    m_www_check->Hide(); // Only shown when the release carries one.
+    components->Add(m_www_check, 0, wxALL, pad / 2);
+
     main->Add(components, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(16));
 
     auto on_toggle = [this](wxCommandEvent &e) { refresh_update_button(); e.Skip(); };
     m_mainboard_check->Bind(wxEVT_CHECKBOX, on_toggle);
     m_wifi_check->Bind(wxEVT_CHECKBOX, on_toggle);
     m_display_check->Bind(wxEVT_CHECKBOX, on_toggle);
+    m_www_check->Bind(wxEVT_CHECKBOX, on_toggle);
 
     m_gauge = new wxGauge(this, wxID_ANY, 100, wxDefaultPosition, wxSize(-1, FromDIP(10)));
     main->Add(m_gauge, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(16));
@@ -251,6 +261,7 @@ FirmwareUpdateJob::Selection FirmwareUpdateDialog::current_selection() const
         if (idx >= 0 && size_t(idx) < m_display_roles.size())
             sel.display = m_display_roles[size_t(idx)];
     }
+    sel.www = m_www_check->IsShown() && m_www_check->GetValue();
     return sel;
 }
 
@@ -268,12 +279,16 @@ void FirmwareUpdateDialog::start_update(bool force)
 
     // Last chance to back out: this is the point after which the printer gets rewritten. Only a
     // mainboard flash restarts the board, so a display-only run must not promise one.
-    const wxString body =
-        current_selection().mainboard
+    const FirmwareUpdateJob::Selection sel = current_selection();
+    wxString body =
+        sel.mainboard
             ? _L("The printer will restart and be unavailable for a minute or two.\n\n"
                  "Do not power the printer off while it is updating.\n\nUpdate the firmware now?")
             : _L("The printer will not restart, but do not power it off while the update is "
                  "running.\n\nUpdate now?");
+    if (sel.www)
+        body = _L("The printer's web interface is replaced as well. That adds about a minute over the "
+                  "network, or a minute and a half over USB.") + "\n\n" + body;
     MessageDialog confirm(this, body, _L("Update Firmware"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
     if (confirm.ShowModal() != wxID_YES)
         return;
@@ -307,10 +322,19 @@ void FirmwareUpdateDialog::set_phase(Phase phase)
 void FirmwareUpdateDialog::on_choose_file(wxCommandEvent &)
 {
     wxFileDialog dlg(this, _L("Select a firmware file"), wxEmptyString, wxEmptyString,
-                     _L("Firmware files") + " (*.uf2;*.bin)|*.uf2;*.bin|" + _L("All files") + " (*.*)|*.*",
+                     _L("Firmware files") + " (*.uf2;*.bin;*.zip)|*.uf2;*.bin;*.zip|" + _L("All files") + " (*.*)|*.*",
                      wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dlg.ShowModal() != wxID_OK)
         return;
+
+    // A zip can only be a web interface (LocalFileFirmwareSource tells it by its file name), so
+    // select exactly that; for an image file the web interface stays out of it.
+    const bool is_zip = dlg.GetFilename().Lower().EndsWith(".zip");
+    m_www_check->Show(is_zip);
+    m_www_check->SetValue(is_zip);
+    if (is_zip)
+        m_mainboard_check->SetValue(false);
+    Layout();
 
     m_local_file = dlg.GetPath().ToUTF8().data();
     m_available_label->SetLabel(wxString::Format(_L("Selected file: %s"), dlg.GetFilename()));
@@ -355,6 +379,15 @@ void FirmwareUpdateDialog::on_job_finished(wxCommandEvent &evt)
 
         // Only offer the Wi-Fi module when this board actually has one to flash.
         m_wifi_check->Show(m_board.has_wifi_module());
+    }
+
+    // The web interface: shown, and ticked, whenever the release carries one - which is what makes
+    // the "Printer update available" flow bring it along with no extra step.
+    if (m_job_result && m_job_result->outcome == FirmwareUpdateJob::Outcome::QueryOk && m_local_file.empty()) {
+        const auto &roles   = m_job_result->available_roles;
+        const bool  has_www = std::find(roles.begin(), roles.end(), FirmwareRole::Www) != roles.end();
+        m_www_check->Show(has_www);
+        m_www_check->SetValue(has_www);
     }
 
     // Offer the display only when the printer has one we can name AND the release carries an image
@@ -428,6 +461,14 @@ void FirmwareUpdateDialog::on_job_finished(wxCommandEvent &evt)
         } else {
             m_status->SetLabel(_L("Choose a firmware file to install."));
         }
+        if (m_begin_when_ready) {
+            m_begin_when_ready = false;
+            if (!same && !m_available_version.empty() && m_local_file.empty())
+                CallAfter([this]() {
+                    if (m_phase == Phase::Ready && !current_selection().nothing())
+                        start_update(/* force */ false);
+                });
+        }
         break;
     }
 
@@ -445,6 +486,8 @@ void FirmwareUpdateDialog::on_job_finished(wxCommandEvent &evt)
         set_phase(Phase::Finished);
         m_status->SetLabel(msg);
         show_info(this, msg, _L("Firmware updated"));
+        if (m_close_on_success)
+            CallAfter([this]() { dismiss(); });
         break;
 
     case FirmwareUpdateJob::Outcome::Cancelled:

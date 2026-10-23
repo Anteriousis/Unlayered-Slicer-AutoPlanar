@@ -2,6 +2,82 @@
 
 All notable changes to Unlayered Slicer are listed here, newest first.
 
+## 0.1.7 — 2026-10-23
+
+### Added
+
+- **Import your settings from other slicers.** Unlayered Slicer finds OrcaSlicer, PrusaSlicer,
+  Bambu Studio, Creality Print (6 and 7), SuperSlicer, ElegooSlicer, Anycubic Slicer Next,
+  Snapmaker Orca, QIDI Studio, Flash Studio, PhrozenOrca and FLSUN Slicer on your computer and
+  brings over the printers and filaments you picked from their built-in lists, and your own
+  printer, filament and process presets, in one step. You choose which apps to import from. The
+  setup wizard offers it as its own step before you pick printers (only when there is something to
+  import), so what it found is already ticked on the next pages. Also from **File > Import > Import
+  Settings from Other Slicers**, or a one-time question on the first launch after updating (Import /
+  Not now / Don't ask again). On a fresh install the printer, process and filament you last used
+  there are selected too; an existing selection is never changed. Your presets keep their values,
+  and stay linked to the matching Unlayered Slicer profile where there is one; PrusaSlicer-style
+  settings are translated to their names here. Nothing in the other apps is changed and nothing
+  here is overwritten: a name that is already taken gets " (OrcaSlicer)" or similar added, and
+  importing again only adds what is new. Printer network addresses come along; API keys, user
+  names and passwords never do. The summary lists per app what came over, what was skipped and
+  why, and which printers need their key entered again.
+- **Recent projects from other slicers on the home page.** "Recently opened" also lists the projects
+  your other slicers opened recently, each marked with the slicer it came from, with a filter per
+  slicer. Removing one or "Clear all" hides them here; the other slicers' own lists are untouched.
+- **Printer update available.** When the selected printer is an Unlayered printer on your network,
+  the slicer checks once per session whether newer firmware or printer configuration has been
+  published, and offers it in a notification: Update / Not now / Skip this version. Update installs
+  the firmware first, then the configuration, each with its usual confirmation. Nothing is
+  installed on its own.
+- **Printer configuration updates from unlayered3d.com.** The printer's Config button checks
+  unlayered3d.com for new Unlayered printer configuration releases. Configuration updates come with
+  your Unlayered account: sign in from the Help menu (the "Access token" setting in Preferences is
+  gone). Every file is checked against its published checksum before anything is written; the files
+  a printer measured for itself (its calibration, name, network and setup) are never replaced; the
+  files being replaced are saved to this computer first; and if an install fails partway, the
+  previous files are put back.
+- **The printer's web interface is updated with its firmware.** A firmware release that carries a
+  matching web interface installs it after the firmware (the "Web interface" box in the Firmware
+  dialog), so the printer's web page no longer warns about mismatched versions.
+- **Unlayered Universe: share your printer profile and install others'.** Publish the printer you
+  have set up to Universe, or install one someone else shared. Before anything is installed the
+  slicer shows the profile and lists every custom G-code line that updates firmware, touches files
+  or the network, changes safety limits or restarts the controller, and installs nothing unless you
+  agree. Printer connections (network addresses, API keys, passwords) and local file paths are
+  never shared, and are removed again on install. The profile is added as your own printer preset.
+- **A crash report is your choice when you do not share usage diagnostics.** After the app closes
+  unexpectedly, the next launch asks whether to send that one crash report and shows what it
+  contains. It is sent once, with a random identifier that is not linked to your installation.
+  Decline or close the question and nothing is sent. See USAGE_DIAGNOSTICS.md.
+
+### Changed
+
+- **Stealth Mode is off by default and no longer asked in setup.** With it on, the slicer also
+  skipped the account sign-in check and printer update offers. It is switched off once on existing
+  installs; turn it on again in Preferences and it stays on.
+- **Signing in.** While the slicer is not signed in to your Unlayered account, the setup wizard has a
+  "Sign in to Unlayered" step, and the first launch of a new version asks once. Both can be skipped.
+  The Help menu has one item that reads Sign in or Sign out.
+- **Setup wizard.** The multiplanar tutorial page says Next instead of Finish (the network plug-in
+  question still follows), and the two choices on that last page are larger. The Bambu Lab network
+  plug-in box is ticked when another slicer on this computer has Bambu Lab printers, with a line
+  saying so; otherwise it stays unticked.
+- **Choosing a theme switches to it**, also when the colour scheme is set to System.
+- **Usage diagnostics** (only when you share them) now include how a printer configuration install
+  ended (versions and outcome; never the printer's address, name or files) and how many presets were
+  imported from each slicer (a number, never a name). See USAGE_DIAGNOSTICS.md.
+
+### Fixed
+
+- **Z contouring failed with several copies of an object on the plate.**
+- **Universe and other web tabs could stay white** when the app started on one (macOS).
+- **Startup and the home page could wait on macOS folder-permission prompts** while reading project
+  thumbnails; thumbnails now load in the background.
+- **The "Save as" name field in the printer's network settings was unreadable** with a dark
+  operating system and a light slicer theme.
+- **The multiplanar tutorial link did not open on macOS.**
+
 ## 0.1.6 — 2026-10-14
 
 Changes since **0.1.5** (2026-10-13).

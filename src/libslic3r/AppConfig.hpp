@@ -107,12 +107,6 @@ using namespace nlohmann;
 #define SETTING_UNIVERSE_APP_ALLOW_EXPORT "universe_app_allow_export"
 #define SETTING_UNIVERSE_APP_DISABLE_ONCE "universe_app_disable_once"
 
-// Access token for the printer-configuration update feed. A customer copies this from their
-// account page and pastes it in once; it identifies them to the feed, which re-checks their
-// eligibility on every request. Nothing is compiled in -- an empty value is the norm for anyone
-// not entitled to configuration updates, and firmware updates never need it.
-#define SETTING_PRINTER_UPDATES_TOKEN  "printer_updates_token"
-
 // External nonplanar slicing service: the address the plate is handed to when the user picks
 // "Slice nonplanar". Deliberately generic in the same way as the web application above -- any
 // service implementing the protocol in NONPLANAR_SLICE_SERVICE.md may be configured here, this
@@ -413,13 +407,10 @@ public:
 	// This returns a hardcoded string unless it is overriden by "version_check_url" in the ini file.
 	std::string 		version_check_url() const;
 
-	// Base URL for the GitHub releases API the firmware and printer-config updaters use.
-	// Hardcoded unless overridden by "github_api_base" in the ini file.
+	// Base URL of the GitHub-shaped releases API the firmware and printer-config updaters use:
+	// https://unlayered3d.com/printer-updates-api unless overridden by "github_api_base" in the
+	// ini file (the key keeps its old name so existing overrides still work).
 	std::string 		github_api_base() const;
-
-	// The customer's access token for the printer-configuration feed, whitespace trimmed.
-	// Empty when none has been entered, which is the case the updaters must keep working for.
-	std::string 		printer_updates_token() const;
 
 	// Unlayered: there is deliberately no profile_update_url(). Vendor profiles are shipped in
 	// resources/profiles and installed locally; nothing is fetched from a remote profile service.

@@ -45,6 +45,10 @@ FirmwareUpdateJob::FirmwareUpdateJob(DuetClientFactory client_factory,
 
 void FirmwareUpdateJob::update_status(Ctl &ctl, int percent, const std::string &msg)
 {
+    // Squeeze the firmware's own 45..100 (upload, flash, restart, verify) into 45..m_firmware_end
+    // when a web interface install follows; everything before 45 (connect, download) is unchanged.
+    if (!m_unscaled_status && m_firmware_end < 100 && percent > 45)
+        percent = 45 + (percent - 45) * (m_firmware_end - 45) / 55;
     BOOST_LOG_TRIVIAL(info) << "FirmwareUpdateJob: " << percent << "% " << msg;
     ctl.update_status(percent, msg);
 
@@ -72,12 +76,15 @@ void FirmwareUpdateJob::fail(Ctl &ctl, const std::string &msg, bool recovery_hin
     m_result.outcome             = Outcome::Failed;
     m_result.message             = msg;
     m_result.needs_recovery_hint = recovery_hint;
+    m_unscaled_status            = true; // a failure ends the run: the bar goes to the end
     update_status(ctl, 100, msg);
 }
 
 void FirmwareUpdateJob::process(Ctl &ctl)
 {
-    m_result = Result();
+    m_result          = Result();
+    m_firmware_end    = 100;
+    m_unscaled_status = false;
 
     // Built here, on the worker thread: the client owns an OS handle (a socket or a serial port)
     // and is confined to the thread that created it.
@@ -199,7 +206,7 @@ void FirmwareUpdateJob::process(Ctl &ctl)
 
     Selection selection = m_selection;
     if (!m_force && board_current) {
-        if (selection.display == FirmwareRole::Unknown) {
+        if (selection.display == FirmwareRole::Unknown && !selection.www) {
             m_result.outcome       = Outcome::UpToDate;
             m_result.version_after = board.firmware_version;
             m_result.message       = (boost::format(_u8L("The printer is already running %1%.")) % board.firmware_version).str();
@@ -207,11 +214,12 @@ void FirmwareUpdateJob::process(Ctl &ctl)
             client.disconnect();
             return;
         }
-        // The board is current but a display was asked for. Drop the mainboard instead of putting
-        // the printer through a reboot to install the firmware it is already running.
+        // The board is current but a display or the web interface was asked for. Drop the
+        // mainboard instead of putting the printer through a reboot to install the firmware it is
+        // already running.
         if (selection.mainboard) {
             BOOST_LOG_TRIVIAL(info) << "FirmwareUpdateJob: board already on " << board.firmware_version
-                                    << "; updating the display only";
+                                    << "; updating the display / web interface only";
             selection.mainboard = false;
         }
     }
@@ -223,8 +231,9 @@ void FirmwareUpdateJob::process(Ctl &ctl)
     }
 
     // Reduce the release to what the user actually asked for. A release carries images for every
-    // component - mainboard, WiFi, and both displays - and all four are almost never wanted at
-    // once: only one display is physically present, and the WiFi module may not exist at all.
+    // component - mainboard, WiFi, both displays and the web interface - and all of them are almost
+    // never wanted at once: only one display is physically present, and the WiFi module may not
+    // exist at all.
     //
     // The IAP is never filtered here. It is not an M997 target; it is the programmer the mainboard
     // flash runs from, and step 7 skips it when assembling the module list.
@@ -239,6 +248,7 @@ void FirmwareUpdateJob::process(Ctl &ctl)
                                      case FirmwareRole::Wifi:      return !wifi;
                                      case FirmwareRole::PanelDue:
                                      case FirmwareRole::PanelOta:  return i.role != display;
+                                     case FirmwareRole::Www:       return !selection.www;
                                      default:                      return true;
                                      }
                                  });
@@ -250,7 +260,42 @@ void FirmwareUpdateJob::process(Ctl &ctl)
                                  [](const FirmwareImage &i) { return i.role == FirmwareRole::Iap; });
         pkg.images.erase(it, pkg.images.end());
     }
-    if (pkg.images.empty()) {
+
+    // The web interface leaves the image list here: it never goes to 0:/firmware and is not an
+    // M997 module. It is unpacked and checked NOW, before anything is written, so a damaged or
+    // wrong archive stops the run while the printer is still untouched.
+    std::vector<WebInterfaceFile> www_files;
+    std::string                   www_skipped; // why a requested web interface is not installed
+    if (const FirmwareImage *www = pkg.find(FirmwareRole::Www)) {
+        update_status(ctl, 43, _u8L("Checking the web interface"));
+        if (!extract_web_interface(www->data, www_files, err)) {
+            fail(ctl, (boost::format(_u8L("The web interface in this release cannot be installed: %1%. "
+                                          "The printer has not been modified.")) % err).str());
+            return;
+        }
+        auto it = std::remove_if(pkg.images.begin(), pkg.images.end(),
+                                 [](const FirmwareImage &i) { return i.role == FirmwareRole::Www; });
+        pkg.images.erase(it, pkg.images.end());
+
+        // The whole point of shipping it with the firmware is that its version matches the board's
+        // exactly. With no mainboard flash in this run, that means the board must ALREADY run this
+        // release; installing it over other firmware would trade one version warning for another.
+        // A source with no version (a hand-picked zip) is the user's explicit choice and is not
+        // second-guessed.
+        if (!pkg.find(FirmwareRole::Mainboard) && !pkg.version.empty() && pkg.version != board.firmware_version) {
+            www_skipped = (boost::format(_u8L("The web interface was not updated: it is built for firmware %1% "
+                                              "and the printer runs %2%. Tick \"Printer firmware\" to install both."))
+                           % pkg.version % board.firmware_version).str();
+            BOOST_LOG_TRIVIAL(warning) << "FirmwareUpdateJob: " << www_skipped;
+            www_files.clear();
+            if (pkg.images.empty()) {
+                fail(ctl, www_skipped);
+                return;
+            }
+        }
+    }
+
+    if (pkg.images.empty() && www_files.empty()) {
         fail(ctl, _u8L("Nothing was selected to update."));
         return;
     }
@@ -262,6 +307,79 @@ void FirmwareUpdateJob::process(Ctl &ctl)
                                       "already present on the SD card";
 
     if (ctl.was_canceled()) { m_result.outcome = Outcome::Cancelled; return; }
+
+    // ---- 6-9. Firmware ------------------------------------------------------------------------
+    std::string running = board.firmware_version;
+    if (!pkg.images.empty()) {
+        if (!www_files.empty())
+            m_firmware_end = 70;
+        if (!flash_images(ctl, client, pkg, board)) {
+            // Failed or cancelled: the web interface is left exactly as it was, so it still matches
+            // whatever firmware the board is running now.
+            if (m_result.outcome == Outcome::Failed)
+                client.disconnect();
+            return;
+        }
+        m_unscaled_status = true;
+        // flash_images() leaves version_after empty when the restarted board could not be read.
+        running = pkg.find(FirmwareRole::Mainboard) ? m_result.version_after : board.firmware_version;
+    } else {
+        m_result.version_after = board.firmware_version;
+    }
+    const std::string firmware_message = m_result.message;
+
+    // ---- 10. Web interface ----------------------------------------------------------------------
+    // After the flash and the reconnect, never before: installed first, a flash that then failed
+    // would leave a web interface that matches nothing the board runs. A failed or cancelled flash
+    // returned above with 0:/www untouched.
+    if (!www_files.empty() && !pkg.version.empty() && running != pkg.version) {
+        // Only reachable when the restarted board's version could not be read: flash_images()
+        // fails outright on a version it can read and does not expect.
+        www_files.clear();
+        www_skipped = _u8L("The web interface was not updated because the printer's new firmware version "
+                           "could not be confirmed.");
+    }
+
+    auto join = [](const std::string &a, const std::string &b) { return a.empty() ? b : b.empty() ? a : a + "\n\n" + b; };
+
+    if (!www_files.empty()) {
+        if (ctl.was_canceled()) {
+            m_result.outcome = Outcome::Cancelled;
+            m_result.message = join(firmware_message, _u8L("The web interface was not updated."));
+            client.disconnect();
+            return;
+        }
+        m_unscaled_status   = true;
+        const int    first  = pkg.images.empty() ? 45 : m_firmware_end;
+        std::string  summary;
+        if (!install_web_interface(ctl, client, www_files, first, summary, err)) {
+            if (err == "Cancelled") {
+                m_result.outcome = Outcome::Cancelled;
+                m_result.message = join(firmware_message,
+                                        _u8L("Stopped before the web interface was switched over; the previous "
+                                             "web interface is still in place."));
+            } else {
+                fail(ctl, join(firmware_message,
+                               (boost::format(_u8L("The web interface could not be updated: %1%. Press Update to try "
+                                                   "again; the firmware will not be installed a second time.")) % err).str()));
+            }
+            client.disconnect();
+            return;
+        }
+        m_result.outcome = Outcome::Success;
+        m_result.message = join(firmware_message, summary);
+    } else {
+        m_result.outcome = Outcome::Success;
+        m_result.message = join(firmware_message, www_skipped);
+    }
+
+    update_status(ctl, 100, m_result.message);
+    client.disconnect();
+}
+
+bool FirmwareUpdateJob::flash_images(Ctl &ctl, DuetClient &client, FirmwarePackage &pkg, const DuetClient::BoardInfo &board)
+{
+    std::string err;
 
     // ---- 6. Upload ---------------------------------------------------------------------------
     // Upload order matters: the IAP goes first so that, if anything fails part way, the board is
@@ -284,7 +402,7 @@ void FirmwareUpdateJob::process(Ctl &ctl)
     uint64_t       sent_bytes  = 0;
 
     for (const auto &img : pkg.images) {
-        if (ctl.was_canceled()) { m_result.outcome = Outcome::Cancelled; return; }
+        if (ctl.was_canceled()) { m_result.outcome = Outcome::Cancelled; return false; }
 
         const std::string remote = "0:/firmware/" + img.filename;
         const uint64_t    base   = sent_bytes;
@@ -299,11 +417,11 @@ void FirmwareUpdateJob::process(Ctl &ctl)
         };
 
         if (!client.upload(remote, img.data, on_progress, err)) {
-            if (ctl.was_canceled() || err == "Cancelled") { m_result.outcome = Outcome::Cancelled; return; }
+            if (ctl.was_canceled() || err == "Cancelled") { m_result.outcome = Outcome::Cancelled; return false; }
             // Nothing has been flashed yet, so the printer is still in a good state.
             fail(ctl, (boost::format(_u8L("Could not upload %1%: %2%. The printer has not been modified."))
                        % img.filename % err).str());
-            return;
+            return false;
         }
         sent_bytes += img.data.size();
     }
@@ -311,7 +429,7 @@ void FirmwareUpdateJob::process(Ctl &ctl)
     if (ctl.was_canceled()) {
         // Uploaded files are inert until M997 runs, so cancelling here is safe.
         m_result.outcome = Outcome::Cancelled;
-        return;
+        return false;
     }
 
     // ---- 7. Flash ------------------------------------------------------------------------------
@@ -326,7 +444,7 @@ void FirmwareUpdateJob::process(Ctl &ctl)
     modules.erase(std::unique(modules.begin(), modules.end()), modules.end());
     if (modules.empty()) {
         fail(ctl, _u8L("There is nothing to flash for this printer."));
-        return;
+        return false;
     }
 
     std::string s_param;
@@ -356,7 +474,7 @@ void FirmwareUpdateJob::process(Ctl &ctl)
     BOOST_LOG_TRIVIAL(info) << "FirmwareUpdateJob: sending " << cmd;
     if (!client.gcode(cmd, err)) {
         fail(ctl, (boost::format(_u8L("Could not start the firmware update: %1%")) % err).str());
-        return;
+        return false;
     }
 
     // ---- 8. Wait for the board to come back -----------------------------------------------------
@@ -377,12 +495,12 @@ void FirmwareUpdateJob::process(Ctl &ctl)
                 m_result.outcome = Outcome::Cancelled;
                 m_result.message = _u8L("Stopped waiting. The printer is still installing the firmware and "
                                         "should come back on its own.");
-                return;
+                return false;
             }
             fail(ctl,
                  (boost::format(_u8L("The printer did not come back after %1% seconds.")) % REBOOT_TIMEOUT_SECONDS).str(),
                  /* recovery_hint */ true);
-            return;
+            return false;
         }
     } else {
         update_status(ctl, 90, _u8L("The printer is installing the display firmware"));
@@ -411,8 +529,7 @@ void FirmwareUpdateJob::process(Ctl &ctl)
                                       "itself - a PanelDue comes back with no splash screen, which is "
                                       "normal after an update and not a sign that it failed.");
         update_status(ctl, 100, m_result.message);
-        client.disconnect();
-        return;
+        return true;
     }
 
     update_status(ctl, 97, _u8L("Checking the installed firmware"));
@@ -424,8 +541,7 @@ void FirmwareUpdateJob::process(Ctl &ctl)
         m_result.message       = _u8L("The printer restarted, but its firmware version could not be confirmed. "
                                       "Check the printer's status page.");
         update_status(ctl, 100, m_result.message);
-        client.disconnect();
-        return;
+        return true;
     }
 
     m_result.version_after = after.firmware_version;
@@ -435,14 +551,139 @@ void FirmwareUpdateJob::process(Ctl &ctl)
         fail(ctl, (boost::format(_u8L("The printer restarted but reports %1%, not the expected %2%. "
                                       "The update may not have been applied."))
                    % after.firmware_version % pkg.version).str());
-        client.disconnect();
-        return;
+        return false;
     }
 
     m_result.outcome = Outcome::Success;
     m_result.message = (boost::format(_u8L("The printer is now running %1%.")) % after.firmware_version).str();
     update_status(ctl, 100, m_result.message);
-    client.disconnect();
+    return true;
+}
+
+// Walks a directory tree on the card. Paths come back relative to `root`.
+static bool walk_card_dir(DuetClient &client, const std::string &root, const std::string &rel,
+                          std::vector<std::string> &files, std::vector<std::string> &dirs, int depth,
+                          std::string &error_out)
+{
+    if (depth > 16) {
+        error_out = "the folder tree is too deep";
+        return false;
+    }
+    std::vector<DuetClient::FileEntry> entries;
+    bool                               missing = false;
+    const std::string                  dir     = rel.empty() ? root : root + "/" + rel;
+    if (!client.filelist(dir, entries, missing, error_out))
+        return false;
+    if (missing)
+        return true; // No 0:/www at all, or a folder that vanished: nothing there to clean up.
+    for (const auto &e : entries) {
+        const std::string path = rel.empty() ? e.name : rel + "/" + e.name;
+        if (e.is_dir) {
+            dirs.push_back(path);
+            if (!walk_card_dir(client, root, path, files, dirs, depth + 1, error_out))
+                return false;
+        } else {
+            files.push_back(path);
+        }
+    }
+    return true;
+}
+
+bool FirmwareUpdateJob::install_web_interface(Ctl &ctl, DuetClient &client, const std::vector<WebInterfaceFile> &files,
+                                              int first_percent, std::string &summary_out, std::string &error_out)
+{
+    const std::string root = WEB_INTERFACE_ROOT;
+    std::string       err;
+
+    // What is there now, so it can be cleaned up afterwards. Read BEFORE the upload: afterwards the
+    // listing would include the new files. A failed listing costs only the clean-up, never the
+    // install, so it does not stop anything.
+    //
+    // No backup is taken. 0:/www holds a published web interface build (stock DWC or a previous
+    // Unlayered Web Control), never anything of the customer's - DWC keeps its settings in
+    // 0:/sys/dwc-settings.json - and reading ~12 MB back over USB means ~23,000 M1763 round trips.
+    update_status(ctl, first_percent, _u8L("Reading the printer's current web interface"));
+    std::vector<std::string> old_files, old_dirs;
+    const bool listed = walk_card_dir(client, root, "", old_files, old_dirs, 0, err);
+    if (!listed)
+        BOOST_LOG_TRIVIAL(warning) << "FirmwareUpdateJob: could not list " << root << " (" << err
+                                   << "); old web interface files will not be removed";
+
+    // Folders. rr_mkdir / M470 answer an error for "already exists" too, and RRF creates missing
+    // parents on upload anyway, so a failure here is only logged; the upload is the real test.
+    client.mkdir(root, err);
+    for (const auto &d : web_interface_dirs(files)) {
+        std::string ignored;
+        if (!client.mkdir(root + "/" + d, ignored))
+            BOOST_LOG_TRIVIAL(debug) << "FirmwareUpdateJob: mkdir " << d << ": " << ignored << " (advisory)";
+    }
+
+    // Files, index.html.gz last (extract_web_interface() already ordered them).
+    uint64_t total_bytes = 0;
+    for (const auto &f : files)
+        total_bytes += f.data.size();
+    total_bytes = std::max<uint64_t>(total_bytes, 1);
+
+    const int  span   = std::max(99 - 2 - first_percent, 1); // leaves 97..99 for the clean-up
+    const auto mb     = [](uint64_t b) { return (boost::format("%.1f") % (double(b) / (1024.0 * 1024.0))).str(); };
+    uint64_t   sent   = 0;
+    size_t     number = 0;
+    for (const auto &f : files) {
+        // Stopping is honoured up to the switch-over and not after it: before index.html.gz lands
+        // the browser still loads the old interface, whose files are all still on the card.
+        if (ctl.was_canceled()) {
+            error_out = "Cancelled";
+            return false;
+        }
+        ++number;
+        const uint64_t base = sent;
+        auto status_for = [&](uint64_t done) {
+            return (boost::format(_u8L("Installing the web interface: file %1% of %2%, %3% of %4% MB"))
+                    % number % files.size() % mb(base + done) % mb(total_bytes)).str();
+        };
+        update_status(ctl, first_percent + int(span * double(base) / double(total_bytes)), status_for(0));
+
+        auto on_progress = [&](uint64_t done, uint64_t, bool &cancel) {
+            if (ctl.was_canceled()) { cancel = true; return; }
+            update_status(ctl, first_percent + int(span * double(base + done) / double(total_bytes)), status_for(done));
+        };
+        if (!client.upload(root + "/" + f.path, f.data, on_progress, err)) {
+            if (ctl.was_canceled() || err == "Cancelled") {
+                error_out = "Cancelled";
+                return false;
+            }
+            error_out = (boost::format(_u8L("uploading %1% failed (%2%)")) % f.path % err).str();
+            return false;
+        }
+        sent += f.data.size();
+    }
+
+    // Clean up. The new index is live, so this is no longer cancellable; it is quick either way.
+    size_t removed = 0, failed = 0;
+    if (listed) {
+        update_status(ctl, 97, _u8L("Removing old web interface files"));
+        for (const auto &p : stale_web_interface_files(old_files, files)) {
+            std::string e;
+            if (client.remove(root + "/" + p, e))
+                ++removed;
+            else {
+                ++failed;
+                BOOST_LOG_TRIVIAL(warning) << "FirmwareUpdateJob: could not delete " << root << "/" << p << ": " << e;
+            }
+        }
+        // A folder that still holds something refuses deletion, which is the right outcome.
+        for (const auto &d : stale_web_interface_dirs(old_dirs, files)) {
+            std::string e;
+            client.remove(root + "/" + d, e);
+        }
+    }
+    BOOST_LOG_TRIVIAL(info) << boost::format("FirmwareUpdateJob: web interface installed: %1% files, %2% bytes; "
+                                             "%3% old files removed, %4% could not be")
+                                   % files.size() % sent % removed % failed;
+
+    summary_out = _u8L("The web interface was updated to match. Reload any browser tab that has the printer's "
+                       "web page open.");
+    return true;
 }
 
 void FirmwareUpdateJob::finalize(bool canceled, std::exception_ptr &e)

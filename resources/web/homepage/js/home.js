@@ -299,8 +299,39 @@ function SetMallUrl( strUrl )
 }
 
 
+// Unlayered 2026-10-22: the list also holds other slicers' recent projects (MainFrame::
+// get_recent_projects tags each with "source"); a chip per slicer filters it.
+var m_RecentAll=[];
+var m_RecentSource='';
+
+function EscapeHtml( s )
+{
+	return $('<div>').text(s || '').html();
+}
+
 function ShowRecentFileList( pList )
 {
+	m_RecentAll=pList || [];
+	let sources=[];
+	for(let n=0;n<m_RecentAll.length;n++)
+	{
+		let s=m_RecentAll[n]['source'];
+		if( s && sources.indexOf(s)<0 )
+			sources.push(s);
+	}
+	if( m_RecentSource!='' && sources.indexOf(m_RecentSource)<0 )
+		m_RecentSource='';
+	let chips='';
+	if( sources.length>1 )
+	{
+		chips+='<span class="SourceChip'+(m_RecentSource==''?' SourceChipOn':'')+'" data-source="">All</span>';
+		for(let n=0;n<sources.length;n++)
+			chips+='<span class="SourceChip'+(m_RecentSource==sources[n]?' SourceChipOn':'')+'" data-source="'+EscapeHtml(sources[n])+'">'+EscapeHtml(sources[n])+'</span>';
+	}
+	$("#RecentSourceFilter").html(chips);
+	$("#RecentSourceFilter .SourceChip").on('click', function(){ m_RecentSource=$(this).attr('data-source'); ShowRecentFileList(m_RecentAll); });
+
+	pList=m_RecentAll.filter(function(f){ return m_RecentSource=='' || f['source']==m_RecentSource; });
 	let nTotal=pList.length;
 	
 	let strHtml='';
@@ -319,6 +350,8 @@ function ShowRecentFileList( pList )
 		//let sShortName=sPath.substring(index+1,sPath.length);
 		
 		let sBadge=sPublished? '<span class="FilePublishedBadge">PUB</span>':'';
+		if( OneFile['other']=='1' )
+			sBadge+='<span class="FileSourceBadge">'+EscapeHtml(OneFile['source'])+'</span>';
 		let sLogoBadge=sPublished? '<img class="FileLogoBadge" src="../../images/UnlayeredSlicer_gradient_circle.svg" alt="" />':'';
 
 		let TmpHtml='<div class="FileItem"  fpath="'+sPath+'"  >'+

@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="max-age=7200" />
+<title>Settings from other slicers</title>
+<link rel="stylesheet" type="text/css" href="../../include/global.css" />
+<link rel="stylesheet" type="text/css" href="../css/common.css" />
+<link rel="stylesheet" type="text/css" href="../css/dark.css" />
+<link rel="stylesheet" type="text/css" href="5import.css" />
+<script type="text/javascript" src="../js/jquery-2.1.1.min.js"></script>
+<script type="text/javascript" src="../js/json2.js"></script>
+<script type="text/javascript" src="../../data/text.js"></script>
+<script type="text/javascript" src="../js/globalapi.js"></script>
+<script type="text/javascript" src="../js/common.js"></script>
+<script type="text/javascript" src="5import.js"></script>
+</head>
+<!-- Unlayered 0.1.7: "Settings from other slicers", BEFORE the printer picker, so
+     what OrcaSlicer, PrusaSlicer or Bambu Studio has is already ticked on the next pages and people
+     moving over only have to confirm. Order: 13 privacy -> 5import (only when the slicer found
+     something to import; WebGuideDialog "request_page_after_privacy") -> 21 printers; Back on 21
+     returns here ("request_page_before_models").
+     One box per app, ticked. Import runs the import at once (WebGuideDialog "import_other_slicers",
+     import_other_slicers() in OtherSlicerImportDialog.cpp) and shows what came over and what was
+     skipped and why; Next then goes to the picker, which reads the enabled printers again. Skip goes
+     to the picker without importing. All texts come from the slicer, translated. -->
+<body onLoad="OnInit()">
+<div id="Title">
+	<div id="ImportTitle">Settings from other slicers</div>
+</div>
+<div id="Content">
+	<div class="FeatureText"><a class="TextS1" id="ImportText"></a></div>
+	<div id="AppList"></div>
+	<div class="FeatureText"><a class="TextS2" id="ImportNote"></a></div>
+	<div id="Summary" hidden></div>
+</div>
+<div id="AcceptArea">
+	<div class="ButtonStyleRegular ButtonTypeChoice trans" tid="t8" id="PreBtn" onclick="GoBack()">Back</div>
+	<div class="ButtonStyleRegular ButtonTypeChoice trans" tid="t52" id="SkipBtn" onclick="GoNext()">Skip</div>
+	<div class="ButtonStyleConfirm ButtonTypeChoice" id="ImportBtn" onclick="DoImport()">Import</div>
+	<div class="ButtonStyleConfirm ButtonTypeChoice trans" tid="t9" id="NextBtn" onclick="GoNext()" hidden>Next</div>
+</div>
+</body>
+</html>

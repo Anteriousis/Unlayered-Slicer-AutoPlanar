@@ -6,6 +6,7 @@
 #include <thread>
 
 #include <wx/button.h>
+#include <wx/cursor.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/utils.h>
@@ -24,6 +25,7 @@
 #include "I18N.hpp"
 #include "MainFrame.hpp"
 #include "MsgDialog.hpp"
+#include "OtherSlicerImportDialog.hpp"
 #include "NotificationManager.hpp"
 #include "Plater.hpp"
 #include "ReleaseNote.hpp"
@@ -47,6 +49,10 @@ std::string site_url_from(AppConfig *config)
 // The app config key that carries "an update to X was about to be installed" across the restart,
 // so the next launch can say it worked.
 constexpr const char *PENDING_UPDATE_KEY = "pending_update_version";
+
+// The newest version in which a slicer that was not signed in was asked to sign in (after an update,
+// or by the setup wizard).
+constexpr const char *SIGN_IN_ASKED_KEY = "account_signin_asked_version";
 
 // The newest version whose "What's new" has been dealt with (shown, or skipped on a first run).
 constexpr const char *WHATS_NEW_KEY = "whats_new_version";
@@ -211,6 +217,47 @@ private:
     wxButton                          *m_reopen{nullptr};
     std::string                        m_browser_url;
     std::string                        m_error;
+};
+
+// After an update, while the slicer is not signed in (ask_sign_in_after_update).
+// One Sign In button; "Not now" and the close box decline.
+class AskSignInDialog : public DPIDialog
+{
+public:
+    explicit AskSignInDialog(wxWindow *parent)
+        : DPIDialog(parent, wxID_ANY, _L("Sign in to Unlayered"), wxDefaultPosition, wxDefaultSize,
+                    wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU)
+    {
+        auto *main = new wxBoxSizer(wxVERTICAL);
+
+        auto *text = new wxStaticText(
+            this, wxID_ANY,
+            wxString::Format(_L("Sign in with your Unlayered account. %s then keeps itself up to date and offers "
+                                "configuration updates for your printers."),
+                             SLIC3R_APP_FULL_NAME));
+        text->Wrap(FromDIP(420));
+        main->Add(text, 0, wxALL, FromDIP(16));
+
+        auto *sign_in = new wxButton(this, wxID_OK, _L("Sign In"), wxDefaultPosition, wxSize(FromDIP(200), FromDIP(36)));
+        sign_in->SetDefault();
+        sign_in->SetFocus();
+        main->Add(sign_in, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(16));
+
+        auto *later = new wxStaticText(this, wxID_ANY, _L("Not now"));
+        later->SetFont(later->GetFont().Smaller());
+        later->SetCursor(wxCursor(wxCURSOR_HAND));
+        later->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent &) { EndModal(wxID_CANCEL); });
+        main->Add(later, 0, wxALIGN_RIGHT | wxALL, FromDIP(10));
+
+        SetSizerAndFit(main);
+        Centre(wxBOTH);
+        wxGetApp().UpdateDlgDarkUI(this);
+        // After the dark-mode pass, which would otherwise give it the normal text colour.
+        later->SetForegroundColour(wxColour(150, 150, 150));
+    }
+
+protected:
+    void on_dpi_changed(const wxRect &) override { Fit(); Refresh(); }
 };
 
 } // namespace
@@ -393,6 +440,71 @@ void AutoUpdater::sign_in(wxWindow *parent, std::function<void(bool)> done)
     }
     if (done)
         done(ok);
+}
+
+bool AutoUpdater::stored_sign_in(AppConfig *config, std::string *email)
+{
+    UnlayeredAccount account(site_url_from(config));
+    account.load();
+    if (!account.signed_in())
+        return false;
+    if (email) {
+        const auto p = account.profile();
+        *email       = p ? p->email : std::string();
+    }
+    return true;
+}
+
+bool AutoUpdater::sign_in_for_setup(wxWindow *parent, AppConfig *config, std::string *email)
+{
+    auto account = std::make_shared<UnlayeredAccount>(site_url_from(config));
+    account->load();
+    if (!account->signed_in()) {
+        // No usage diagnostics here: nothing is recorded while the setup wizard is open.
+        SignInDialog dlg(parent, account);
+        if (dlg.ShowModal() != wxID_OK || !account->signed_in()) {
+            if (!dlg.error().empty())
+                BOOST_LOG_TRIVIAL(warning) << "account: sign-in from setup failed: " << dlg.error();
+            return false;
+        }
+        BOOST_LOG_TRIVIAL(info) << "account: signed in from setup";
+    }
+    if (email) {
+        const auto p = account->profile();
+        *email       = p ? p->email : std::string();
+    }
+    return true;
+}
+
+void AutoUpdater::ask_sign_in_after_update(bool wizard_showed)
+{
+    AppConfig *config = m_app.app_config;
+    if (config == nullptr)
+        return;
+    if (wizard_showed) {
+        config->set(SIGN_IN_ASKED_KEY, UNLAYERED_VERSION);
+        return;
+    }
+    const std::string asked = config->get(SIGN_IN_ASKED_KEY);
+    if (!asked.empty()) {
+        const auto then = Semver::parse(asked);
+        const auto now  = Semver::parse(UNLAYERED_VERSION);
+        if (!then || !now || !(*then < *now))
+            return; // asked in this version already
+    }
+    run_when_no_dialog(m_app, [this]() {
+        AppConfig *config = m_app.app_config;
+        config->set(SIGN_IN_ASKED_KEY, UNLAYERED_VERSION);
+        config->save();
+        if (m_account->signed_in())
+            return;
+        AskSignInDialog dlg(m_app.mainframe);
+        const bool      yes = dlg.ShowModal() == wxID_OK;
+        BOOST_LOG_TRIVIAL(info) << "account: asked to sign in after the update to " << UNLAYERED_VERSION << ", "
+                                << (yes ? "signing in" : "not now");
+        if (yes)
+            sign_in(m_app.mainframe);
+    });
 }
 
 void AutoUpdater::sign_out()

@@ -16,6 +16,7 @@
 class wxWindow;
 
 namespace Slic3r {
+class AppConfig;
 namespace GUI {
 
 class GUI_App;
@@ -67,6 +68,18 @@ public:
     // Help menu actions.
     void sign_in(wxWindow *parent, std::function<void(bool signed_in)> done = {});
     void sign_out();
+
+    // Unlayered 0.1.7: the setup wizard asks for a sign-in every time it runs while
+    // the slicer is not signed in (guide 13signin). It runs before any AutoUpdater exists, so these
+    // use an account object of their own; the token is stored as usual, and the AutoUpdater created
+    // after the wizard loads it. No network for stored_sign_in().
+    static bool stored_sign_in(AppConfig *config, std::string *email = nullptr);
+    static bool sign_in_for_setup(wxWindow *parent, AppConfig *config, std::string *email = nullptr);
+
+    // Once per version, after on_startup(): on the first launch of a newer version (0.1.6 -> 0.1.7
+    // included) a slicer that is not signed in asks for a sign-in. It can be skipped. A run that
+    // showed the setup wizard only records the version - the wizard asked already.
+    void ask_sign_in_after_update(bool wizard_showed);
 
     // From GUI_App::OnExit: starts the silent install of a downloaded update, if there is one. The
     // installer waits for this process to exit before it touches anything.

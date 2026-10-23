@@ -189,6 +189,9 @@ enum class NotificationType
     // Active preset references a capability the installed+loaded plugin does not provide (outdated
     // plugin). Informational; cannot be auto-resolved; persistent, blocks slicing.
     OrcaPluginCapabilityUnavailableError,
+    // Newer firmware or configuration has been published for the selected Unlayered printer
+    // (PrinterUpdateOffer). Update / Not now / Skip this version.
+    UnlayeredPrinterUpdateAvailable,
     NotificationTypeCount
 
 };
@@ -305,6 +308,11 @@ public:
 		int conflict_code,
 		std::function<bool(wxEvtHandler*)> pull_callback,
 		std::function<bool(wxEvtHandler*)> force_push_callback);
+	// A text notification with a row of links under it, e.g. Update / Not now / Skip this version.
+	// Each callback returns true to close the notification. Replaces any notification of `type`.
+	using ActionLink = std::pair<std::string, std::function<bool(wxEvtHandler*)>>;
+	void push_action_row_notification(NotificationType type, NotificationLevel level, const std::string& text,
+		std::vector<ActionLink> actions);
 	// Non-closable, persistent missing-plugin notification with a single resolve action (install /
 	// open OrcaCloud). The callback returns true to close the notification, or false to keep it
 	// visible while resolution continues.
@@ -956,6 +964,26 @@ private:
 		std::function<bool(wxEvtHandler*)> m_pull_callback;
 		std::function<bool(wxEvtHandler*)> m_force_push_callback;
 		int conflict_code;
+	};
+
+	// Text, then one row of links. The generalisation of OrcaSyncConflictNotification's two links.
+	class ActionRowNotification : public PopNotification
+	{
+	public:
+		ActionRowNotification(const NotificationData& n, NotificationIDProvider& id_provider, wxEvtHandler* evt_handler,
+			std::vector<ActionLink> actions)
+			: PopNotification(n, id_provider, evt_handler)
+			, m_actions(std::move(actions))
+		{
+			m_multiline = true;
+		}
+	protected:
+		void init() override;
+		void render_text(ImGuiWrapper& imgui,
+			const float win_size_x, const float win_size_y,
+			const float win_pos_x, const float win_pos_y) override;
+
+		std::vector<ActionLink> m_actions;
 	};
 
 	// Persistent, non-closable notification for preset plugin capabilities that are required but

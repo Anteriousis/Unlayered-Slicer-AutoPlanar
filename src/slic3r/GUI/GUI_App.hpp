@@ -71,6 +71,7 @@ namespace GUI{
 
 class RemovableDriveManager;
 class AutoUpdater;
+class PrinterUpdateOffer;
 class OtherInstanceMessageHandler;
 class MainFrame;
 class Sidebar;
@@ -323,6 +324,8 @@ private:
     // wizard is closed first and the quit re-issued once it has returned (macOS, MacQuitHandler.h).
     wxDialog*       m_running_wizard { nullptr };
     bool            m_quit_after_wizard { false };
+    // "Printer update available" for the selected Unlayered printer. See PrinterUpdateOffer.hpp.
+    std::unique_ptr<PrinterUpdateOffer> m_printer_update_offer;
 
     //BBS
     std::atomic<bool> m_is_closing {false};
@@ -606,6 +609,7 @@ public:
     // Downloads and runs the installer the last check found, then closes the application.
     void            start_app_update();
     AutoUpdater*    auto_updater() { return m_auto_updater.get(); }
+    PrinterUpdateOffer* printer_update_offer() { return m_printer_update_offer.get(); }
     bool            process_network_msg(std::string dev_id, std::string msg);
     void            request_new_version(int by_user);
     void            enter_force_upgrade();

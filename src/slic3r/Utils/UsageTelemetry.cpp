@@ -98,6 +98,9 @@ struct State
 
     std::vector<json>          queue;
     std::map<std::string, int> counts;
+    // Crashes found at start() that diagnostics did not cover: offered to the person, once
+    // (unreported_crashes / answer_unreported_crashes). Allow-listed "crash" props, newest last.
+    std::vector<json>          crash_offers;
     std::vector<std::string>   pending;   // batch bodies a failed send left for later
     std::map<int, std::string> in_flight; // bodies being sent in the background
     int                        next_id{0};
@@ -985,7 +988,11 @@ void start(AppConfig &config, bool first_run)
         // The operating system ended that session (end_session_by_os): not a crash.
         const bool os_ended  = marker.is_object() && marker.value("phase", std::string()) == "os_session_end";
         const bool consented = marker.is_object() && marker.value("consented", false);
-        if (s.on && consented && !os_ended) {
+        // Covered: diagnostics were shared in that session and are shared now - reported as before.
+        // Otherwise the person is asked once whether to send this one report (unreported_crashes).
+        const bool covered = s.on && consented;
+        const bool ask     = !covered && !s.env_off && PrivacyConsent::legal_approvals().crash_report_prompt;
+        if (!os_ended && (covered || ask)) {
 #ifdef _WIN32
             // Our crash filter never ran (a fast fail, a stack overflow, heap corruption, or the
             // person ended it while it hung): ask Windows how that process ended.
@@ -1008,8 +1015,12 @@ void start(AppConfig &config, bool first_run)
             if (started > 0 && alive >= started)
                 props["uptime_s"] = (alive - started) / 1000;
             json clean, no_counts;
-            if (DiagnosticsAllowlist::filter("crash", props, json(), clean, no_counts))
-                s.queue.push_back(make_event("crash", std::move(clean)));
+            if (DiagnosticsAllowlist::filter("crash", props, json(), clean, no_counts)) {
+                if (covered)
+                    s.queue.push_back(make_event("crash", std::move(clean)));
+                else
+                    s.crash_offers.push_back(std::move(clean));
+            }
         }
         boost::system::error_code rm_ec;
         fs::remove(marker_file, rm_ec);
@@ -1017,8 +1028,13 @@ void start(AppConfig &config, bool first_run)
     s.started_ms = now_ms();
     s.phase      = "startup";
     write_marker_locked(s);
-    if (s.on)
+    // Recorded locally for everyone the organisation has not opted out: the marker says whether
+    // diagnostics were shared, and a crash outside them is only ever sent if the person says so.
+    if (!s.env_off)
         install_crash_handlers();
+    // Keep the newest few; older ones say nothing the newest does not.
+    if (s.crash_offers.size() > 3)
+        s.crash_offers.erase(s.crash_offers.begin(), s.crash_offers.end() - 3);
 
     if (s.on) {
         json saved = json::parse(read_file(pending_path()), nullptr, false);
@@ -1090,6 +1106,51 @@ std::string code_location(const void *address)
 
 bool disabled_by_environment() { return state().env_off; }
 
+std::vector<json> unreported_crashes()
+{
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    return s.crash_offers;
+}
+
+void answer_unreported_crashes(bool send_them)
+{
+    State &s = state();
+    std::vector<json> crashes;
+    std::string       url, body;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        crashes.swap(s.crash_offers);
+        if (!send_them || crashes.empty())
+            return;
+        std::vector<json> events;
+        for (json &props : crashes)
+            events.push_back(make_event("crash", std::move(props)));
+        // Its own batch, with ids made for it alone: never this installation's id, so the report
+        // cannot be tied to anything else from this computer.
+        json batch = {{"v", 1},
+                      {"install", new_uuid()},
+                      {"session", new_uuid()},
+                      {"app", {{"version", s.version}, {"channel", s.channel}, {"os", s.os}}},
+                      {"program", false},
+                      {"events", std::move(events)}};
+        body = batch.dump();
+        url  = s.url;
+    }
+    // One attempt, in the background; not kept for a retry (the person agreed to this send only).
+    auto http = Http::post(url);
+    http.header("Content-Type", "application/json")
+        .set_post_body(body)
+        .timeout_connect(10)
+        .timeout_max(30)
+        .tls_verify(true)
+        .on_complete([](std::string, unsigned) { BOOST_LOG_TRIVIAL(info) << "crash report: sent at the person's request"; })
+        .on_error([](std::string, std::string error, unsigned status) {
+            BOOST_LOG_TRIVIAL(info) << "crash report: not delivered, status " << status << ", " << error;
+        })
+        .perform();
+}
+
 bool is_first_run() { return state().first_run; }
 
 std::string install_id()
@@ -1152,8 +1213,10 @@ void refresh(AppConfig &config)
     }
     if (install_handlers)
         install_crash_handlers();
-    else if (remove_handlers)
-        uninstall_crash_handlers(); // a crash after a withdrawal is never marked as consented
+    else if (remove_handlers && s.env_off)
+        uninstall_crash_handlers();
+    // A withdrawal keeps the local recorder: the marker now says "not consented", so a later crash
+    // is asked about instead of sent (write_marker_locked above).
     BOOST_LOG_TRIVIAL(info) << "usage diagnostics " << (s.on ? "permitted" : "not permitted") << " by the privacy choice";
 }
 
@@ -1290,7 +1353,7 @@ std::string redact_message(const std::string &message, const std::vector<std::st
 
     static const std::regex quoted(R"("[^"]*"|'[^']*'|\xE2\x80\x9C.*?\xE2\x80\x9D|\xC2\xAB.*?\xC2\xBB)");
     out = std::regex_replace(out, quoted, "<...>");
-    // A path runs on through directory names with spaces in them (C:\Users\Alex Smith\...): every
+    // A path runs on through directory names with spaces in them (C:\Users\Jane Smith\...): every
     // part followed by a separator is still the path. Hiding too much is the safe direction.
     static const std::regex path(R"([A-Za-z]:[\\/](?:[^\\/\n]*[\\/])*\S*|\\\\(?:[^\\/\n]*[\\/])*\S*|(^|\s)/(?:[^/\n]*/)+\S*)");
     out = std::regex_replace(out, path, "$1<path>");

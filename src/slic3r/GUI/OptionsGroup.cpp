@@ -26,6 +26,8 @@
 #include "I18N.hpp"
 #include <algorithm>
 #include <locale>
+#include <wx/filesys.h>
+#include <wx/filename.h>
 
 namespace Slic3r { namespace GUI {
 
@@ -1376,8 +1378,8 @@ wxString OptionsGroup::get_url(const std::string& path_end)
     // opens the bundled offline tutorial (resources/web/tutorial) at anchor x instead.
     static const std::string tutorial_prefix = "multiplanar_tutorial";
     if (boost::starts_with(path_end, tutorial_prefix))
-        return wxString::Format("file://%s/web/tutorial/multiplanar.html%s", from_u8(Slic3r::resources_dir()),
-                                from_u8(path_end.substr(tutorial_prefix.size())));
+        return wxFileSystem::FileNameToURL(wxFileName(from_u8(Slic3r::resources_dir() + "/web/tutorial/multiplanar.html"))) +
+               from_u8(path_end.substr(tutorial_prefix.size()));
     // Orca: point to sf wiki for seam parameters
     return wxString::Format(L"https://www.orcaslicer.com/wiki/%s", from_u8(path_end));
 }

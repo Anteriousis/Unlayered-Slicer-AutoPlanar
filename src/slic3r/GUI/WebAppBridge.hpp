@@ -61,7 +61,9 @@ enum WebAppBridgeError
 // The open PROJECT can be handed to the page, deliberately and narrowly. Publishing what is on
 // the plate otherwise means saving a 3MF by hand and finding it again in a file picker inside an
 // embedded web view, which is worse for the user and no safer. The shape is:
-//   - three methods: exportProject, readExportChunk, discardExport. Nothing else moves bytes out.
+//   - three methods: exportProject, readExportChunk, discardExport. Nothing else moves bytes out,
+//     except exportThumbnail (a picture of the plate) and exportPrinterPreset (below), which
+//     hands back a handle for the same two.
 //   - behind their own per-tab opt-in (<slot>_allow_export, default off, and a separate key from
 //     allow_settings because it is a different thing to consent to -- the user's model leaving,
 //     rather than the slicer's settings being read). Absent from `capabilities` while it is off.
@@ -87,11 +89,27 @@ enum WebAppBridgeError
 //     user's own dirty edits are never discarded without ifDirty:"discard" saying so (1013).
 //
 // slicer.selectPreset EXISTS on those terms (see handle_select_preset): an already-installed
-// preset, by name or alias, in the printer, print or filament slot -- no create/modify/delete/
-// import -- and it behaves like the user choosing the entry from the dropdown. The printer form
-// is the original v1 method and works without the settings opt-in, because a page producing
-// G-code for a particular printer otherwise gets a preview drawn on the wrong bed; the print and
-// filament forms belong to the settings family and are gated with it.
+// preset, by name or alias, in the printer, print or filament slot -- no create/modify/delete --
+// and it behaves like the user choosing the entry from the dropdown. The printer form is the
+// original v1 method and works without the settings opt-in, because a page producing G-code for
+// a particular printer otherwise gets a preview drawn on the wrong bed; the print and filament
+// forms belong to the settings family and are gated with it.
+//
+// PRINTER PROFILES can be shared, in both directions, and import is the one way a page can add a
+// preset (WEB_APP_BRIDGE.md 4.4; policy in WebAppPresetShare.cpp):
+//   - slicer.exportPrinterPreset belongs to the export family and its opt-in: the edited printer
+//     preset, flattened, read back through the same handle/readExportChunk path as a project.
+//     A system or default preset is refused -- it is the vendor's, not the user's, to share.
+//   - slicer.installPrinterPreset has its own opt-in (<slot>_allow_install, on for Universe
+//     only), downloads on openProjectFromUrl's terms, and installs nothing until the user says so
+//     in a native, modal confirmation showing the machine, the parent, and every custom-G-code
+//     line that updates firmware, touches files, the network or safety limits, or restarts the
+//     controller. That per-install confirmation is the consent; the opt-in only lets a page ask.
+//   - a shared profile can never redirect the installer's uploads: print-host addresses,
+//     credentials and upload switches (WebAppSettings::WAB_SECRET_KEYS) and local file paths
+//     (bed_custom_texture / bed_custom_model) are stripped on export AND again on install,
+//     whatever the file says. It is imported as a user preset; nothing else (print or filament
+//     presets, bundles, physical printers) can arrive this way.
 // ---------------------------------------------------------------------------------------------
 class WebAppBridge
 {

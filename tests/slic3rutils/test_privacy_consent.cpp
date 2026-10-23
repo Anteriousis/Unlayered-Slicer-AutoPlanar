@@ -31,7 +31,7 @@ Record choice(const std::string &region, const std::string &country, bool share,
 
 TEST_CASE("Privacy: the shipped build's legal approvals", "[Privacy]")
 {
-    // Counsel approved the US preselection (per Alex, 2026-10-14); statistics are still off.
+    // The US preselection is on (2026-10-14); statistics are still off.
     CHECK(legal_approvals().us_preselect_share);
     CHECK_FALSE(legal_approvals().privacy_choice_stats);
 }
@@ -495,8 +495,8 @@ TEST_CASE("Diagnostics allowlist: events, properties and values", "[Privacy]")
                     {"objects", 3},
                     {"project_name", "My secret bracket"},
                     {"filaments", {"Generic PLA @BBL X1C", "C:\\Users\\alex\\PLA.json"}},
-                    {"settings", {"layer_height=0.2", "o0.infill_mesh_path=/home/alex/mesh.stl", "post_process=C:/x.py"}},
-                    {"error", "Cannot open C:\\Users\\Alex Smith\\Documents\\bracket.stl"},
+                    {"settings", {"layer_height=0.2", "o0.infill_mesh_path=/home/jane/mesh.stl", "post_process=C:/x.py"}},
+                    {"error", "Cannot open C:\\Users\\Jane Smith\\Documents\\bracket.stl"},
                     {"parts", {"x=40;y=20;z=10;vol=2700;area=1700;ovh=5;base=20;inst=1"}}},
                    {{"parts:ironing", 2}, {"file:bracket.stl", 1}, {"tab:preview", -1}}, props, counts));
     CHECK(props["result"] == "ok");
@@ -512,15 +512,15 @@ TEST_CASE("Diagnostics allowlist: events, properties and values", "[Privacy]")
     CHECK(safe_string("0.1.6"));
     CHECK(safe_string("UnlayeredSlicer.dll+0x1a2b3c"));
     CHECK(safe_string("thumbnails=96x96/PNG"));
-    CHECK_FALSE(safe_string("C:/Users/alex"));
+    CHECK_FALSE(safe_string("C:/Users/jane"));
     CHECK_FALSE(safe_string("\\\\server\\share"));
-    CHECK_FALSE(safe_string("/home/alex/x"));
+    CHECK_FALSE(safe_string("/home/jane/x"));
     CHECK_FALSE(safe_string("~/x"));
-    CHECK_FALSE(safe_string("key=/Users/alex/x"));
+    CHECK_FALSE(safe_string("key=/Users/jane/x"));
     CHECK_FALSE(safe_string("bracket.3mf"));
     CHECK_FALSE(safe_string("Benchy.STL"));
     CHECK_FALSE(safe_string("part.gcode"));
-    CHECK_FALSE(safe_string("alex@example.com"));
+    CHECK_FALSE(safe_string("jane@example.com"));
     CHECK_FALSE(safe_string("two\nlines"));
     CHECK_FALSE(safe_string(std::string(500, 'a')));
     CHECK_FALSE(safe_string("https://example.com/a"));
@@ -533,8 +533,8 @@ TEST_CASE("Diagnostics allowlist: events, properties and values", "[Privacy]")
 TEST_CASE("Usage diagnostics redact paths with spaces and bare model file names", "[Privacy]")
 {
     using UsageTelemetry::redact_message;
-    CHECK(redact_message("Cannot open C:\\Users\\Alex Smith\\Documents\\bracket.stl", {}) == "Cannot open <path>");
-    CHECK(redact_message("Cannot open /home/alex smith/parts/bracket.stl", {}) == "Cannot open <path>");
+    CHECK(redact_message("Cannot open C:\\Users\\Jane Smith\\Documents\\bracket.stl", {}) == "Cannot open <path>");
+    CHECK(redact_message("Cannot open /home/jane smith/parts/bracket.stl", {}) == "Cannot open <path>");
     CHECK(redact_message("Failed to load bracket_v2.3mf", {}) == "Failed to load <file>");
     CHECK(redact_message("Layer height 0.2 is too small", {}) == "Layer height 0.2 is too small");
 }

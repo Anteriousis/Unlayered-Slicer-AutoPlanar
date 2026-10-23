@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 #include <boost/algorithm/string.hpp>
@@ -15,6 +16,7 @@
 #include <openssl/evp.h>
 
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/miniz_extension.hpp"
 #include "DuetClient.hpp"
 #include "Http.hpp"
 
@@ -100,7 +102,9 @@ int firmware_role_to_module(FirmwareRole role)
     case FirmwareRole::PanelDue:  return 4;
     case FirmwareRole::PanelOta:  return 5;
     // The IAP is the programmer that flashes the mainboard; it is never an M997 target itself.
+    // The web interface is unpacked into 0:/www by the slicer, not flashed by the board.
     case FirmwareRole::Iap:
+    case FirmwareRole::Www:
     case FirmwareRole::Unknown:
     default:                      return -1;
     }
@@ -116,6 +120,7 @@ FirmwareRole firmware_role_from_string(const std::string &s)
     // "display" stays on PanelDue: it is what manifests written before the ESP32 panel existed
     // meant by it, and silently re-pointing those at module 5 would flash the wrong device.
     if (v == "panelota" || v == "panel" || v == "esp32panel") return FirmwareRole::PanelOta;
+    if (v == "www" || v == "web" || v == "dwc")              return FirmwareRole::Www;
     return FirmwareRole::Unknown;
 }
 
@@ -127,6 +132,7 @@ const char *firmware_role_to_string(FirmwareRole role)
     case FirmwareRole::Wifi:      return "wifi";
     case FirmwareRole::PanelDue:  return "paneldue";
     case FirmwareRole::PanelOta:  return "panelota";
+    case FirmwareRole::Www:       return "www";
     default:                      return "unknown";
     }
 }
@@ -189,6 +195,12 @@ std::string sha256_hex(const std::vector<uint8_t> &data)
     return out;
 }
 
+bool is_zip_archive(const std::vector<uint8_t> &data)
+{
+    // Local file header signature "PK\3\4".
+    return data.size() >= 4 && data[0] == 'P' && data[1] == 'K' && data[2] == 3 && data[3] == 4;
+}
+
 bool validate_package(const FirmwarePackage &pkg, const std::string &board_short_name, std::string &error_out)
 {
     if (pkg.images.empty()) {
@@ -225,10 +237,18 @@ bool validate_package(const FirmwarePackage &pkg, const std::string &board_short
                                        "intended for a different board") % img.filename).str();
             return false;
         }
+        // The web interface is a zip; its contents are checked in full by extract_web_interface()
+        // before anything is written, this only catches a wrong file early.
+        if (img.role == FirmwareRole::Www && !is_zip_archive(img.data)) {
+            error_out = (boost::format("%1% is not a zip archive, so it cannot be the web interface")
+                         % img.filename).str();
+            return false;
+        }
     }
 
     if (!pkg.find(FirmwareRole::Mainboard) && !pkg.find(FirmwareRole::Wifi) &&
-        !pkg.find(FirmwareRole::PanelDue) && !pkg.find(FirmwareRole::PanelOta)) {
+        !pkg.find(FirmwareRole::PanelDue) && !pkg.find(FirmwareRole::PanelOta) &&
+        !pkg.find(FirmwareRole::Www)) {
         error_out = "The firmware package contains nothing that can be flashed";
         return false;
     }
@@ -273,10 +293,20 @@ bool parse_manifest(const std::string &json, FirmwarePackage &pkg_out, std::stri
                 return false;
             }
             if (img.role == FirmwareRole::Unknown) {
-                error_out = (boost::format("Firmware manifest entry %1% has an unrecognised role") % img.filename).str();
-                return false;
+                // Skipped, not fatal: a release can carry a component a newer slicer knows how to
+                // install. Rejecting the whole manifest for it would drop this slicer back to
+                // matching assets by name, with no checksums - strictly worse than ignoring one
+                // image it could not have installed anyway. (Slicers up to 0.1.2 do reject.)
+                BOOST_LOG_TRIVIAL(warning) << "Firmware: manifest entry " << img.filename << " has role '"
+                                           << kv.second.get<std::string>("role", "")
+                                           << "', which this version does not know; ignoring it";
+                continue;
             }
             pkg_out.images.push_back(std::move(img));
+        }
+        if (pkg_out.images.empty()) {
+            error_out = "The firmware manifest lists no image this version of the slicer can install";
+            return false;
         }
         return true;
     } catch (const std::exception &e) {
@@ -319,10 +349,209 @@ static FirmwareRole infer_role_from_name(const std::string &filename,
         return FirmwareRole::Wifi;
     if (stem.rfind("paneldue", 0) == 0 || stem.rfind("duetscreen", 0) == 0)
         return FirmwareRole::PanelDue;
+    // The web interface SD zip: ours, or stock DWC for a bench machine being put back.
+    if (boost::iends_with(filename, ".zip") &&
+        (stem.rfind("unlayeredwebcontrol", 0) == 0 || stem.rfind("duetwebcontrol", 0) == 0))
+        return FirmwareRole::Www;
     if (stem.find("iap") != std::string::npos)
         return FirmwareRole::Iap;
 
     return FirmwareRole::Unknown;
+}
+
+// -----------------------------------------------------------------------------------------------
+// Web interface
+// -----------------------------------------------------------------------------------------------
+
+const char *const WEB_INTERFACE_ROOT = "0:/www";
+
+namespace {
+
+// A DWC SD zip is ~12 MB and ~60 files today, half of it source maps. These bounds are far above
+// that and far below "someone picked the SD-card image by mistake".
+constexpr uint64_t WEB_MAX_FILE_BYTES    = 32ull * 1024 * 1024;
+constexpr uint64_t WEB_MAX_PACKAGE_BYTES = 96ull * 1024 * 1024;
+constexpr size_t   WEB_MAX_FILES         = 2000;
+
+bool web_path_is_safe(const std::string &p)
+{
+    if (p.empty() || p.front() == '/' || p.back() == '/' || p.size() > 200)
+        return false;
+    for (const char c : p)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-' || c == '/'))
+            return false;
+    // No "..", "." or empty components.
+    std::vector<std::string> parts;
+    boost::algorithm::split(parts, p, [](char c) { return c == '/'; });
+    for (const auto &part : parts)
+        if (part.empty() || part == "." || part == "..")
+            return false;
+    return true;
+}
+
+std::string lower(const std::string &s) { return boost::algorithm::to_lower_copy(s); }
+
+// Every proper parent of a relative path, outermost first: "a/b/c.gz" -> "a", "a/b".
+void add_parents(const std::string &path, std::set<std::string> &seen_lower, std::vector<std::string> *ordered)
+{
+    for (size_t pos = path.find('/'); pos != std::string::npos; pos = path.find('/', pos + 1)) {
+        const std::string dir = path.substr(0, pos);
+        if (seen_lower.insert(lower(dir)).second && ordered)
+            ordered->push_back(dir);
+    }
+}
+
+size_t depth(const std::string &p) { return size_t(std::count(p.begin(), p.end(), '/')); }
+
+} // namespace
+
+void web_interface_upload_order(std::vector<WebInterfaceFile> &files)
+{
+    auto rank = [](const WebInterfaceFile &f) {
+        const std::string l = lower(f.path);
+        if (l == "index.html.gz") return 2;
+        if (l == "index.html")    return 1;
+        return 0;
+    };
+    std::stable_sort(files.begin(), files.end(), [&rank](const WebInterfaceFile &a, const WebInterfaceFile &b) {
+        const int ra = rank(a), rb = rank(b);
+        if (ra != rb)
+            return ra < rb;
+        return a.path < b.path;
+    });
+}
+
+bool extract_web_interface(const std::vector<uint8_t> &zip_bytes, std::vector<WebInterfaceFile> &files_out,
+                           std::string &error_out)
+{
+    files_out.clear();
+    if (!is_zip_archive(zip_bytes)) {
+        error_out = "The web interface file is not a zip archive";
+        return false;
+    }
+
+    mz_zip_archive arch;
+    mz_zip_zero_struct(&arch);
+    if (!mz_zip_reader_init_mem(&arch, zip_bytes.data(), zip_bytes.size(), 0)) {
+        error_out = "The web interface archive is not a readable zip file";
+        return false;
+    }
+
+    bool                  ok    = true;
+    uint64_t              total = 0;
+    std::set<std::string> seen;
+    const mz_uint         count = mz_zip_reader_get_num_files(&arch);
+    for (mz_uint i = 0; i < count; ++i) {
+        if (mz_zip_reader_is_file_a_directory(&arch, i))
+            continue;
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&arch, i, &stat)) {
+            error_out = "The web interface archive could not be read";
+            ok        = false;
+            break;
+        }
+        const std::string path = stat.m_filename;
+        if (!web_path_is_safe(path)) {
+            error_out = (boost::format("The web interface archive contains a file with an unusable name: %1%") % path).str();
+            ok        = false;
+            break;
+        }
+        if (!seen.insert(lower(path)).second) {
+            error_out = (boost::format("The web interface archive contains %1% twice") % path).str();
+            ok        = false;
+            break;
+        }
+        if (uint64_t(stat.m_uncomp_size) > WEB_MAX_FILE_BYTES) {
+            error_out = (boost::format("%1% in the web interface archive is too large (%2% bytes)")
+                         % path % uint64_t(stat.m_uncomp_size)).str();
+            ok        = false;
+            break;
+        }
+        total += stat.m_uncomp_size;
+        if (total > WEB_MAX_PACKAGE_BYTES || files_out.size() >= WEB_MAX_FILES) {
+            error_out = "The archive is far too large to be a web interface";
+            ok        = false;
+            break;
+        }
+        if (stat.m_uncomp_size == 0) {
+            // rr_upload refuses an empty body, and an empty asset is never load-bearing.
+            BOOST_LOG_TRIVIAL(warning) << "Firmware: skipping empty file " << path << " in the web interface archive";
+            continue;
+        }
+        WebInterfaceFile f;
+        f.path = path;
+        f.data.resize(size_t(stat.m_uncomp_size));
+        if (!mz_zip_reader_extract_to_mem(&arch, i, f.data.data(), f.data.size(), 0)) {
+            error_out = (boost::format("Could not extract %1% from the web interface archive") % path).str();
+            ok        = false;
+            break;
+        }
+        files_out.push_back(std::move(f));
+    }
+    mz_zip_reader_end(&arch);
+
+    if (!ok) {
+        files_out.clear();
+        return false;
+    }
+
+    const bool has_index = std::any_of(files_out.begin(), files_out.end(), [](const WebInterfaceFile &f) {
+        const std::string l = lower(f.path);
+        return l == "index.html.gz" || l == "index.html";
+    });
+    if (!has_index) {
+        // Also what a zip with everything inside a wrapper folder looks like. Refused rather than
+        // unwrapped: the published SD zip has its files at the root, and guessing at a layout is how
+        // a wrong archive ends up served as the printer's web page.
+        error_out = "The archive has no index.html.gz at its top level, so it is not a web interface SD zip";
+        files_out.clear();
+        return false;
+    }
+
+    web_interface_upload_order(files_out);
+    return true;
+}
+
+std::vector<std::string> stale_web_interface_files(const std::vector<std::string> &old_files,
+                                                   const std::vector<WebInterfaceFile> &new_files)
+{
+    std::set<std::string> keep;
+    for (const auto &f : new_files)
+        keep.insert(lower(f.path));
+    std::vector<std::string> out;
+    for (const auto &p : old_files)
+        if (!keep.count(lower(p)))
+            out.push_back(p);
+    return out;
+}
+
+std::vector<std::string> stale_web_interface_dirs(const std::vector<std::string> &old_dirs,
+                                                  const std::vector<WebInterfaceFile> &new_files)
+{
+    std::set<std::string> keep;
+    for (const auto &f : new_files)
+        add_parents(f.path, keep, nullptr);
+    std::vector<std::string> out;
+    for (const auto &d : old_dirs)
+        if (!keep.count(lower(d)))
+            out.push_back(d);
+    // Deepest first, so a nested folder goes before the folder that holds it.
+    std::sort(out.begin(), out.end(), [](const std::string &a, const std::string &b) {
+        return depth(a) != depth(b) ? depth(a) > depth(b) : a < b;
+    });
+    return out;
+}
+
+std::vector<std::string> web_interface_dirs(const std::vector<WebInterfaceFile> &files)
+{
+    std::set<std::string>    seen;
+    std::vector<std::string> ordered;
+    for (const auto &f : files)
+        add_parents(f.path, seen, &ordered);
+    std::sort(ordered.begin(), ordered.end(), [](const std::string &a, const std::string &b) {
+        return depth(a) != depth(b) ? depth(a) < depth(b) : a < b;
+    });
+    return ordered;
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -420,7 +649,8 @@ bool LocalFileFirmwareSource::fetch(FirmwarePackage &pkg_out, FirmwareProgressFn
         if (is_uf2_image(img.data) && !m_board_firmware_filename.empty())
             img.role = FirmwareRole::Mainboard;
         else {
-            error_out = (boost::format("Could not tell what %1% is for. Expected a file named like %2% or %3%.")
+            error_out = (boost::format("Could not tell what %1% is for. Expected a file named like %2% or %3%, "
+                                       "or a web interface zip (UnlayeredWebControl-SD.zip).")
                          % given_name
                          % (m_board_firmware_filename.empty() ? "the board firmware" : m_board_firmware_filename)
                          % (m_board_iap_filename.empty() ? "the IAP binary" : m_board_iap_filename)).str();
@@ -489,8 +719,7 @@ bool GitHubReleaseFirmwareSource::fetch_metadata(FirmwarePackage &pkg_out, std::
         .header("X-GitHub-Api-Version", "2022-11-28")
         // GitHub rejects API requests that do not identify themselves.
         .header("User-Agent", "UnlayeredSlicer");
-    if (!m_opts.token.empty())
-        http.header("Authorization", std::string("Bearer ") + m_opts.token);
+    apply_feed_credential(http, url, m_opts.credential);
 
     http.on_error([&](std::string b, std::string error, unsigned status) {
             BOOST_LOG_TRIVIAL(error) << boost::format("Firmware: GitHub request failed: %1%, HTTP %2%") % error % status;
@@ -601,8 +830,8 @@ bool GitHubReleaseFirmwareSource::download_asset(const std::string &url, const s
         .header("User-Agent", "UnlayeredSlicer")
         // Release assets are served as a redirect to a signed object URL; curl follows it.
         .header("Accept", "application/octet-stream");
-    if (!m_opts.token.empty())
-        http.header("Authorization", std::string("Bearer ") + m_opts.token);
+    // Per URL, not per feed: an asset can live on a different host from the release list.
+    apply_feed_credential(http, url, m_opts.credential);
 
     http.on_error([&](std::string b, std::string error, unsigned status) {
             if (!cancelled)

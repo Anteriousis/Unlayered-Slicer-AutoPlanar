@@ -68,6 +68,14 @@ void refresh(AppConfig &config);
 // True when UNLAYERED_NO_TELEMETRY switched it off, so Preferences can say why the box is locked.
 bool disabled_by_environment();
 
+// Crashes start() found that usage diagnostics did not cover (not shared in that session, or not
+// now), as the allow-listed "crash" properties that would be sent. Empty when there were none, when
+// the organisation switched diagnostics off, or before LegalApprovals::crash_report_prompt.
+std::vector<nlohmann::json> unreported_crashes();
+// The person's answer (GUI: ask_crash_report_once). Yes: those reports are sent once, in a batch of
+// their own with fresh random ids, whatever the diagnostics choice. Either way they are forgotten.
+void answer_unreported_crashes(bool send);
+
 bool is_first_run();
 
 // The random per-install id, only while diagnostics run and are permitted; empty otherwise (no

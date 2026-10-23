@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "PrinterUpdateCheck.hpp"
+
 namespace Slic3r {
 
 class DuetClient;
@@ -19,7 +21,13 @@ class DuetClient;
 // (SAM-BA, erase-before-receive) and PanelOta is module 5, the Unlayered ESP32 panel, which
 // writes the inactive OTA slot and rolls back on its own. A release carries both images and
 // the job flashes whichever matches the display actually attached - see display_role_for().
-enum class FirmwareRole { Mainboard, Iap, Wifi, PanelDue, PanelOta, Unknown };
+//
+// Www is not firmware and not an M997 module at all: it is the web interface (Unlayered Web
+// Control, our DuetWebControl build) as an SD-card zip, unpacked into 0:/www/. It travels with the
+// firmware because DWC compares its own version with the board's and warns on any difference, and
+// stock DWC reads "+unlayered.N" as a mismatch - so each release carries a UWC stamped with exactly
+// its firmware version, installed after the mainboard flash. See FirmwareUpdateJob.
+enum class FirmwareRole { Mainboard, Iap, Wifi, PanelDue, PanelOta, Www, Unknown };
 
 int         firmware_role_to_module(FirmwareRole role); // -1 for Iap/Unknown
 FirmwareRole firmware_role_from_string(const std::string &s);
@@ -96,6 +104,9 @@ struct FirmwarePackage
 // has already been uploaded to the SD card.
 bool is_uf2_image(const std::vector<uint8_t> &data);
 
+// True when the payload starts with a zip local-file header, PK 03 04. The web interface check.
+bool is_zip_archive(const std::vector<uint8_t> &data);
+
 // Lowercase hex SHA-256 of a buffer.
 std::string sha256_hex(const std::vector<uint8_t> &data);
 
@@ -108,6 +119,50 @@ bool validate_package(const FirmwarePackage &pkg, const std::string &board_short
 //     "images": [ { "role": "iap", "file": "...", "sha256": "..." }, ... ] }
 // Image payloads are not populated here - only the metadata.
 bool parse_manifest(const std::string &json, FirmwarePackage &pkg_out, std::string &error_out);
+
+// -----------------------------------------------------------------------------------------------
+// Web interface (role Www)
+// -----------------------------------------------------------------------------------------------
+
+// Where the web interface lives on the card. RRF serves 0:/www/<path>, preferring <path>.gz.
+extern const char *const WEB_INTERFACE_ROOT; // "0:/www"
+
+struct WebInterfaceFile
+{
+    std::string          path;   // relative to 0:/www, forward slashes, e.g. "js/app-D_vsAdMJ.js.gz"
+    std::vector<uint8_t> data;
+};
+
+// Unpacks a web interface SD zip (DuetWebControl-SD.zip layout: index.html.gz, css/, js/, fonts/
+// at the root) and checks it is one before anything touches the printer:
+//  - it must contain index.html.gz or index.html at its root;
+//  - every path must be relative, without "..", and limited to letters, digits and "._-/" - the
+//    names go into rr_* URLs and, over USB, into G-code lines (M30 takes an unquoted path);
+//  - sizes are bounded, so a wrong zip fails here rather than streaming for minutes.
+// Zero-byte files are skipped (rr_upload cannot create one). The result is in upload order - see
+// web_interface_upload_order().
+bool extract_web_interface(const std::vector<uint8_t> &zip_bytes, std::vector<WebInterfaceFile> &files_out,
+                           std::string &error_out);
+
+// The order the files go to the card: everything else sorted by path, then index.html, then
+// index.html.gz LAST. The index is the switch-over moment - until it lands, a browser still loads
+// the old index, whose hashed asset names are still on the card - so an install that stops part
+// way never serves a new index that references files which never arrived.
+void web_interface_upload_order(std::vector<WebInterfaceFile> &files);
+
+// Paths (relative to 0:/www) that were on the card before the install and are not part of the new
+// bundle, i.e. what to delete afterwards. FAT is case-insensitive, so the comparison is too:
+// "Index.html.gz" on the card IS the "index.html.gz" just uploaded and must never be deleted.
+std::vector<std::string> stale_web_interface_files(const std::vector<std::string> &old_files,
+                                                   const std::vector<WebInterfaceFile> &new_files);
+
+// Directories (relative to 0:/www) that held old files and hold none of the new ones, deepest
+// first, so deleting them in order removes nested empty folders before their parents.
+std::vector<std::string> stale_web_interface_dirs(const std::vector<std::string> &old_dirs,
+                                                  const std::vector<WebInterfaceFile> &new_files);
+
+// Every directory the bundle needs (relative to 0:/www), parents before children.
+std::vector<std::string> web_interface_dirs(const std::vector<WebInterfaceFile> &files);
 
 // Reports download/extract progress. Returning false cancels the fetch.
 using FirmwareProgressFn = std::function<bool(const std::string &stage, uint64_t done, uint64_t total)>;
@@ -144,8 +199,9 @@ private:
     std::string m_directory;
 };
 
-// A single user-picked .uf2/.bin. The role is inferred from the file name against what the board
-// reported, so a locally built image drops straight in. This is the bench workflow.
+// A single user-picked .uf2/.bin, or a web interface zip (UnlayeredWebControl*.zip or
+// DuetWebControl*.zip). The role is inferred from the file name against what the board reported,
+// so a locally built image drops straight in. This is the bench workflow.
 class LocalFileFirmwareSource : public FirmwareSource
 {
 public:
@@ -187,9 +243,9 @@ public:
         std::string tag;
         // Include releases marked as pre-release when resolving "latest".
         bool allow_prerelease = true;
-        // Optional token for private repositories. Leaving this empty is strongly preferred:
-        // a public artifacts repository avoids shipping a credential inside the application.
-        std::string token;
+        // Optional credential. The firmware feed is public and the application leaves this empty;
+        // when set, it is attached only to requests on its own site (FeedCredential::token_for).
+        FeedCredential credential;
         // Filenames the board reported, used for the no-manifest fallback and to name uploads.
         std::string board_firmware_filename;
         std::string board_iap_filename;

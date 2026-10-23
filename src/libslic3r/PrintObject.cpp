@@ -925,9 +925,9 @@ void PrintObject::contour_z()
     m_print->set_status(40, L("Z contouring"));
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - start";
 
-    if (m_model_object->instances.size() != 1) {
-        throw RuntimeError("ContourZ: unexpected number of instances");
-    }
+    // Several copies on the plate are fine: the copies this PrintObject prints differ only by where
+    // they sit (a copy turned another way is its own PrintObject), so they share object_to_slice()
+    // and one contour serves them all.
 
     // The model parts this object slices, as raw_mesh() merges them -- except that a cut-plane
     // segment owns only some directed parts (segment_includes_volume), and a ray must not land on

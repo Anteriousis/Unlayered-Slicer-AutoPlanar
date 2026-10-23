@@ -488,6 +488,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ReleaseNote.hpp
     GUI/AutoUpdater.cpp
     GUI/AutoUpdater.hpp
+    GUI/PrinterUpdateOffer.cpp
+    GUI/PrinterUpdateOffer.hpp
     GUI/RemovableDriveManager.cpp
     GUI/RemovableDriveManager.hpp
     GUI/SavePresetDialog.cpp
@@ -563,6 +565,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/WebAppBridge.hpp
     GUI/WebAppPanel.cpp
     GUI/WebAppPanel.hpp
+    GUI/WebAppPresetShare.cpp
+    GUI/WebAppPresetShare.hpp
     GUI/WebAppSettings.cpp
     GUI/WebAppSettings.hpp
     GUI/WebAppSlot.hpp
@@ -574,6 +578,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrivacySetupDialog.hpp
     GUI/ModelUploadConsentDialog.cpp
     GUI/ModelUploadConsentDialog.hpp
+    GUI/OtherSlicerImportDialog.cpp
+    GUI/OtherSlicerImportDialog.hpp
     GUI/WebUserLoginDialog.cpp
     GUI/WebUserLoginDialog.hpp
     GUI/WebViewDialog.cpp
@@ -729,6 +735,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrivacyChoiceStats.hpp
     Utils/DiagnosticsAllowlist.cpp
     Utils/DiagnosticsAllowlist.hpp
+    Utils/PrinterUpdateCheck.cpp
+    Utils/PrinterUpdateCheck.hpp
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp
@@ -758,6 +766,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/FirmwareBundle.hpp
     Utils/SysFilesBundle.cpp
     Utils/SysFilesBundle.hpp
+    Utils/SysFilesUpdater.cpp
+    Utils/SysFilesUpdater.hpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
     Utils/EmbossStyleManager.cpp

@@ -154,6 +154,8 @@
 #include "slic3r/Utils/UsageTelemetry.hpp"
 #include "slic3r/Utils/PrivacyConsent.hpp"
 #include "PrivacySetupDialog.hpp"
+#include "PrinterUpdateOffer.hpp"
+#include "OtherSlicerImportDialog.hpp"
 #include "ModelMall.hpp"
 #include "HintNotification.hpp"
 
@@ -1045,6 +1047,75 @@ void ask_privacy_choice_once(GUI_App &app, bool wizard_showed)
     });
 }
 
+// Unlayered 2026-10-22: after a crash usage diagnostics did not cover, the next launch asks
+// whether to send that one report. Shared diagnostics already send it, unasked.
+class CrashReportDialog : public DPIDialog
+{
+public:
+    CrashReportDialog(wxWindow *parent, const std::vector<nlohmann::json> &crashes)
+        : DPIDialog(parent, wxID_ANY, _L("Send a crash report?"), wxDefaultPosition, wxDefaultSize,
+                    wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU)
+    {
+        auto *main = new wxBoxSizer(wxVERTICAL);
+        auto *text = new wxStaticText(
+            this, wxID_ANY,
+            wxString::Format(_L("%s closed unexpectedly last time. Send a crash report to Unlayered so we can fix it?"),
+                             SLIC3R_APP_FULL_NAME));
+        text->Wrap(FromDIP(440));
+        main->Add(text, 0, wxALL, FromDIP(16));
+
+        // Exactly what would be sent: the same properties, in plain words.
+        wxString details = _L("It contains only:") + "\n";
+        const nlohmann::json &c = crashes.back();
+        auto line = [&](const wxString &label, const char *key) {
+            if (c.contains(key) && !c[key].is_null())
+                details += "  " + label + ": " + wxString::FromUTF8(c[key].is_string() ? c[key].get<std::string>() : c[key].dump()) + "\n";
+        };
+        line(_L("Version"), "version");
+        line(_L("What it was doing"), "phase");
+        line(_L("Error"), "exception");
+        line(_L("Where"), "at");
+        line(_L("Running for (seconds)"), "uptime_s");
+        details += _L("No models, file names, settings or personal information. Sent once, not linked to this computer.");
+        auto *list = new wxStaticText(this, wxID_ANY, details);
+        list->Wrap(FromDIP(440));
+        main->Add(list, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+
+        auto *buttons = new wxBoxSizer(wxHORIZONTAL);
+        auto *no      = new wxButton(this, wxID_NO, _L("Don't Send"));
+        auto *yes     = new wxButton(this, wxID_YES, _L("Send Crash Report"));
+        no->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_NO); });
+        yes->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_YES); });
+        yes->SetDefault();
+        buttons->AddStretchSpacer();
+        buttons->Add(no, 0, wxRIGHT, FromDIP(8));
+        buttons->Add(yes);
+        main->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+
+        SetSizerAndFit(main);
+        Centre(wxBOTH);
+        wxGetApp().UpdateDlgDarkUI(this);
+        yes->SetFocus();
+    }
+
+protected:
+    void on_dpi_changed(const wxRect &) override { Fit(); Refresh(); }
+};
+
+void ask_crash_report_once(GUI_App &app)
+{
+    std::vector<nlohmann::json> crashes = UsageTelemetry::unreported_crashes();
+    if (crashes.empty())
+        return;
+    run_when_no_dialog(app, [&app, crashes]() {
+        CrashReportDialog dlg(app.mainframe, crashes);
+        const bool        send = dlg.ShowModal() == wxID_YES; // closing the window counts as no
+        UsageTelemetry::answer_unreported_crashes(send);
+        BOOST_LOG_TRIVIAL(info) << "crash report: " << crashes.size() << " unreported crash(es), the person said "
+                                << (send ? "send" : "don't send");
+    });
+}
+
 void stop_usage_diagnostics()
 {
     s_usage_timer.reset();
@@ -1279,7 +1350,18 @@ void GUI_App::post_init()
             m_auto_updater->on_startup();
             m_auto_updater->show_whats_new(cw_showed);
             ask_privacy_choice_once(*this, cw_showed);
+            ask_crash_report_once(*this);
+            // Unlayered 0.1.7: a slicer that is not signed in is asked to, once per new version.
+            m_auto_updater->ask_sign_in_after_update(cw_showed);
+            // Unlayered 0.1.7: presets in PrusaSlicer / OrcaSlicer / Bambu Studio, offered once.
+            ask_import_other_slicers_once(*this, cw_showed);
             this->check_new_version_sf();
+            // After the account is loaded, which the configuration feed needs. The selected
+            // printer was already loaded before this existed, so it is handed over once here;
+            // later selections arrive through Sidebar::update_all_preset_comboboxes().
+            m_printer_update_offer = std::make_unique<PrinterUpdateOffer>(*this);
+            if (preset_bundle)
+                m_printer_update_offer->on_printer_selected(preset_bundle->printers.get_edited_preset().config);
             const auto cloud_provider = get_printer_cloud_provider();
             if (is_user_login(cloud_provider) && !app_config->get_stealth_mode()) {
               // this->check_privacy_version(0);
@@ -3061,6 +3143,9 @@ int GUI_App::OnExit()
     } catch (...) {
         BOOST_LOG_TRIVIAL(error) << "Failed to clean up encrypt bbl network log file";
     }
+
+    // Its worker threads re-check a liveness flag before touching it, so this only stops them.
+    m_printer_update_offer.reset();
 
     // Last, so nothing above can still be holding a file the installer replaces. The installer
     // itself also waits for this process to be gone before it starts.
@@ -10190,6 +10275,9 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
         m_netplugin_download_offered = true;
         CallAfter([this] { ShowDownNetPluginDlg(); });
     }
+
+    // Unlayered 0.1.7: settings from other slicers are imported by the wizard itself, on its own
+    // step before the printer picker (guide 5import), so there is nothing left to do here.
 
     return res;
 }

@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="max-age=7200" />
+<title>Sign in to Unlayered</title>
+<link rel="stylesheet" type="text/css" href="../../include/global.css" />
+<link rel="stylesheet" type="text/css" href="../css/common.css" />
+<link rel="stylesheet" type="text/css" href="../css/dark.css" />
+<link rel="stylesheet" type="text/css" href="13signin.css" />
+<script type="text/javascript" src="../js/jquery-2.1.1.min.js"></script>
+<script type="text/javascript" src="../js/json2.js"></script>
+<script type="text/javascript" src="../../data/text.js"></script>
+<script type="text/javascript" src="../js/globalapi.js"></script>
+<script type="text/javascript" src="../js/common.js"></script>
+<script type="text/javascript" src="13signin.js"></script>
+</head>
+<!-- Unlayered 0.1.7: "Sign in to Unlayered", right after the privacy page (13) and
+     only while the slicer is not signed in - every time the wizard runs, not once. WebGuideDialog
+     "request_page_after_privacy" routes here; Continue/Skip asks "request_page_after_signin" for
+     5import or 21, and Back on those pages returns here while this step was shown.
+     Sign in = the same browser sign-in as Help > Sign in (AutoUpdater::sign_in_for_setup). Skipping
+     is allowed: "Skip for now" in the corner. All texts come from the slicer, translated. -->
+<body onLoad="OnInit()">
+<div id="Title">
+	<div id="SignInTitle">Sign in to Unlayered</div>
+</div>
+<div id="Content">
+	<div class="FeatureText"><a class="TextS1" id="SignInText"></a></div>
+	<div id="SignInArea">
+		<div class="ButtonStyleConfirm" id="SignInBtn" onclick="DoSignIn()">Sign in</div>
+		<div class="FeatureText" id="SignedInText" hidden></div>
+		<div class="FeatureText" id="FailedText" hidden></div>
+	</div>
+</div>
+<div id="AcceptArea">
+	<div class="ButtonStyleRegular ButtonTypeChoice trans" tid="t8" id="PreBtn" onclick="GoBack()">Back</div>
+	<div class="ButtonStyleConfirm ButtonTypeChoice trans" tid="t9" id="NextBtn" onclick="GoNext()" hidden>Next</div>
+	<a id="SkipLink" onclick="GoNext()"></a>
+</div>
+</body>
+</html>

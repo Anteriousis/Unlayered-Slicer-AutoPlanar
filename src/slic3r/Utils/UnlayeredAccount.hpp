@@ -69,6 +69,11 @@ public:
     bool                   signed_in() const;
     std::optional<Profile> profile() const;
 
+    // The stored device token, empty when signed out. For the printer-update feeds, which take it
+    // inside a FeedCredential bound to site_url() and attach it only to requests on that site;
+    // nothing may send it anywhere without that check.
+    std::string device_token() const { return bearer(); }
+
     // Step 1 of signing in.
     bool start_handoff(Handoff &out, std::string &error) const;
     // Step 3, polled every couple of seconds while the person confirms in their browser. On

@@ -461,7 +461,7 @@ bool download_installer(const AppUpdateAsset &asset, fs::path &dest_out, AppUpda
     bool        cancelled = false;
     std::string payload;
 
-    // The installer host drops long transfers part-way (Vercel Blob cut a 190 MB download at about
+    // The installer host drops long transfers part-way (its blob store cut a 190 MB download at about
     // 66 s, 131 MB in, every time on a 2 MB/s link), so a dropped connection resumes with a Range
     // request instead of failing. Only a network error resumes: an HTTP error status is final.
     constexpr int max_attempts = 8;

@@ -48,7 +48,7 @@ constexpr const char *EARLIER_CHOICE_REPORTED_KEY = "update_check_report_choice_
 
 // Decisions that belong to counsel, not to code. A flag can only be turned on by changing
 // legal_approvals() in PrivacyConsent.cpp, in a reviewed commit: none of them is a user or
-// app-config setting. us_preselect_share is ON since 2026-10-14 (counsel's approval per Alex).
+// app-config setting. us_preselect_share is ON since 2026-10-14.
 struct LegalApprovals
 {
     // United States: may the consent screen start with "Share usage diagnostics" selected? Off:
@@ -56,6 +56,10 @@ struct LegalApprovals
     bool us_preselect_share = false;
     // May privacy-choice statistics (PrivacyChoiceStats) be transmitted at all?
     bool privacy_choice_stats = false;
+    // After a crash that usage diagnostics did not cover (not shared at the time, or not now), may the
+    // next launch ASK whether to send that one crash report (UsageTelemetry::unreported_crashes)?
+    // Off: such a crash is never mentioned and nothing is sent.
+    bool crash_report_prompt = false;
 };
 const LegalApprovals &legal_approvals();
 
@@ -64,7 +68,7 @@ const LegalApprovals &legal_approvals();
 std::string region_code(const std::string &guide_region); // "North America" -> "north_america"; unknown -> ""
 bool        is_region_code(const std::string &code);
 
-// The setup wizard's region page (Alex 2026-10-13): one click names the place, and the place
+// The setup wizard's region page (2026-10-13): one click names the place, and the place
 // decides the privacy rules. No separate country page. Each place is a record's region + country.
 struct Place
 {

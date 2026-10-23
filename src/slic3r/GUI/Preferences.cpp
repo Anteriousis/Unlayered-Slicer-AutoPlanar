@@ -1999,20 +1999,9 @@ void PreferencesDialog::create_items()
     // into a customer profile. The widgets are in git history; WEB_APP_BRIDGE.md section 7 lists
     // every key.
 
-    //// GENERAL > Printer updates
-    // The configuration feed is per-customer and gated, so it needs to know who is asking. The
-    // token is pasted in once from the customer's account page; it is an identifier rather than a
-    // grant, and entitlement is re-checked at the server on every request. Firmware updates are
-    // public and need nothing here.
-    g_sizer->Add(create_item_title(_L("Printer updates")), 1, wxEXPAND);
-
-    auto item_printer_updates_token = create_item_input(
-        _L("Access token"), "",
-        _L("Paste the slicer access token from your account page on the Unlayered website. It lets "
-           "this computer download configuration updates for your printer. Leave it empty if you "
-           "have not been given one -- firmware updates do not need it."),
-        SETTING_PRINTER_UPDATES_TOKEN, {}, wxEmptyString, wxFILTER_NONE);
-    g_sizer->Add(item_printer_updates_token);
+    // Printer updates have no setting here. The configuration feed knows who is asking from the
+    // Unlayered account sign-in (Help menu), and firmware updates are public. The pasted "Access
+    // token" that used to sit here is gone: the feed accepts only the account's device token.
 
 #if 0
     g_sizer->Add(create_item_title(_L("Filament Grouping")), 1, wxEXPAND);
@@ -2063,6 +2052,16 @@ void PreferencesDialog::create_items()
             refresh_theme_items(); // the theme in effect may have changed with the base
         });
     g_sizer->Add(item_color_scheme);
+    // Choosing a theme of the other base switches the colour scheme (ThemeManager::select), so this
+    // list follows the setting whenever the theme items refresh.
+    for (wxSizerItem* child : item_color_scheme->GetChildren())
+        if (auto* scheme_combo = dynamic_cast<::ComboBox*>(child->GetWindow())) {
+            m_theme_refresh.push_back([scheme_combo]() {
+                const std::string scheme = wxGetApp().app_config->get("color_scheme");
+                scheme_combo->SetSelection(scheme == "light" ? 1 : scheme == "dark" ? 2 : 0);
+            });
+            break;
+        }
 
     auto item_font_scale = create_item_combobox(_L("Font scale"),
         _L("Scale of the interface text. Larger values need a larger window; the settings panels grow with the text. "
@@ -2160,8 +2159,17 @@ void PreferencesDialog::create_items()
             if (*repopulating)
                 return;
             const auto& themes = ThemeManager::get().themes();
-            if (e.GetSelection() >= 0 && e.GetSelection() < int(themes.size()))
+            if (e.GetSelection() >= 0 && e.GetSelection() < int(themes.size())) {
+                const bool base_changes = themes[e.GetSelection()].dark != wxGetApp().dark_mode();
                 ThemeManager::get().select(themes[e.GetSelection()].name);
+#ifdef __WINDOWS__
+                // As the Colour scheme list does after apply_color_scheme().
+                if (base_changes)
+                    set_dark_mode();
+#else
+                (void) base_changes;
+#endif
+            }
             refresh_theme_items();
         });
         m_theme_refresh.push_back(repopulate);

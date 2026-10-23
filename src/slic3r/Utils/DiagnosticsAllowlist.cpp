@@ -39,6 +39,9 @@ const std::map<std::string, std::set<std::string>> &events()
         {"update_offered", {"to", "by_user", "signed_in", "action", "why"}},
         {"update_download", {"to", "result", "seconds", "reason", "http_status"}},
         {"account_signin", {"result", "from"}},
+        // The printer Config updater (SysFilesUpdateJob): the configuration versions, never the
+        // printer's address, name or files.
+        {"printer_config_update", {"to", "from", "outcome", "files", "rolled_back", "firmware"}},
     };
     return table;
 }

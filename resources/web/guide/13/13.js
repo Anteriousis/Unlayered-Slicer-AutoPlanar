@@ -55,8 +55,31 @@ function HandleStudio( pVal )
 		if( m_State && m_State['privacy_only'] )
 			SendPrivacy({'command':'privacy_finish'});
 		else
-			window.location.href="../21/index.html";
+		{
+			// Unlayered 0.1.7: the "Settings from other slicers" step (guide 5import) comes next when
+			// the slicer found something to import; otherwise the printer picker, as before.
+			m_Saving=true; // keeps Continue disabled while the slicer looks
+			UpdateState();
+			SendPrivacy({'command':'request_page_after_privacy'});
+			// Should no answer come, the printer picker anyway.
+			setTimeout(function(){ GoNextPage('21'); }, 15000);
+		}
 	}
+	else if( strCmd=='page_after_privacy' )
+	{
+		GoNextPage(pVal['page']);
+	}
+}
+
+var m_Left=false;
+function GoNextPage( page )
+{
+	if( m_Left )
+		return;
+	m_Left=true;
+	// Unlayered 0.1.7: 13signin while the slicer is not signed in, then 5import, then the picker.
+	let known={'13signin':1,'5import':1};
+	window.location.href="../"+(known[page] ? page : '21')+"/index.html";
 }
 
 function Choice()

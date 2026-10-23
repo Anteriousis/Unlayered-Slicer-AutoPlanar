@@ -28,6 +28,8 @@
 #include <cmath>
 
 #include "imgui/imgui_internal.h"
+#include <wx/filesys.h>
+#include <wx/filename.h>
 
 namespace Slic3r { namespace GUI {
 
@@ -1435,7 +1437,7 @@ void GLGizmoCutPlanes::render_cut_plane_input_window(CutConnectors &connectors, 
     // Bundled offline walkthrough (resources/web/tutorial); also under Help > Multiplanar Tutorial.
     ImGui::Separator();
     if (m_imgui->button(_L("Tutorial")))
-        wxLaunchDefaultBrowser(wxString::Format("file://%s/web/tutorial/multiplanar.html", from_u8(Slic3r::resources_dir())), wxBROWSER_NEW_WINDOW);
+        wxLaunchDefaultBrowser(wxFileSystem::FileNameToURL(wxFileName(from_u8(Slic3r::resources_dir() + "/web/tutorial/multiplanar.html"))), wxBROWSER_NEW_WINDOW);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", _u8L("Open the multiplanar printing tutorial").c_str());
 }

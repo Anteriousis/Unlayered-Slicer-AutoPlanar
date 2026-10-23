@@ -186,6 +186,7 @@
 #include "nlohmann/json.hpp"
 
 #include "PhysicalPrinterDialog.hpp"
+#include "PrinterUpdateOffer.hpp"
 #include "PrintHostDialogs.hpp"
 #include "PlateSettingsDialog.hpp"
 #include "DailyTips.hpp"
@@ -3498,6 +3499,12 @@ void Sidebar::update_all_preset_comboboxes()
             p_mainframe->load_printer_url();
         else if (!use_native_device_tab)
             p_mainframe->load_printer_url(url, apikey);
+
+        // This is where the slicer settles which physical printer it is talking to, so it is also
+        // where an Unlayered printer is checked for published firmware and configuration - once
+        // per printer per session, on a worker thread. Ignores every other host type.
+        if (auto *offer = wxGetApp().printer_update_offer())
+            offer->on_printer_selected(cfg);
 
 
         p_mainframe->set_print_button_to_default(print_btn_type);

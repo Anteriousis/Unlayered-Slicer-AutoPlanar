@@ -1430,7 +1430,11 @@ bool PrintObject::refine_curved_regions_for_paths()
             route_writer.apply_print_config(pc);route_writer.set_is_bbl_machine(m_print->is_BBL_printer());
             const auto used=m_print->extruders();route_writer.set_extruders(used);route_writer.set_extruder(used.front());
             const double clearance=std::max(2.,std::max(pc.nonplanar_approach_distance.value,pc.nonplanar_departure_distance.value));
-            route_writer.set_curved_blend(m_curved_field,*m_curved_domain,Vec2d::Zero(),clearance,vz,int(nozzle));
+            // Match final G-code: a per-tip height is meaningful only on a
+            // fixed dual carriage. Single-nozzle presets may retain a zero
+            // placeholder there; their common machine/Virtual Z limit applies.
+            route_writer.set_curved_blend(m_curved_field,*m_curved_domain,Vec2d::Zero(),clearance,vz,
+                pc.nozzle_diameter.size()==2?int(nozzle):-1);
         }
         const PrintRegionConfig* cost_region=&printing_region(0).config();
         const auto physical=[&](double x,double y,double w) {return Vec3d(x,y,m_curved_field?m_curved_field->world_z(x,y,w):w);};

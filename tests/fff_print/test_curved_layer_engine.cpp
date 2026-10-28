@@ -1311,6 +1311,18 @@ TEST_CASE("Candidate route cost matches the production writer's emitted detour",
     REQUIRE_FALSE(fallback.local_route);REQUIRE(fallback.safe_z>=45.);
 }
 
+TEST_CASE("Single-nozzle candidate costing ignores unused per-tip Z placeholders", "[curved-engine][cost]")
+{
+    auto c=curved_config();
+    c.set_deserialize_strict({{"automatic_layer_strategy","1"},{"curved_layer_blend","0"},
+                             {"extruder_printable_height","0"}});
+    Print print;Model model;Test::init_print({ramp(2.)},print,model,c);print.process();
+    const auto* object=print.objects().front();INFO(object->layer_strategy_decision());
+    require_best_generated_choice(*object);
+    REQUIRE(object->curved_field());
+    REQUIRE(object->layer_strategy_decision().find("Invalid curved travel state")==std::string::npos);
+}
+
 TEST_CASE("Route-specific writer clearance covers bead width and off-axis deposition", "[curved-engine][travel][motion]")
 {
     using namespace CurvedTransition;

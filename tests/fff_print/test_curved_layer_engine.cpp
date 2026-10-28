@@ -626,9 +626,32 @@ TEST_CASE("Automatic slicing selects independent fields for different models and
         config.set_deserialize_strict({{"sparse_infill_density","15%"}});
         const TriangleMesh roof(AutoPlanesFixtures::heightfield_block(2.,2.,1,[](double x){return 10.+.05*x;}));
         Print print;Model model;Test::init_print({roof},print,model,config);
-        REQUIRE_FALSE(Test::gcode(print).empty());REQUIRE(print.objects().front()->curved_field());
-        REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(print.objects().front()->curved_field()));
-        REQUIRE(print.objects().front()->printing_region(0).config().sparse_infill_density.value==15.);
+        REQUIRE_FALSE(Test::gcode(print).empty());
+        const auto* object=print.objects().front();
+        require_best_generated_choice(*object);
+        // Sparse infill must survive native generation and route costing. A
+        // valid roof can still lose to planar when its detours cost too much;
+        // an invalid or unassessed proposal must not satisfy this regression.
+        bool measured_roof=false;
+        for(const auto& line:object->layer_region_records()) {
+            CurvedTransition::RegionDecision r;
+            REQUIRE(CurvedTransition::RegionDecision::decode(line,r));
+            INFO(line);
+            if(r.kind!=0 || !r.has_breakdown) continue;
+            measured_roof=true;
+            REQUIRE(r.roof_gain_percent>0.);
+            REQUIRE(r.motion_seconds>0.);
+            REQUIRE(r.travel_routes>0);
+            if(!object->curved_field()) {
+                REQUIRE_FALSE(r.selected);
+                REQUIRE(r.gain<=1e-5);
+                REQUIRE(r.rejection_reason.find("Lower net score")!=std::string::npos);
+            }
+        }
+        REQUIRE(measured_roof);
+        if(object->curved_field())
+            REQUIRE(std::dynamic_pointer_cast<const CurvedTransition::Regions>(object->curved_field()));
+        REQUIRE(object->printing_region(0).config().sparse_infill_density.value==15.);
     }
     SECTION("copies of one model") {
         config.set_deserialize_strict({{"print_sequence","by layer"}});
@@ -639,6 +662,25 @@ TEST_CASE("Automatic slicing selects independent fields for different models and
         REQUIRE(print.num_object_instances()==2);
         for(const auto* o:print.objects()) REQUIRE(o->curved_field());
     }
+}
+
+TEST_CASE("Authored curved layers retain sparse infill through native G-code export", "[curved-engine][planes][sparse-infill]")
+{
+    auto config=curved_config();
+    config.set_deserialize_strict({{"automatic_layer_strategy","0"},{"sparse_infill_density","15%"}});
+    Print print;Model model;
+    Test::init_print({TriangleMesh(its_make_cube(20.,20.,12.))},print,model,config);
+    add_plane(*model.objects.front(),6.,.035);
+    print.apply(model,config);print.process();
+    REQUIRE(print.objects().front()->curved_field());
+    REQUIRE(print.objects().front()->printing_region(0).config().sparse_infill_density.value==15.);
+    ScopedTemporaryFile output(".gcode");GCodeProcessorResult result;
+    REQUIRE_NOTHROW(print.export_gcode(output.string(),&result,nullptr));
+    size_t curved_sparse=0;
+    for(const auto& move:result.moves)
+        if(move.type==EMoveType::Extrude && move.delta_extruder>0. && move.extrusion_role==erInternalInfill &&
+           result.tool_axes[move.tool_axis_id].head<2>().norm()>1e-5f) ++curved_sparse;
+    REQUIRE(curved_sparse>20);
 }
 
 TEST_CASE("Regional cost selection retains planar bridges and normal support constraints", "[curved-engine][regions][supports]")

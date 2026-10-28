@@ -12,6 +12,7 @@
 #include "CurvedRamp.hpp"
 #include "CurvedPathOptimization.hpp"
 #include "CurvedTravelClearance.hpp"
+#include "CurvedTravelPlan.hpp"
 #include "GCode/CoolingBuffer.hpp"
 #include "GCode/MachineKinematics.hpp"
 #include <memory>
@@ -134,6 +135,9 @@ public:
     // its final physical layer point. Intermediate points are not deposition.
     std::string travel_to_curved_path(const std::vector<Vec3d>& slice_points,
                                      const std::string& comment = std::string());
+    // Physical route evaluation shared with automatic candidate costing.
+    // This does not emit G-code or change writer/deposition state.
+    CurvedTransition::TravelPlan plan_curved_travel(const std::vector<Vec3d>& physical_points) const;
     double curved_slope_bound() const {return m_curved_field?m_curved_field->slope_bound():0.;}
     bool curved_path_is_planar(const Vec2d& lo,const Vec2d& hi,double z,double height) const {
         return m_curved_field && m_curved_field->identity_on_box(lo.x()-m_curved_origin.x(),hi.x()-m_curved_origin.x(),

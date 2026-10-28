@@ -74,7 +74,10 @@ void require_best_generated_choice(const PrintObject& object)
     for(const auto& line:object.layer_region_records()) {
         CurvedTransition::RegionDecision r;
         REQUIRE(CurvedTransition::RegionDecision::decode(line,r));
-        if(r.selected) best=std::max(best,r.gain);
+        if(r.selected) {REQUIRE(r.has_breakdown);best=std::max(best,r.gain);}
+        REQUIRE(r.local_routes<=r.travel_routes);
+        if(r.has_breakdown && r.kind==2) {REQUIRE(r.time_delta_seconds==0.);REQUIRE(r.roof_gain_percent==0.);}
+        if(!r.selected) REQUIRE_FALSE(r.rejection_reason.empty());
         planar|=r.kind==2;records.push_back(r);
     }
     REQUIRE(planar);REQUIRE(std::isfinite(best));REQUIRE(best>=0.);
@@ -1273,6 +1276,41 @@ TEST_CASE("Route-specific writer clearance retains other objects and unknown-mot
     REQUIRE(std::regex_search(still_global,z,zword));REQUIRE(std::stod(z[1])>=32.);
 }
 
+TEST_CASE("Candidate route cost matches the production writer's emitted detour", "[curved-engine][travel][cost]")
+{
+    using namespace CurvedTransition;
+    PrintConfig config;config.apply(curved_config(),true);
+    config.travel_speed.values={80.};config.travel_speed_z.values={3.};
+    GCodeWriter writer;writer.apply_print_config(config);writer.set_extruders({0});writer.set_extruder(0);
+    const auto identity=std::make_shared<Identity>();
+    const ModelDomain domain{0.,200.,0.,200.,40.,0.};
+    writer.set_curved_plate_bound(45.);writer.set_curved_blend(identity,domain,Vec2d::Zero(),2.,5.);
+    writer.set_curved_path(30.,.45,.2);
+    writer.travel_to_xyz(Vec3d(190.,190.,30.));writer.extrude_to_xy(Vec2d(195.,190.),1.);
+    writer.set_curved_path(2.,.45,.2);
+    writer.travel_to_xyz(Vec3d(10.,10.,2.));writer.extrude_to_xy(Vec2d(15.,10.),1.);
+    const std::vector<Vec3d> route{{15.,12.,2.},{10.,12.,2.}};
+    const auto plan=writer.plan_curved_travel(route);
+    const Vec3d before=writer.get_position();
+    REQUIRE(plan.local_route);REQUIRE(plan.xy_mm==Catch::Approx(7.));
+    REQUIRE(writer.get_position().isApprox(before)); // costing has no output/state side effects
+    const std::string emitted=writer.travel_to_curved_path(route);
+    GCodeReader reader;reader.parse_buffer("G1 X15 Y10 Z2 F4800\n");
+    double seconds=0.,highest=0.;
+    reader.parse_buffer(emitted,[&](GCodeReader& r,const GCodeReader::GCodeLine& l) {
+        if(!l.cmd_is("G1")) return;
+        const double distance=std::hypot(std::hypot(l.dist_X(r),l.dist_Y(r)),l.dist_Z(r));
+        if(distance>0.) seconds+=distance/(l.new_F(r)/60.);
+        highest=std::max(highest,double(l.new_Z(r)));
+    });
+    REQUIRE(seconds==Catch::Approx(plan.seconds).margin(1e-5));
+    REQUIRE(highest==Catch::Approx(plan.safe_z).margin(1e-5));
+    REQUIRE(writer.get_position().isApprox(route.back()));
+    writer.set_current_position_clear(false);
+    const auto fallback=writer.plan_curved_travel({Vec3d(20.,12.,2.)});
+    REQUIRE_FALSE(fallback.local_route);REQUIRE(fallback.safe_z>=45.);
+}
+
 TEST_CASE("Route-specific writer clearance covers bead width and off-axis deposition", "[curved-engine][travel][motion]")
 {
     using namespace CurvedTransition;
@@ -1364,6 +1402,7 @@ TEST_CASE("Imported Preview preserves explicit layer modes and bounded selection
               "; layer_region: v1 4 0 1 10 20 4 3 2.5 0.25 45 12 chosen roof fixture\n"
               "; layer_region: v1 5 0 0 12 22 4 3 2.5 0 50 14 rejected contact fixture\n"
               "; layer_region: v1 6 0 3 10 20 4 3 2.5 0 45 12 invalid boolean\n"
+              "; layer_region: v2 7 0 0 10 20 4 3 2.5 -0.1 60 12 1 5 -2 15 33.333 0 1 20 10 7 \"Roof candidate\" \"Lower score than Planar\"\n"
               "M83\nG90\n;TYPE:Outer wall\n;HEIGHT:0.2\n;WIDTH:0.45\n"
               "G1 X0 Y0 Z0.2 F600\n"
               ";LAYER_MODE:1\nG1 X10 Y0 Z0.3 E1\n"
@@ -1379,10 +1418,15 @@ TEST_CASE("Imported Preview preserves explicit layer modes and bounded selection
     REQUIRE(modes==std::vector<unsigned>{1,2,255,255});
     REQUIRE(replay.get_result().layer_strategy_decisions.size()==1);
     REQUIRE(replay.get_result().layer_strategy_decisions.front()=="Automatic selection: curved. Fixture region");
-    REQUIRE(replay.get_result().layer_region_records.size()==2);
+    REQUIRE(replay.get_result().layer_region_records.size()==3);
     CurvedTransition::RegionDecision region;
     REQUIRE(CurvedTransition::RegionDecision::decode(replay.get_result().layer_region_records.front(),region));
     REQUIRE(region.selected);REQUIRE(region.id==4);REQUIRE(region.x==10.);REQUIRE(region.y==20.);
+    REQUIRE_FALSE(region.has_breakdown);
+    REQUIRE(CurvedTransition::RegionDecision::decode(replay.get_result().layer_region_records.back(),region));
+    REQUIRE(region.id==7);REQUIRE(region.has_breakdown);REQUIRE(region.roof_gain_percent==5.);
+    REQUIRE(region.time_delta_seconds==15.);REQUIRE(region.local_routes==7);
+    REQUIRE(region.rejection_reason=="Lower score than Planar");
     GCodeProcessorResult copied;copied=replay.get_result();
     REQUIRE(copied.layer_strategy_decisions==replay.get_result().layer_strategy_decisions);
     REQUIRE(copied.layer_region_records==replay.get_result().layer_region_records);

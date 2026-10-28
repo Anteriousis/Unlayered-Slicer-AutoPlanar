@@ -22,6 +22,7 @@
 #include "UndersideAnalysis.hpp"
 #include "CurvedUnderside.hpp"
 #include "CurvedJointPlanning.hpp"
+#include "GCodeWriter.hpp"
 #include "AutoPlanes.hpp"
 //BBS
 #include "ShortestPath.hpp"
@@ -1347,7 +1348,12 @@ bool PrintObject::refine_curved_regions_for_paths()
             const auto& t=plan.trials[k];
             report<<t.name<<": ";
             if(!t.valid) report<<"rejected ("<<t.reason<<"); ";
-            else report<<"score "<<t.score<<", support "<<t.cost.support_mm3<<" mm3, motion "<<t.cost.motion_seconds<<" s; ";
+            else {
+                const auto b=planning_breakdown(plan.trials.back().surface,t.surface,plan.trials.back().cost,t.cost);
+                report<<"score "<<t.score<<", support "<<t.cost.support_mm3<<" mm3, motion "<<t.cost.motion_seconds<<" s"
+                      <<", roof gain "<<100.*b.roof<<"%, underside gain "<<100.*b.under
+                      <<"%, time change "<<b.time_seconds<<" s ("<<100.*b.time<<"%); ";
+            }
             std::vector<RegionDecision> records;
             if(const auto roof=roof_part(t.field)) for(const auto& p:roof->patches()) {
                 double z=p.hi;
@@ -1367,17 +1373,24 @@ bool PrintObject::refine_curved_regions_for_paths()
                 .5*std::hypot(t.domain.xmax-t.domain.xmin,t.domain.ymax-t.domain.ymin),0.,t.valid?t.score:0.,
                 t.cost.motion_seconds,t.cost.support_mm3,{}});
             for(auto& r:records) {
-                r.reason=t.name+": "+(!t.valid?t.reason:k==plan.chosen?
-                    (t.field?"part of best net roof/underside candidate after generated material and motion cost":"no curved candidate repaid its generated cost"):
-                    "lower net benefit than chosen candidate");
+                r.reason=t.name+": "+(k==plan.chosen?
+                    (t.field?"best net roof/underside candidate after estimated motion and material cost":"no valid curved candidate had a positive net score"):
+                    "candidate not selected");
+                if(k!=plan.chosen) r.rejection_reason=!t.valid?t.reason:
+                    "Lower net score than "+plan.trials[plan.chosen].name+" after surface gain, time and material costs.";
                 if(t.valid) {
-                    const auto& base=plan.trials.back().surface;
-                    r.reason+="; candidate roof alignment gain "+std::to_string(100.*(base.roof_error-t.surface.roof_error)/std::max(.01,base.roof_error))+
-                        "%; underside deficit reduction "+std::to_string(base.underside_deficit_mm2-t.surface.underside_deficit_mm2)+" mm2";
+                    const auto b=planning_breakdown(plan.trials.back().surface,t.surface,plan.trials.back().cost,t.cost);
+                    r.has_breakdown=true;r.roof_gain_percent=100.*b.roof;r.underside_gain_percent=100.*b.under;
+                    r.time_delta_seconds=b.time_seconds;r.time_delta_percent=100.*b.time;
+                    r.support_saved_mm3=b.support_mm3;r.model_added_mm3=b.material_mm3;
+                    r.travel_seconds=t.cost.travel_seconds;r.travel_routes=t.cost.travel_routes;r.local_routes=t.cost.local_routes;
                 }
                 if(plan.decisions.size()<256) {r.id=int(plan.decisions.size());plan.decisions.push_back(std::move(r));}
             }
-            for(auto r:t.rejected) if(plan.decisions.size()<256) {r.id=int(plan.decisions.size());plan.decisions.push_back(std::move(r));}
+            for(auto r:t.rejected) if(plan.decisions.size()<256) {
+                r.id=int(plan.decisions.size());r.rejection_reason=r.reason;r.reason="Roof patch retained planar";
+                plan.decisions.push_back(std::move(r));
+            }
         }
         for(const auto& r:plan.decisions) m_layer_region_records.push_back(r.encode());
         // Keep the bounded import report below the processor's per-line limit.
@@ -1385,7 +1398,7 @@ bool PrintObject::refine_curved_regions_for_paths()
         const auto old_report=m_layer_strategy_decision.find(" Generated benefit/cost choice:");
         if(old_report!=std::string::npos) m_layer_strategy_decision.resize(old_report);
         m_layer_strategy_decision+=report.str().substr(0,1400)+
-            " Motion is a generated-path kinematic estimate; roof alignment and underside deficit are geometric estimates, not physical finish or support savings.";
+            " Travel uses the production route-clearance planner on native candidate path order. Time excludes final seam/XY-detour ordering, acceleration, cooling and startup. Surface gains are geometry estimates, not measured finish or printability.";
     };
     if(plan.final) {
         if(plan.trials.at(plan.current).field && !m_curved_field)
@@ -1396,12 +1409,15 @@ bool PrintObject::refine_curved_regions_for_paths()
     trial.assessed=true;trial.reason=invalid;
     if(trial.field && !m_curved_field) trial.reason=m_layer_strategy_decision;
     trial.valid=trial.reason.empty();
-    if(trial.valid) {
+    if(trial.valid) try {
         trial.surface=surface_benefit(plan.mesh,m_curved_field.get(),plan.threshold,[this]{m_print->throw_if_canceled();});
         // Measure the generated paths, including regenerated native supports.
-        // Use the writer's bead-area correction and actual field. Routing time
-        // is a kinematic estimate (no acceleration/firmware/startup model).
-        GeneratedCost cost;std::optional<Vec3d> last;double deposited=0.;
+        // Replay the candidate's deposited beads through the production writer:
+        // its shared route planner sees exactly the same chord-width map,
+        // asymmetric envelope, gantry, rounding and unknown-motion fallback.
+        // The cost pass visits native paths before final seam/XY-detour ordering;
+        // timings remain estimates, excluding startup, cooling and acceleration.
+        GeneratedCost cost;std::optional<Vec3d> last;
         const auto& pc=m_print->config();const size_t nozzle=curved_nozzle_index();
         // Machine limit arrays include normal/silent mode entries. They are
         // not indexed by active tip; a silent-mode zero would make cost infinite.
@@ -1409,6 +1425,13 @@ bool PrintObject::refine_curved_regions_for_paths()
         const double travel=std::max(1.,pc.travel_speed.get_at(nozzle));
         const double configured_z=pc.travel_speed_z.get_at(nozzle);
         const double travel_z=std::min(vz,configured_z>0.?configured_z:travel);
+        GCodeWriter route_writer;
+        if(m_curved_field) {
+            route_writer.apply_print_config(pc);route_writer.set_is_bbl_machine(m_print->is_BBL_printer());
+            const auto used=m_print->extruders();route_writer.set_extruders(used);route_writer.set_extruder(used.front());
+            const double clearance=std::max(2.,std::max(pc.nonplanar_approach_distance.value,pc.nonplanar_departure_distance.value));
+            route_writer.set_curved_blend(m_curved_field,*m_curved_domain,Vec2d::Zero(),clearance,vz,int(nozzle));
+        }
         const PrintRegionConfig* cost_region=&printing_region(0).config();
         const auto physical=[&](double x,double y,double w) {return Vec3d(x,y,m_curved_field?m_curved_field->world_z(x,y,w):w);};
         const auto measure=[&](const ExtrusionPath& p,double w) {
@@ -1423,13 +1446,23 @@ bool PrintObject::refine_curved_regions_for_paths()
             else if(p.role()==erTopSolidInfill) speed=cost_region->top_surface_speed.get_at(nozzle);
             speed=std::max(1.,speed);++cost.paths;
             Vec3d previous=physical(unscale<double>(points.front().x()),unscale<double>(points.front().y()),w);
+            if(m_curved_field) {
+                route_writer.set_curved_path(w,p.width,p.height,is_bridge(p.role()));
+                if(!last) {
+                    // The common startup/first approach is outside this object's
+                    // cost comparison. Begin at its first deposition point.
+                    route_writer.set_position(previous);route_writer.set_current_position_clear(true);
+                }
+                const auto route=route_writer.plan_curved_travel({previous});
+                cost.motion_seconds+=route.seconds;cost.travel_seconds+=route.seconds;
+                if(!route.no_op) {++cost.travel_routes;if(route.local_route) ++cost.local_routes;}
+                route_writer.travel_to_xyz(Vec3d(unscale<double>(points.front().x()),unscale<double>(points.front().y()),w));
+            }
             if(last) {
                 const double xy=(previous.head<2>()-last->head<2>()).norm();
-                if(xy>1e-5) {
-                    if(m_curved_field) {
-                        const double safe=std::max({deposited,last->z(),previous.z()})+2.+p.width*.5*m_curved_field->slope_bound();
-                        cost.motion_seconds+=(2.*safe-last->z()-previous.z())/travel_z+xy/travel;
-                    } else cost.motion_seconds+=std::max(xy/travel,std::abs(previous.z()-last->z())/vz);
+                if(!m_curved_field && (xy>1e-5 || std::abs(previous.z()-last->z())>1e-5)) {
+                    const double seconds=std::max(xy/travel,std::abs(previous.z()-last->z())/travel_z);
+                    cost.motion_seconds+=seconds;cost.travel_seconds+=seconds;++cost.travel_routes;
                 }
             }
             for(size_t i=1;i<points.size();++i) {
@@ -1449,8 +1482,9 @@ bool PrintObject::refine_curved_regions_for_paths()
                     const double volume=p.mm3_per_mm*length*ratio;
                     (is_support(p.role())?cost.support_mm3:cost.model_mm3)+=volume;
                     cost.path_mm+=length;cost.motion_seconds+=std::max(length/speed,std::abs(next.z()-previous.z())/vz);
-                    deposited=std::max({deposited,next.z(),previous.z()});previous=next;
+                    previous=next;
                 }
+                if(m_curved_field) route_writer.extrude_to_xy(b,p.mm3_per_mm*logical*route_writer.filament()->e_per_mm3());
             }
             last=previous;
         };
@@ -1461,12 +1495,25 @@ bool PrintObject::refine_curved_regions_for_paths()
             else if(const auto* l=dynamic_cast<const ExtrusionLoop*>(&e)) for(const auto& p:l->paths) measure(p,z);
             else if(const auto* m=dynamic_cast<const ExtrusionMultiPath*>(&e)) for(const auto& p:m->paths) measure(p,z);
         };
-        for(const auto* layer:m_layers) for(const auto* r:layer->regions()) {
-            cost_region=&r->region().config();accumulate(r->perimeters,layer->print_z);accumulate(r->fills,layer->print_z);
+        // Supports must enter the obstacle map when they are printed, rather
+        // than after the entire model. Equal-height supports precede the model.
+        size_t model=0,support=0;
+        while(model<m_layers.size() || support<m_support_layers.size()) {
+            if(support<m_support_layers.size() && (model==m_layers.size() ||
+                m_support_layers[support]->print_z<=m_layers[model]->print_z+1e-6)) {
+                const auto* layer=m_support_layers[support++];
+                cost_region=&printing_region(0).config();accumulate(layer->support_fills,layer->print_z);
+            } else {
+                const auto* layer=m_layers[model++];
+                for(const auto* r:layer->regions()) {
+                    cost_region=&r->region().config();
+                    if(r->region().config().is_infill_first.value) {accumulate(r->fills,layer->print_z);accumulate(r->perimeters,layer->print_z);}
+                    else {accumulate(r->perimeters,layer->print_z);accumulate(r->fills,layer->print_z);}
+                }
+            }
         }
-        for(const auto* layer:m_support_layers) accumulate(layer->support_fills,layer->print_z);
         trial.cost=cost;
-    }
+    } catch(const RuntimeError& e) {trial.valid=false;trial.reason=e.what();}
     if(++plan.current<plan.trials.size()) {m_curved_rejected_centres.clear();return retry();}
     const auto& baseline=plan.trials.back();
     if(!baseline.valid || baseline.field) throw SlicingError("Automatic comparison could not generate its planar reference");

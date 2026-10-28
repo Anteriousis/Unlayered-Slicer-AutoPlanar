@@ -127,18 +127,33 @@ inline SurfaceBenefit surface_benefit(const std::vector<Ramp::Triangle>& mesh,co
 struct GeneratedCost {
     double model_mm3=0.,support_mm3=0.,path_mm=0.,motion_seconds=0.;
     size_t paths=0;
+    double travel_seconds=0.;
+    size_t travel_routes=0,local_routes=0;
 };
+struct PlanningBreakdown {
+    double roof=0.,under=0.,support=0.,time=0.,material=0.;
+    double time_seconds=0.,support_mm3=0.,material_mm3=0.;
+    double score() const {return roof+under+.5*support-.15*time-.10*material;}
+};
+inline PlanningBreakdown planning_breakdown(const SurfaceBenefit& baseline,const SurfaceBenefit& surface,
+                                           const GeneratedCost& planar,const GeneratedCost& candidate) {
+    PlanningBreakdown b;
+    b.roof=(baseline.roof_error-surface.roof_error)/std::max(.01,baseline.roof_error);
+    b.under=(baseline.underside_deficit_mm2-surface.underside_deficit_mm2)/std::max(1.,baseline.underside_deficit_mm2);
+    b.support_mm3=planar.support_mm3-candidate.support_mm3;
+    b.time_seconds=candidate.motion_seconds-planar.motion_seconds;
+    b.material_mm3=candidate.model_mm3-planar.model_mm3;
+    b.support=b.support_mm3/std::max(1.,planar.support_mm3);
+    b.time=b.time_seconds/std::max(1.,planar.motion_seconds);
+    b.material=b.material_mm3/std::max(1.,planar.model_mm3);
+    return b;
+}
 inline double planning_score(const SurfaceBenefit& baseline,const SurfaceBenefit& surface,
                              const GeneratedCost& planar,const GeneratedCost& candidate) {
-    const double roof=(baseline.roof_error-surface.roof_error)/std::max(.01,baseline.roof_error);
-    const double under=(baseline.underside_deficit_mm2-surface.underside_deficit_mm2)/std::max(1.,baseline.underside_deficit_mm2);
-    const double support=(planar.support_mm3-candidate.support_mm3)/std::max(1.,planar.support_mm3);
-    const double time=(candidate.motion_seconds-planar.motion_seconds)/std::max(1.,planar.motion_seconds);
-    const double material=(candidate.model_mm3-planar.model_mm3)/std::max(1.,planar.model_mm3);
     // Explicit balanced policy, normalized against this object's generated
     // planar control. Negative deltas are charged; no absolute area threshold
     // favors a large part. Time is a kinematic estimate, not firmware runtime.
-    return roof+under+.5*support-.15*time-.10*material;
+    return planning_breakdown(baseline,surface,planar,candidate).score();
 }
 
 struct PlanningTrial {

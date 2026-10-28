@@ -31,21 +31,39 @@ normals, including flat roofs and opposing features. These are geometric finish
 and overhang estimates, not measured Ra, strength or support removability.
 
 Material cost samples the generated paths with the same physical bead-area
-correction as the writer. Motion cost includes generated path lengths, configured
-role/Z speeds, path connections and the retained raised nonplanar travel. At most
-16 samples per native segment bound evaluation work. The traversal used during
-planning is not the final G-code ordering; acceleration, retractions, firmware,
-warmup and plate-wide inter-object travel are not simulated. Costs are labelled
-estimates and must not be presented as measured print time or certified savings.
+correction as the writer (at most 16 samples per native segment). For travel,
+the cost pass replays candidate extrusion through a private production writer,
+building the same emitted-chord deposition map. `plan_curved_travel()` is the
+same side-effect-free route calculation used by final G-code emission. It uses
+the configured four-sided envelope and gantry, full bead width/edge rise, local
+route clearance, global fallback, upward rounding and configured XY/Z speeds.
+Support paths enter the map in logical printing-height order instead of after
+all model paths. Infill-first settings are retained. A failed replay rejects the
+candidate with its actual reason; it never relaxes an output clearance check.
+
+This fixes the former unconditional highest-printed-point lift charge. It does
+not turn candidate costing into a final plate-wide G-code simulation: the
+traversal precedes final seams, greedy/relocated path chaining and XY perimeter
+detours. Startup/first approach, adhesion paths, other-object travel,
+acceleration, retractions, cooling and firmware timing are not simulated. Two
+identical supplied physical routes and deposition states use the same lift and
+kinematic cost; the eventual final route sequence can differ. Costs are labelled
+estimates, not measured print time or certified savings.
 Ramp/global candidates also compete against a native planar control.
 
 **Preview > Layer mode > Region overlay** shows labelled XY planning footprints.
 **Include rejected regions** adds dashed outlines. Hover a label, or select a
-row under **Region decisions**, to read its reason, candidate surface gain,
-generated support volume, motion estimate and net score. Selecting a row isolates
+row under **Region decisions**, to read separate candidate roof-alignment and
+underside-deficit gains, signed time penalty (seconds and percent), support
+saved/model added, travel cost/local-route counts, net score and rejection
+reason. Invalid candidates have no fabricated zero-valued breakdown. Metrics
+describe the entire candidate, not an individual ring's measured performance.
+Selecting a row isolates
 that region. Footprints are displayed at transition heights; they are not cut
 planes, exact surface masks or collision meshes. The bounded versioned
-`layer_region` G-code headers retain this overlay when a file is imported.
+`layer_region` v2 G-code headers retain the separate metrics/rejection reason on
+import. The bounded parser also accepts v1 reports and marks their missing
+breakdown unavailable. Neither version controls motion.
 
 The current development changes require exact-source native/package/GUI
 validation before replacing a previously validated desktop build.

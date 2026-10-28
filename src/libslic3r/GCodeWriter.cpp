@@ -124,6 +124,20 @@ std::string GCodeWriter::curved_travel(const Vec3d& target, const std::string& c
     return curved_travel(std::vector<Vec3d>{target},comment);
 }
 
+CurvedTransition::TravelPlan GCodeWriter::plan_curved_travel(const std::vector<Vec3d>& points) const
+{
+    std::vector<CurvedTransition::TravelClearance::Point> route;
+    route.reserve(points.size());
+    for(const auto& p:points) route.push_back({p.x(),p.y(),p.z()});
+    try {
+        return CurvedTransition::plan_travel(
+            {{m_pos.x(),m_pos.y(),m_pos.z()},is_current_position_clear(),m_max_extrusion_z,
+             m_curved_max_bead_rise,m_curved_safe_z},route,
+            {m_curved_travel_clearance,m_curved_max_z,this->travel_xy_speed(false),curved_effective_z_speed()},
+            m_curved_obstacles);
+    } catch(const std::invalid_argument& e) {throw RuntimeError(e.what());}
+}
+
 std::string GCodeWriter::curved_travel(const std::vector<Vec3d>& points, const std::string& comment)
 {
     if(std::any_of(points.begin(),points.end(),[](const Vec3d& p){return !p.allFinite();}))
@@ -134,21 +148,9 @@ std::string GCodeWriter::curved_travel(const std::vector<Vec3d>& points, const s
         m_lifted=0.;m_to_lift=0.;
         return {};
     }
-    double safe=curved_travel_height(target);
-    bool local_route=false;
-    if(is_current_position_clear()) {
-        std::vector<CurvedTransition::TravelClearance::Point> route;
-        for(const auto& p:points) route.push_back({p.x(),p.y(),p.z()});
-        const auto local=m_curved_obstacles.height({m_pos.x(),m_pos.y(),m_pos.z()},route,m_curved_travel_clearance+.001);
-        if(local) {
-            // Never lower an already emitted staging height; include the tip's
-            // departure/approach levels, upward rounding and the same allowance.
-            const double lower=std::ceil(std::max({*local,target.z()+m_curved_travel_clearance+.001,
-                m_pos.z()})*1000.)/1000.;
-            if(lower<safe) {safe=lower;local_route=true;}
-        }
-    }
-    if(!std::isfinite(safe)) throw RuntimeError("Curved travel height is not finite");
+    const auto plan=plan_curved_travel(points);
+    const double safe=plan.safe_z;
+    const bool local_route=plan.local_route;
     const double xy_speed=this->travel_xy_speed(false)*60.;
     const double z_speed=curved_effective_z_speed()*60.;
     std::string out;

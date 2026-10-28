@@ -7,7 +7,70 @@
 #include "libslic3r/CurvedJointPlanning.hpp"
 #include "libslic3r/CurvedPathOptimization.hpp"
 #include "libslic3r/CurvedTravelClearance.hpp"
+#include "libslic3r/CurvedTravelPlan.hpp"
 using namespace Slic3r::CurvedTransition;
+
+TEST_CASE("Shared travel costing measures raised detours and retains fallback clearance", "[curved-blend][motion][cost]")
+{
+    TravelClearance map;map.configure(125.,{7.,10.,15.,6.},14.);
+    map.add({190.,190.,30.},{195.,190.,30.},.225,0.);
+    map.add({10.,10.,2.},{15.,10.,2.},.225,0.);
+    TravelState state{{15.,10.,2.},true,30.,0.,45.};
+    const TravelSettings settings{2.,200.,80.,3.};
+    const std::vector<TravelClearance::Point> detour{{15.,12.,2.},{10.,12.,2.}};
+    const auto local=plan_travel(state,detour,settings,map);
+    REQUIRE(local.local_route);REQUIRE(local.xy_mm==Catch::Approx(7.));
+    REQUIRE(local.safe_z>=18.);REQUIRE(local.safe_z<32.);
+    REQUIRE(local.seconds==Catch::Approx((2.*local.safe_z-4.)/3.+7./80.));
+    state.position_known=false;
+    const auto unknown=plan_travel(state,detour,settings,map);
+    REQUIRE_FALSE(unknown.local_route);REQUIRE(unknown.safe_z>=45.);
+    REQUIRE(unknown.seconds>local.seconds);
+    state.position_known=true;state.position[2]=48.007;
+    REQUIRE(plan_travel(state,detour,settings,map).safe_z==48.007);
+    state.position={15.,10.,2.};map.invalidate();
+    const auto incomplete=plan_travel(state,detour,settings,map);
+    REQUIRE_FALSE(incomplete.local_route);REQUIRE(incomplete.safe_z>=32.001);
+    REQUIRE_THROWS(plan_travel(state,detour,{2.,20.,80.,3.},map));
+    REQUIRE(plan_travel(state,{state.position},settings,map).no_op);
+}
+
+TEST_CASE("Benefit breakdown separates signed surface gains from time and material costs", "[curved-blend][joint][cost]")
+{
+    const SurfaceBenefit before{10.,20.,100.},after{5.,25.,100.};
+    GeneratedCost planar;planar.model_mm3=100.;planar.support_mm3=20.;planar.motion_seconds=100.;
+    auto candidate=planar;candidate.model_mm3=110.;candidate.support_mm3=10.;candidate.motion_seconds=120.;
+    const auto b=planning_breakdown(before,after,planar,candidate);
+    REQUIRE(b.roof==Catch::Approx(.5));REQUIRE(b.under==Catch::Approx(-.25));
+    REQUIRE(b.time==Catch::Approx(.2));REQUIRE(b.time_seconds==20.);
+    REQUIRE(b.support_mm3==10.);REQUIRE(b.material_mm3==10.);
+    REQUIRE(b.score()==Catch::Approx(.46));
+    REQUIRE(planning_score(before,after,planar,candidate)==b.score());
+    const auto zero=planning_breakdown({}, {}, {}, {});
+    REQUIRE(zero.score()==0.);REQUIRE(std::isfinite(zero.time));
+    candidate.motion_seconds=80.;REQUIRE(planning_breakdown(before,after,planar,candidate).time_seconds==-20.);
+}
+
+TEST_CASE("Planning v2 metadata preserves separate metrics and safely imports legacy reports", "[curved-blend][joint][report]")
+{
+    RegionDecision a{3,0,false,12.,-4.,20.,6.,2.5,-.03,64.,20.,"Roof candidate"},b;
+    a.has_breakdown=true;a.roof_gain_percent=5.;a.underside_gain_percent=-2.;
+    a.time_delta_seconds=12.;a.time_delta_percent=23.;a.support_saved_mm3=-4.;a.model_added_mm3=2.;
+    a.travel_seconds=30.;a.travel_routes=10;a.local_routes=7;
+    a.rejection_reason="Lower score than \"Planar\"; candidate is valid";
+    REQUIRE(RegionDecision::decode(a.encode(),b));
+    REQUIRE(b.has_breakdown);REQUIRE(b.roof_gain_percent==5.);REQUIRE(b.underside_gain_percent==-2.);
+    REQUIRE(b.time_delta_seconds==12.);REQUIRE(b.time_delta_percent==23.);
+    REQUIRE(b.support_saved_mm3==-4.);REQUIRE(b.local_routes==7);
+    REQUIRE(b.rejection_reason==a.rejection_reason);
+    REQUIRE_FALSE(RegionDecision::decode(a.encode()+" unexpected",b));
+    auto bad=a;bad.local_routes=11;REQUIRE_FALSE(RegionDecision::decode(bad.encode(),b));
+    bad=a;bad.time_delta_seconds=INFINITY;REQUIRE_FALSE(RegionDecision::decode(bad.encode(),b));
+    REQUIRE(RegionDecision::decode("v1 4 0 1 10 20 4 3 2.5 0.25 45 12 chosen legacy roof",b));
+    REQUIRE_FALSE(b.has_breakdown);REQUIRE(b.reason=="chosen legacy roof");
+    a.reason=std::string(400,'"');a.rejection_reason=std::string(400,'\\');
+    REQUIRE(a.encode().size()<=1024);REQUIRE(RegionDecision::decode(a.encode(),b));
+}
 
 TEST_CASE("Curved ordering refines travel cost without reversing or dropping paths", "[curved-blend][motion]")
 {

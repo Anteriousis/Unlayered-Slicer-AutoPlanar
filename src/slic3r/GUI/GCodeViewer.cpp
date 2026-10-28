@@ -1864,6 +1864,17 @@ void GCodeViewer::reset()
     m_fixed_tool_axis = Vec3f::UnitZ();
 }
 
+static void render_planning_breakdown(const CurvedTransition::RegionDecision& r)
+{
+    if(r.has_breakdown) {
+        ImGui::Text("Surface gain: roof %+.1f%% | underside %+.1f%%",r.roof_gain_percent,r.underside_gain_percent);
+        ImGui::Text("Time penalty: %+.1f s (%+.1f%%)",r.time_delta_seconds,r.time_delta_percent);
+        ImGui::Text("Support saved: %+.1f mm3 | model added: %+.1f mm3",r.support_saved_mm3,r.model_added_mm3);
+        ImGui::Text("Travel: %.1f s | %zu of %zu routes use local clearance",r.travel_seconds,r.local_routes,r.travel_routes);
+    } else ImGui::TextWrapped("%s",_u8L("Benefit/cost breakdown unavailable for this region or older G-code.").c_str());
+    if(!r.rejection_reason.empty()) ImGui::TextWrapped("%s %s",_u8L("Rejection reason:").c_str(),r.rejection_reason.c_str());
+}
+
 void GCodeViewer::render_planning_regions(int width,int height)
 {
     const auto& camera=wxGetApp().plater()->get_camera();
@@ -1898,6 +1909,7 @@ void GCodeViewer::render_planning_regions(int width,int height)
             ImGui::TextUnformatted(r.reason.c_str());
             ImGui::Text("%.2f deg | net score %.3f",r.angle,r.gain);
             ImGui::Text("Motion estimate %.1f s | generated support %.1f mm3",r.motion_seconds,r.support_mm3);
+            render_planning_breakdown(r);
             ImGui::TextUnformatted("XY planning footprint; not a collision or print-quality certificate.");
             ImGui::PopTextWrapPos();ImGui::EndTooltip();
         }
@@ -4359,10 +4371,11 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                     m_highlight_planning_region=m_highlight_planning_region==r.id?-1:r.id;
                 ImGui::TextWrapped("%s",r.reason.c_str());
                 ImGui::Text("%.2f deg | score %.3f | candidate %.1f s, %.1f mm3 support",r.angle,r.gain,r.motion_seconds,r.support_mm3);
+                render_planning_breakdown(r);
                 ImGui::PopID();
             }
             ImGui::EndChild();
-            ImGui::TextWrapped("%s",_u8L("Scores compare generated paths with a planar control. Time and surface benefit are estimates. Footprints are planning regions, not cut planes or collision bounds.").c_str());
+            ImGui::TextWrapped("%s",_u8L("Gains and time penalties describe the whole candidate against its planar control. Positive gain means improvement; negative time penalty means time saved. Travel uses the G-code writer's route-clearance planner; final seam/XY-detour ordering, acceleration, cooling and startup are not included. Surface gains are geometric estimates. Footprints are planning regions, not cut planes or collision bounds.").c_str());
         }
         if(ImGui::CollapsingHeader(_u8L("Selection details").c_str())) {
             if(m_layer_strategy_decisions.empty())

@@ -1,5 +1,6 @@
 #include "WebAppBridge.hpp"
 #include "WebAppPanel.hpp"
+#include "WebAppPresetShare.hpp"
 #include "WebAppSettings.hpp"
 #include "WebAppSlot.hpp"
 
@@ -11,6 +12,8 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Tab.hpp"
 #include "slic3r/GUI/Widgets/WebView.hpp"
+#include "slic3r/GUI/ModelUploadConsentDialog.hpp"
+#include "slic3r/Utils/PrivacyConsent.hpp"
 #include "slic3r/Utils/FirmwareBundle.hpp" // sha256_hex
 #include "libslic3r/GCode/Thumbnails.hpp"     // compress_thumbnail
 #include "libslic3r/GCode/ThumbnailData.hpp" // ThumbnailData
@@ -44,6 +47,7 @@
 #include <vector>
 #include <atomic>
 #include <cfloat>
+#include <functional>
 #include <iomanip>
 #include <memory>
 #include <random>
@@ -64,6 +68,8 @@ namespace {
 constexpr int    WAB_PROTOCOL_VERSION   = 1;
 constexpr size_t WAB_MAX_DOWNLOAD_BYTES = 256u * 1024u * 1024u;
 constexpr size_t WAB_PROGRESS_STEP      = 1024u * 1024u; // emit a progress event per MiB
+// A printer profile is a few dozen KiB of JSON; anything near this is not one.
+constexpr size_t WAB_MAX_PRESET_BYTES   = 4u * 1024u * 1024u;
 
 // The public home of this program's Corresponding Source. Reported by slicer.getInfo so that an
 // embedded application -- including one hosted on a server that runs this slicer for remote
@@ -275,6 +281,39 @@ struct WebAppBridge::Impl : public std::enable_shared_from_this<WebAppBridge::Im
     void handle_open_project_from_url(const std::string& id, const json& params);
     void handle_select_preset(const std::string& id, const json& params);
 
+    // Printer-profile sharing (WEB_APP_BRIDGE.md section 4.4; policy in WebAppPresetShare.cpp).
+    void handle_export_printer_preset(const std::string& id, const json& params);
+    void handle_install_printer_preset(const std::string& id, const json& params);
+    // From an accepted installPrinterPreset until its slicer.presetInstalled event is sent.
+    std::atomic<bool> install_in_progress{false};
+
+    // The download machinery openProjectFromUrl and installPrinterPreset share. The URL rules: http
+    // or https, and the page's own host unless the slot's download-host list names it. Returns
+    // WAB_OK, or the code and message to answer with.
+    int  check_download_url(const std::string& url, std::string& message) const;
+    // One download at a time per tab: claim the slot before answering "accepted", and on failure
+    // answer 1007 instead.
+    bool claim_download();
+    struct DownloadJob
+    {
+        std::string id;
+        std::string url;
+        fs::path    destination;
+        std::string expected_sha;   // lowercase hex; empty = not checked
+        size_t      size_limit{WAB_MAX_DOWNLOAD_BYTES};
+        std::string progress_event; // empty = no progress events
+        // Worker thread, slot released, tab still alive: the request failed (network, HTTP status,
+        // size limit). May only use what is thread-safe here -- send_event.
+        std::function<void(Impl& self, const std::string& message, unsigned status)> on_http_error;
+        // GUI thread, slot released, tab still alive: the body failed its checksum or could not be
+        // written. Nothing is left at `destination`.
+        std::function<void(Impl& self, const std::string& error)> on_save_error;
+        // GUI thread, slot released, tab still alive: the verified file is at `destination`.
+        std::function<void(Impl& self, const fs::path& destination)> on_ready;
+    };
+    // Runs `job` on an Http worker thread. The slot must have been claimed.
+    void run_download(DownloadJob job);
+
     // Settings family (WEB_APP_BRIDGE.md section 4; policy in WebAppSettings.cpp).
     void handle_list_presets(const std::string& id, const json& params);
     void handle_get_settings_schema(const std::string& id, const json& params);
@@ -439,8 +478,10 @@ json WebAppBridge::Impl::capabilities() const
             capabilities.push_back(method);
     if (owner.allows_export())
         for (const char* method : {"slicer.exportProject", "slicer.readExportChunk", "slicer.discardExport",
-                                   "slicer.exportThumbnail"})
+                                   "slicer.exportThumbnail", "slicer.exportPrinterPreset"})
             capabilities.push_back(method);
+    if (owner.allows_install())
+        capabilities.push_back("slicer.installPrinterPreset");
     return capabilities;
 }
 
@@ -748,28 +789,22 @@ void WebAppBridge::Impl::handle_open_project(const std::string& id, const json& 
     open_resolved_file(id, "slicer.openProject", resolved);
 }
 
-void WebAppBridge::Impl::handle_open_project_from_url(const std::string& id, const json& params)
+int WebAppBridge::Impl::check_download_url(const std::string& url, std::string& message) const
 {
-    const std::string url = json_string(params, "url");
-    if (url.empty()) {
-        send_response(id, "slicer.openProjectFromUrl", WAB_BAD_PARAMS, "url is required");
-        return;
-    }
-
     const wxString wx_url = wxString::FromUTF8(url.c_str());
     const wxURI    uri(wx_url);
     const wxString scheme = uri.HasScheme() ? uri.GetScheme().Lower() : wxString();
     if (scheme != "http" && scheme != "https") {
-        send_response(id, "slicer.openProjectFromUrl", WAB_BAD_PARAMS, "only http and https URLs are accepted");
-        return;
+        message = "only http and https URLs are accepted";
+        return WAB_BAD_PARAMS;
     }
 
     // Same host as the page by default; anything else must be named in web_app_download_hosts.
     const std::string url_host  = host_of(wx_url);
     const std::string page_host = host_of(owner.current_origin());
     if (url_host.empty()) {
-        send_response(id, "slicer.openProjectFromUrl", WAB_BAD_PARAMS, "url has no host");
-        return;
+        message = "url has no host";
+        return WAB_BAD_PARAMS;
     }
     if (url_host != page_host) {
         const std::vector<std::string> extra = configured_download_hosts(owner.slot());
@@ -787,82 +822,69 @@ void WebAppBridge::Impl::handle_open_project_from_url(const std::string& id, con
             return url_host.compare(url_host.size() - h.size(), h.size(), h) == 0;
         });
         if (!allowed) {
-            send_response(id, "slicer.openProjectFromUrl", WAB_FORBIDDEN_ORIGIN,
-                          "downloads must come from the application's own host unless that host is listed in " +
-                              std::string(owner.slot().key_download_hosts));
-            return;
+            message = "downloads must come from the application's own host unless that host is listed in " +
+                      std::string(owner.slot().key_download_hosts);
+            return WAB_FORBIDDEN_ORIGIN;
         }
     }
+    return WAB_OK;
+}
 
-    std::string name = sanitise_filename(json_string(params, "filename"));
-    if (name.empty())
-        name = sanitise_filename(Http::get_filename_from_url(url));
-    if (name.empty()) {
-        send_response(id, "slicer.openProjectFromUrl", WAB_BAD_PARAMS, "filename is required");
-        return;
-    }
-    const std::string ext = lowercase_extension(path_from_utf8(name));
-    if (!extension_allowed(ext)) {
-        send_response(id, "slicer.openProjectFromUrl", WAB_UNSUPPORTED_TYPE, "file type '" + ext + "' is not accepted");
-        return;
-    }
-
-    if (slicer_is_busy()) {
-        send_response(id, "slicer.openProjectFromUrl", WAB_BUSY, "the slicer is busy slicing");
-        return;
-    }
-
+bool WebAppBridge::Impl::claim_download()
+{
     bool expected = false;
-    if (!download_busy.compare_exchange_strong(expected, true)) {
-        send_response(id, "slicer.openProjectFromUrl", WAB_BUSY, "another download is already in progress");
-        return;
-    }
+    if (!download_busy.compare_exchange_strong(expected, true))
+        return false;
     progress_mark.store(0);
+    return true;
+}
 
-    const std::string expected_sha = boost::algorithm::to_lower_copy(json_string(params, "sha256"));
-    const fs::path    destination  = webapp_cache_dir() / path_from_utf8(name);
-
-    send_response(id, "slicer.openProjectFromUrl", WAB_OK, "accepted");
-
+void WebAppBridge::Impl::run_download(DownloadJob job)
+{
     // Everything below runs on an Http worker thread. It may only touch Impl through the weak
     // pointer, and must never touch Impl::owner -- that is the GUI thread's alone.
     std::weak_ptr<Impl> weak = weak_from_this();
+    const std::string   id   = job.id;
+    // Shared by the callbacks, which each get a copy of the closure.
+    auto shared = std::make_shared<DownloadJob>(std::move(job));
 
-    Http::get(url)
-        .size_limit(WAB_MAX_DOWNLOAD_BYTES)
+    Http::get(shared->url)
+        .size_limit(shared->size_limit)
         .timeout_connect(10)
-        .on_progress([weak, id](Http::Progress progress, bool& cancel) {
+        .on_progress([weak, id, shared](Http::Progress progress, bool& cancel) {
             auto self = weak.lock();
             if (!self || self->detached.load()) {
                 cancel = true;
                 return;
             }
+            if (shared->progress_event.empty())
+                return;
             // One event per MiB, plus the final one: on_progress fires far too often to forward
             // every tick into the GUI thread's event queue.
             const size_t step = progress.dlnow / WAB_PROGRESS_STEP;
             if (step == self->progress_mark.load() && !(progress.dltotal > 0 && progress.dlnow >= progress.dltotal))
                 return;
             self->progress_mark.store(step);
-            self->send_event(id, "slicer.openProjectFromUrl.progress",
-                             {{"received", progress.dlnow}, {"total", progress.dltotal}});
+            self->send_event(id, shared->progress_event, {{"received", progress.dlnow}, {"total", progress.dltotal}});
         })
-        .on_error([weak, id](std::string /*body*/, std::string error, unsigned status) {
+        .on_error([weak, shared](std::string /*body*/, std::string error, unsigned status) {
             auto self = weak.lock();
             if (!self)
                 return;
             self->download_busy.store(false);
             const std::string message = error.empty() ? ("HTTP " + std::to_string(status)) : error;
-            const int         code    = (status == 404 || status == 410) ? WAB_NOT_FOUND : WAB_IO;
             BOOST_LOG_TRIVIAL(info) << "WebAppBridge: download failed: " << message;
             if (!self->detached.load())
-                self->send_event(id, "slicer.projectOpened", {{"ok", false}, {"error", message}, {"code", code}});
+                shared->on_http_error(*self, message, status);
         })
-        .on_complete([weak, id, destination, expected_sha](std::string body, unsigned /*status*/) {
+        .on_complete([weak, shared](std::string body, unsigned /*status*/) {
             auto self = weak.lock();
             if (!self)
                 return;
 
-            std::string error;
+            const fs::path&    destination  = shared->destination;
+            const std::string& expected_sha = shared->expected_sha;
+            std::string        error;
             if (!expected_sha.empty()) {
                 const std::vector<uint8_t> bytes(body.begin(), body.end());
                 const std::string          actual = sha256_hex(bytes);
@@ -888,7 +910,7 @@ void WebAppBridge::Impl::handle_open_project_from_url(const std::string& id, con
                 BOOST_LOG_TRIVIAL(info) << "WebAppBridge: " << error;
             }
 
-            wxGetApp().CallAfter([weak, id, destination, error]() {
+            wxGetApp().CallAfter([weak, shared, error]() {
                 auto self = weak.lock();
                 if (!self)
                     return;
@@ -896,13 +918,72 @@ void WebAppBridge::Impl::handle_open_project_from_url(const std::string& id, con
                 if (self->detached.load())
                     return;
                 if (!error.empty()) {
-                    self->send_event(id, "slicer.projectOpened", {{"ok", false}, {"error", error}});
+                    shared->on_save_error(*self, error);
                     return;
                 }
-                self->open_resolved_file(id, "slicer.openProjectFromUrl", destination);
+                shared->on_ready(*self, shared->destination);
             });
         })
         .perform();
+}
+
+void WebAppBridge::Impl::handle_open_project_from_url(const std::string& id, const json& params)
+{
+    const std::string url = json_string(params, "url");
+    if (url.empty()) {
+        send_response(id, "slicer.openProjectFromUrl", WAB_BAD_PARAMS, "url is required");
+        return;
+    }
+
+    std::string url_message;
+    if (const int code = check_download_url(url, url_message); code != WAB_OK) {
+        send_response(id, "slicer.openProjectFromUrl", code, url_message);
+        return;
+    }
+
+    std::string name = sanitise_filename(json_string(params, "filename"));
+    if (name.empty())
+        name = sanitise_filename(Http::get_filename_from_url(url));
+    if (name.empty()) {
+        send_response(id, "slicer.openProjectFromUrl", WAB_BAD_PARAMS, "filename is required");
+        return;
+    }
+    const std::string ext = lowercase_extension(path_from_utf8(name));
+    if (!extension_allowed(ext)) {
+        send_response(id, "slicer.openProjectFromUrl", WAB_UNSUPPORTED_TYPE, "file type '" + ext + "' is not accepted");
+        return;
+    }
+
+    if (slicer_is_busy()) {
+        send_response(id, "slicer.openProjectFromUrl", WAB_BUSY, "the slicer is busy slicing");
+        return;
+    }
+
+    if (!claim_download()) {
+        send_response(id, "slicer.openProjectFromUrl", WAB_BUSY, "another download is already in progress");
+        return;
+    }
+
+    DownloadJob job;
+    job.id             = id;
+    job.url            = url;
+    job.expected_sha   = boost::algorithm::to_lower_copy(json_string(params, "sha256"));
+    job.destination    = webapp_cache_dir() / path_from_utf8(name);
+    job.size_limit     = WAB_MAX_DOWNLOAD_BYTES;
+    job.progress_event = "slicer.openProjectFromUrl.progress";
+    job.on_http_error  = [id](Impl& self, const std::string& message, unsigned status) {
+        const int code = (status == 404 || status == 410) ? WAB_NOT_FOUND : WAB_IO;
+        self.send_event(id, "slicer.projectOpened", {{"ok", false}, {"error", message}, {"code", code}});
+    };
+    job.on_save_error = [id](Impl& self, const std::string& error) {
+        self.send_event(id, "slicer.projectOpened", {{"ok", false}, {"error", error}});
+    };
+    job.on_ready = [id](Impl& self, const fs::path& destination) {
+        self.open_resolved_file(id, "slicer.openProjectFromUrl", destination);
+    };
+
+    send_response(id, "slicer.openProjectFromUrl", WAB_OK, "accepted");
+    run_download(std::move(job));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1597,6 +1678,26 @@ void WebAppBridge::Impl::handle_export_project(const std::string& id, const json
     const std::string handle   = make_session_token().substr(0, 16);
     const fs::path    out_path = webapp_cache_dir() / path_from_utf8(stem + "-" + handle + ".3mf");
 
+    // 0.1.6 privacy: handing the project to a web page is a model upload, so it is asked every time,
+    // for this file, with what / why / to whom / how long (PrivacyConsent::ModelUploadRequest). Usage
+    // diagnostics consent never covers it, and a "no" changes nothing else in the slicer. The page
+    // learns whether AI training was allowed for this upload and must keep to it.
+    PrivacyConsent::ModelUploadRequest upload;
+    upload.file_label    = stem + ".3mf";
+    upload.file_id       = handle;
+    upload.included_data = plate_idx < 0 ? _u8L("The whole project as a 3MF file: every model's geometry, the settings, and plate thumbnails.")
+                                         : _u8L("This plate as a 3MF file: its models' geometry, the settings, and the plate thumbnail.");
+    upload.purpose       = _u8L("Sharing or publishing it on Unlayered Universe, as you asked in the Universe tab.");
+    upload.ai_training_proposed = true;
+    upload.recipients    = _u8L("Unlayered 3D, Inc., through Unlayered Universe (unlayered3d.com).");
+    upload.retention     = _u8L("As set out in the Unlayered Universe terms and privacy policy; you can delete what you publish there.");
+    PrivacyConsent::ModelUploadAuthorization authorization = ModelUploadConsentDialog::ask(wxGetApp().mainframe, upload);
+    const bool ai_training = authorization.ai_training_allowed();
+    if (!authorization.consume(handle)) {
+        send_response(id, METHOD, WAB_CAPABILITY_DISABLED, "the user declined to upload this project");
+        return;
+    }
+
     boost::system::error_code ec;
     fs::create_directories(out_path.parent_path(), ec);
 
@@ -1626,7 +1727,9 @@ void WebAppBridge::Impl::handle_export_project(const std::string& id, const json
                   {{"handle", handle},
                    {"filename", stem + ".3mf"},
                    {"sizeBytes", size},
-                   {"chunkBytes", WAB_EXPORT_CHUNK_BYTES}});
+                   {"chunkBytes", WAB_EXPORT_CHUNK_BYTES},
+                   // The person's answer for this upload; false unless they ticked the box.
+                   {"aiTrainingAllowed", ai_training}});
 }
 
 void WebAppBridge::Impl::handle_read_export_chunk(const std::string& id, const json& params)
@@ -1849,6 +1952,170 @@ void WebAppBridge::Impl::handle_get_slice_result(const std::string& id, const js
 }
 
 // ---------------------------------------------------------------------------------------------
+// Printer profiles (WEB_APP_BRIDGE.md section 4.4; policy, dialog and import in
+// WebAppPresetShare.cpp)
+//
+// Export is the publish direction of a printer, under the same opt-in as exporting the plate: the
+// slicer writes the edited printer preset -- flattened, print host and local paths removed -- into
+// its cache and hands back an export handle that readExportChunk / discardExport serve unchanged.
+// Install is the other direction under its own opt-in, and is never the page's decision alone:
+// the file is downloaded on the same terms as openProjectFromUrl, sanitised again, and installed
+// only if the user says so in a native dialog the page can neither skip nor pre-answer.
+// ---------------------------------------------------------------------------------------------
+
+void WebAppBridge::Impl::handle_export_printer_preset(const std::string& id, const json& /*params*/)
+{
+    static const char* METHOD = "slicer.exportPrinterPreset";
+    if (!owner.allows_export()) {
+        send_response(id, METHOD, WAB_CAPABILITY_DISABLED, "this tab is not allowed to export");
+        return;
+    }
+    Tab*        tab = nullptr;
+    std::string message;
+    if (const int code = preflight(true, Preset::TYPE_INVALID, tab, message, /*require_settings=*/false); code != WAB_OK) {
+        send_response(id, METHOD, code, message);
+        return;
+    }
+    if (exports.size() >= WAB_MAX_LIVE_EXPORTS) {
+        send_response(id, METHOD, WAB_BUSY, "too many exports are still open; discard the ones you have finished with");
+        return;
+    }
+
+    std::string stem = sanitise_filename(WebAppPresetShare::edited_printer_preset_name());
+    if (stem.empty())
+        stem = "printer";
+    const std::string handle   = make_session_token().substr(0, 16);
+    const fs::path    out_path = webapp_cache_dir() / path_from_utf8(stem + "-" + handle + ".json");
+
+    const WebAppPresetShare::ExportResult result = WebAppPresetShare::export_edited_printer_preset(out_path);
+    boost::system::error_code             ec;
+    if (result.code != WAB_OK) {
+        fs::remove(out_path, ec);
+        send_response(id, METHOD, result.code, result.message);
+        return;
+    }
+    const std::uintmax_t size = fs::file_size(out_path, ec);
+    if (ec || size == 0) {
+        fs::remove(out_path, ec);
+        send_response(id, METHOD, WAB_INTERNAL, "the export produced no file");
+        return;
+    }
+
+    exports[handle] = out_path;
+    send_response(id, METHOD, WAB_OK, "success",
+                  {{"handle", handle},
+                   {"filename", stem + ".json"},
+                   {"sizeBytes", size},
+                   {"chunkBytes", WAB_EXPORT_CHUNK_BYTES},
+                   {"name", result.name},
+                   {"dirty", result.dirty},
+                   {"inherits", result.inherits}});
+}
+
+void WebAppBridge::Impl::handle_install_printer_preset(const std::string& id, const json& params)
+{
+    static const char* METHOD = "slicer.installPrinterPreset";
+    static const char* EVENT  = "slicer.presetInstalled";
+    if (!owner.allows_install()) {
+        send_response(id, METHOD, WAB_CAPABILITY_DISABLED, "this tab is not allowed to install printer profiles");
+        return;
+    }
+    const std::string url = json_string(params, "url");
+    if (url.empty()) {
+        send_response(id, METHOD, WAB_BAD_PARAMS, "url is required");
+        return;
+    }
+    std::string message;
+    if (const int code = check_download_url(url, message); code != WAB_OK) {
+        send_response(id, METHOD, code, message);
+        return;
+    }
+    std::string name = sanitise_filename(json_string(params, "filename"));
+    if (name.empty())
+        name = sanitise_filename(Http::get_filename_from_url(url));
+    if (name.empty()) {
+        send_response(id, METHOD, WAB_BAD_PARAMS, "filename is required");
+        return;
+    }
+    if (const std::string ext = lowercase_extension(path_from_utf8(name)); ext != "json") {
+        send_response(id, METHOD, WAB_UNSUPPORTED_TYPE, "file type '" + ext + "' is not accepted: a printer profile is a .json file");
+        return;
+    }
+    // A dialog already open, or a slice running: the install ends in a modal of its own.
+    Tab* tab = nullptr;
+    if (const int code = preflight(true, Preset::TYPE_PRINTER, tab, message, /*require_settings=*/false); code != WAB_OK) {
+        send_response(id, METHOD, code, message);
+        return;
+    }
+    if (install_in_progress.load()) {
+        send_response(id, METHOD, WAB_BUSY, "a printer profile is already being installed");
+        return;
+    }
+    if (!claim_download()) {
+        send_response(id, METHOD, WAB_BUSY, "another download is already in progress");
+        return;
+    }
+    install_in_progress.store(true);
+
+    DownloadJob job;
+    job.id           = id;
+    job.url          = url;
+    job.expected_sha = boost::algorithm::to_lower_copy(json_string(params, "sha256"));
+    // Never the page's name on disk: a profile must not overwrite a file openProjectFromUrl fetched.
+    job.destination = webapp_cache_dir() / path_from_utf8("printer-profile-" + make_session_token().substr(0, 16) + ".json");
+    job.size_limit  = WAB_MAX_PRESET_BYTES;
+    job.on_http_error = [id](Impl& self, const std::string& message, unsigned status) {
+        self.install_in_progress.store(false);
+        int         code  = (status == 404 || status == 410) ? WAB_NOT_FOUND : WAB_IO;
+        std::string error = message;
+        if (status == 0 && boost::algorithm::starts_with(message, "HTTP body data size exceeded")) {
+            code  = WAB_TOO_LARGE;
+            error = "the file is larger than the " + std::to_string(WAB_MAX_PRESET_BYTES / (1024 * 1024)) +
+                    " MiB a printer profile may be";
+        }
+        self.send_event(id, EVENT, {{"ok", false}, {"error", error}, {"code", code}});
+    };
+    job.on_save_error = [id](Impl& self, const std::string& error) {
+        self.install_in_progress.store(false);
+        self.send_event(id, EVENT, {{"ok", false}, {"error", error}, {"code", WAB_IO}});
+    };
+    job.on_ready = [id](Impl& self, const fs::path& destination) {
+        // GUI thread with the tab alive (run_download checked); the dialog below is modal, and the
+        // shared_ptr the caller holds keeps this Impl alive through it.
+        const wxString                   tab_title = WebAppPanel::configured_title(self.owner.slot());
+        WebAppPresetShare::InstallResult outcome;
+        try {
+            outcome = WebAppPresetShare::install_printer_preset(destination, tab_title, webapp_cache_dir());
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "WebAppBridge: installing a printer profile failed: " << e.what();
+            outcome       = WebAppPresetShare::InstallResult();
+            outcome.code  = WAB_INTERNAL;
+            outcome.error = std::string("the profile could not be installed: ") + e.what();
+        }
+        boost::system::error_code ec;
+        fs::remove(destination, ec);
+        self.install_in_progress.store(false);
+
+        json data = {{"ok", outcome.ok}};
+        if (outcome.ok) {
+            data["name"]     = outcome.name;
+            data["selected"] = outcome.selected;
+        } else if (outcome.cancelled) {
+            data["cancelled"] = true;
+        } else {
+            data["error"] = outcome.error;
+            data["code"]  = outcome.code;
+        }
+        self.send_event(id, EVENT, data);
+    };
+
+    // Accepted, not finished: the outcome -- installed, declined, or why not -- arrives as a
+    // slicer.presetInstalled event carrying this id.
+    send_response(id, METHOD, WAB_OK, "accepted", {{"accepted", true}});
+    run_download(std::move(job));
+}
+
+// ---------------------------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------------------------
 
@@ -1958,6 +2225,10 @@ void WebAppBridge::on_script_message(wxWebViewEvent& evt)
         p->handle_discard_export(id, params);
     } else if (method == "slicer.exportThumbnail") {
         p->handle_export_thumbnail(id, params);
+    } else if (method == "slicer.exportPrinterPreset") {
+        p->handle_export_printer_preset(id, params);
+    } else if (method == "slicer.installPrinterPreset") {
+        p->handle_install_printer_preset(id, params);
     } else if (method == "slicer.slice") {
         p->handle_slice(id, params);
     } else if (method == "slicer.getSliceResult") {

@@ -1,0 +1,1095 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="policy-version" content="2026-10-v3">
+<meta name="notice-version" content="2026-10-v3">
+<meta name="color-scheme" content="light dark">
+<title>Unlayered Slicer Privacy Policy</title>
+<!--
+  Unlayered Slicer Privacy Policy, policy_version 2026-10-v3, notice_version 2026-10-v3.
+  DRAFT FOR LEGAL REVIEW. Every [TO CONFIRM: ...] marker is a fact counsel or Unlayered must supply
+  before publication; docs/privacy/LEGAL_REVIEW_CHECKLIST.md lists them all.
+  Markdown twin: docs/privacy/SLICER_PRIVACY_POLICY.md (keep the two in step).
+  Version constants: src/slic3r/Utils/PrivacyConsent.hpp (POLICY_VERSION, NOTICE_VERSION).
+  Self-contained on purpose: the app opens this file locally, so it loads nothing from the network.
+-->
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1d1f23;
+    --muted: #5b616b;
+    --rule: #dfe2e7;
+    --panel: #f5f6f8;
+    --link: #0b5cad;
+    --accent: #0b5cad;
+    --banner-bg: #b3261e;
+    --banner-fg: #ffffff;
+    --tbc-bg: #ffe866;
+    --tbc-fg: #1d1f23;
+    --tbc-rule: #c9a800;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c;
+      --fg: #e6e8ec;
+      --muted: #a2a8b2;
+      --rule: #343841;
+      --panel: #1f2228;
+      --link: #7db8ff;
+      --accent: #7db8ff;
+      --banner-bg: #8c1d17;
+      --banner-fg: #ffffff;
+      --tbc-bg: #ffe866;
+      --tbc-fg: #16181c;
+      --tbc-rule: #ffe866;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+  .draft-banner {
+    background: var(--banner-bg);
+    color: var(--banner-fg);
+    font-weight: 700;
+    text-align: center;
+    padding: 10px 16px;
+    letter-spacing: .01em;
+  }
+  h1 { font-size: 1.9rem; line-height: 1.25; margin: 8px 0 12px; }
+  h2 {
+    font-size: 1.35rem; line-height: 1.3; margin: 40px 0 12px;
+    padding-top: 16px; border-top: 1px solid var(--rule);
+  }
+  h3 { font-size: 1.08rem; margin: 24px 0 8px; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 40px 0 16px; }
+  p, ul, ol, table { margin: 0 0 14px; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: 4px 0; }
+  a { color: var(--link); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  code { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: .92em;
+         background: var(--panel); padding: 1px 4px; border-radius: 3px; overflow-wrap: anywhere; }
+  .summary { border-left: 4px solid var(--accent); padding: 4px 0 4px 16px; margin: 0 0 20px; }
+  .summary ul { margin: 0; }
+  nav.toc { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 12px 16px; }
+  nav.toc h2 { border: 0; margin: 0 0 6px; padding: 0; font-size: 1.05rem; }
+  nav.toc ol { margin: 0; columns: 2; column-gap: 32px; }
+  @media (max-width: 560px) { nav.toc ol { columns: 1; } }
+  .tbc {
+    background: var(--tbc-bg); color: var(--tbc-fg);
+    border-bottom: 2px solid var(--tbc-rule);
+    padding: 0 3px; border-radius: 2px; font-weight: 600;
+    -webkit-box-decoration-break: clone; box-decoration-break: clone;
+  }
+  .table-wrap { overflow-x: auto; margin: 0 0 14px; }
+  table { border-collapse: collapse; width: 100%; font-size: .94rem; }
+  th, td { border: 1px solid var(--rule); padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="draft-banner" role="note">Draft for legal review - not yet approved for publication</div>
+<main>
+
+<h1>Unlayered Slicer Privacy Policy</h1>
+
+<p><strong>Unlayered 3D, Inc.</strong></p>
+
+<p><strong>Effective Date:</strong> <span class="tbc">[TO CONFIRM]</span><br>
+<strong>Last Updated:</strong> October 14, 2026<br>
+<strong>Policy Version:</strong> 2026-10-v3</p>
+
+<h2 id="commitment">Our Commitment to Privacy</h2>
+
+<p>Unlayered 3D develops software and technology to advance 3D printing, additive manufacturing, computer-aided design, and related engineering applications.</p>
+
+<p>We believe that understanding how people use our software helps us make better products, solve technical problems, and develop new technologies.</p>
+
+<p>We also recognize that 3D printing projects may contain valuable intellectual property, confidential designs, and proprietary manufacturing information.</p>
+
+<div class="summary">
+  <p><strong>Your privacy choices matter.</strong></p>
+  <ul>
+    <li><strong>Usage diagnostics are optional.</strong> You can choose whether to share diagnostic information with Unlayered.</li>
+    <li><strong>Your models stay on your computer unless you choose to upload them.</strong> Usage diagnostics do not automatically transmit complete 3D models, CAD files, or G-code.</li>
+    <li><strong>Shared diagnostic information helps us develop technology.</strong> When authorized, we may use it to improve our software and conduct research. We use it to develop and train artificial intelligence and other computational systems only for members of the optional Slicing improvement program.</li>
+    <li><strong>You can change your preferences.</strong> You can disable optional diagnostics at any time.</li>
+    <li><strong>Our software remains functional if you decline.</strong> Standard slicing, exporting, and printer connection functionality remains available.</li>
+    <li><strong>We minimize what we collect.</strong> Diagnostic information is restricted to defined technical fields and filtered before transmission.</li>
+  </ul>
+</div>
+
+<p>This policy explains what information Unlayered Slicer processes, how we use it, how long it is retained, and your available privacy rights.</p>
+
+<nav class="toc" aria-label="Contents">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#s1">About Unlayered 3D</a></li>
+    <li><a href="#s2">Your Choices and Consent</a></li>
+    <li><a href="#s3">Information Collected Through Usage Diagnostics</a></li>
+    <li><a href="#s4">How We Use Information</a></li>
+    <li><a href="#s5">Your 3D Models and Project Files</a></li>
+    <li><a href="#s6">Network Communications Outside Optional Diagnostics</a></li>
+    <li><a href="#s7">Identifiers and Pseudonymous Data</a></li>
+    <li><a href="#s8">Collection, Transmission, and Storage</a></li>
+    <li><a href="#s9">IP Addresses and Geographic Information</a></li>
+    <li><a href="#s10">Data Retention</a></li>
+    <li><a href="#s11">Information Security</a></li>
+    <li><a href="#s12">Your Privacy Rights</a></li>
+    <li><a href="#s13">International Data Processing</a></li>
+    <li><a href="#s14">Regional Privacy Information</a></li>
+    <li><a href="#s15">Privacy-Choice Statistics</a></li>
+    <li><a href="#s16">Children and Minors</a></li>
+    <li><a href="#s17">Changes to This Privacy Policy</a></li>
+    <li><a href="#s18">Contact Information</a></li>
+  </ol>
+</nav>
+
+<!-- ================================================================== 1 -->
+<h2 id="s1">1. About Unlayered 3D</h2>
+
+<p>Unlayered Slicer is developed and distributed by <strong>Unlayered 3D, Inc.</strong> ("Unlayered," "we," "our," or "us").</p>
+
+<p><strong>Company:</strong> Unlayered 3D, Inc.<br>
+<strong>Website:</strong> <a href="https://unlayered3d.com">https://unlayered3d.com</a><br>
+<strong>Email:</strong> <a href="mailto:info@unlayered3d.com">info@unlayered3d.com</a><br>
+<strong>Mailing Address:</strong> <span class="tbc">[TO CONFIRM]</span></p>
+
+<p>Unlayered 3D is responsible for the processing of information described in this policy, except where an independent third-party service determines its own processing practices.</p>
+
+<p>This policy applies to the Unlayered Slicer desktop application, including:</p>
+
+<ul>
+  <li>Optional usage diagnostics.</li>
+  <li>Slicing and application performance information.</li>
+  <li>Software error and crash reporting.</li>
+  <li>Application update communications.</li>
+  <li>Privacy preferences.</li>
+  <li>Optional feedback associated with slicing operations.</li>
+  <li>Information transmitted through specific application features.</li>
+</ul>
+
+<p>Our website, account services, and Unlayered Universe may be subject to separate privacy policies and terms.</p>
+
+<p>Where another policy governs a particular service, we will identify that policy as appropriate.</p>
+
+<p>Third-party software and services, including the optional Bambu Lab network plug-in, may operate under their respective providers' privacy terms.</p>
+
+<!-- ================================================================== 2 -->
+<h2 id="s2">2. Your Choices and Consent</h2>
+
+<h3 id="s2-1">2.1 Optional usage diagnostics</h3>
+
+<p>When you first install or update Unlayered Slicer, the application asks whether you want to share optional usage diagnostics.</p>
+
+<p>The screen, titled "Help us build a better slicer", presents two choices:</p>
+
+<p><strong>Keep my data private</strong></p>
+
+<p>No optional usage diagnostics or 3D model data is sent to Unlayered.</p>
+
+<p><strong>Share usage diagnostics</strong> (marked Recommended in the United States)</p>
+
+<p>Help us improve reliability and features by sharing application usage, settings, and performance information. Never includes your name, email, account, or 3D models.</p>
+
+<p>The screen also states that you can change your choice at any time in Preferences &gt; Online, and that we do not sell your models or diagnostic data.</p>
+
+<p>In Unlayered Slicer 0.1.6, if you choose United States as your region, "Share usage diagnostics" starts selected, and you can switch to "Keep my data private" before continuing. In all other regions, neither option is preselected. The Slicing improvement program checkbox described in Section 2.7 is never preselected.</p>
+
+<p>No optional diagnostic information is collected or transmitted until you make a choice.</p>
+
+<h3 id="s2-2">2.2 What sharing authorizes</h3>
+
+<p>Where permitted by applicable law, choosing to share diagnostics authorizes Unlayered to collect and process the technical information described in this policy for the disclosed purposes, including:</p>
+
+<ul>
+  <li>Software reliability, maintenance, and development.</li>
+  <li>Technical troubleshooting and performance analysis.</li>
+  <li>Product improvement and compatibility testing.</li>
+  <li>Research and development of software, hardware, and manufacturing technologies.</li>
+  <li>Statistical analysis of slicing configurations, feature usage, printing outcomes, materials, and machine characteristics.</li>
+  <li>Development of commercial technologies, algorithms, models, and related products.</li>
+</ul>
+
+<p><strong>Sharing usage diagnostics does not authorize the use of your diagnostics to develop, train, test, or evaluate artificial intelligence or machine learning systems.</strong> That use is limited to members of the Slicing improvement program described in Section 2.7.</p>
+
+<p>If applicable law requires independent permission for particular processing purposes, Unlayered will obtain that permission before conducting the affected processing.</p>
+
+<p><strong>Sharing diagnostics does not authorize uploading your actual 3D models, CAD files, or project geometry.</strong></p>
+
+<p>Those uploads require separate authorization.</p>
+
+<h3 id="s2-3">2.3 Changing your choice</h3>
+
+<p>You can change your diagnostic preference through:</p>
+
+<p><strong>Preferences &gt; Online &gt; Send usage diagnostics</strong></p>
+
+<p>When you disable diagnostics:</p>
+
+<ul>
+  <li>Collection of new optional diagnostic events stops.</li>
+  <li>No additional optional diagnostic batches are transmitted.</li>
+  <li>Diagnostic events queued locally but not yet transmitted are deleted.</li>
+  <li>Standard application functionality remains available.</li>
+</ul>
+
+<p>Information already received may remain subject to the retention periods and processing purposes described in this policy, as limited by your applicable privacy rights and legal requirements.</p>
+
+<h3 id="s2-4">2.4 Previously installed versions</h3>
+
+<p>If you disabled diagnostics in an earlier version, that preference remains disabled when upgrading.</p>
+
+<p>Users whose prior settings do not establish a valid preference for the current notice will be asked to make a choice before optional collection begins.</p>
+
+<h3 id="s2-5">2.5 Organization-wide control</h3>
+
+<p>Organizations may disable optional diagnostics on managed computers through the environment variable:</p>
+
+<p><code>UNLAYERED_NO_TELEMETRY</code></p>
+
+<p>When enabled, this control overrides the application's diagnostic preference and prevents optional diagnostic collection and transmission.</p>
+
+<h3 id="s2-6">2.6 Changes requiring additional permission</h3>
+
+<p>If Unlayered materially changes the categories of information collected or the purposes for which information is processed, we will update the relevant disclosures and obtain additional permission where required by law.</p>
+
+<h3 id="s2-7">2.7 Slicing improvement program</h3>
+
+<p>When you select "Share usage diagnostics", an additional checkbox appears: <strong>Slicing improvement program</strong>. It is not selected by default in any region.</p>
+
+<p>Its text reads: "Get early access to new features. Your shared data, never linked to your name, email, or account, may be used to develop, train, test, evaluate, and improve AI, CAD, slicing, software, manufacturing, and hardware systems."</p>
+
+<p>If you join the program, your usage diagnostics, consisting of the same information described in Section 3 (including slicing settings, numerical part measurements, and print ratings), may be used to research, develop, train, test, evaluate, and improve artificial intelligence, machine learning, CAD, slicing, software, manufacturing, and hardware systems.</p>
+
+<p>In a future version of Unlayered Slicer, program members will also share 3D model geometry. Unlayered will notify members and ask for their permission again before any geometry is collected. Unlayered Slicer 0.1.6 does not collect model geometry.</p>
+
+<p>Joining the program is optional. You can leave it at any time in Preferences &gt; Online. Switching usage diagnostics off also ends your membership. Leaving the program does not affect standard application features.</p>
+
+<p><strong>Early access</strong></p>
+
+<p>Program members receive early access to new Unlayered Slicer features before they are generally available. Early access is available only while you are a member of the program.</p>
+
+<p><span class="tbc">[TO CONFIRM: counsel: whether the early-access benefit is a CCPA financial incentive requiring a Notice of Financial Incentive and a value estimate, and whether tying it to the program affects the validity of consent in the EU/EEA, UK, Switzerland and Quebec]</span></p>
+
+<!-- ================================================================== 3 -->
+<h2 id="s3">3. Information Collected Through Usage Diagnostics</h2>
+
+<p>If you authorize optional diagnostics, Unlayered Slicer may transmit the information described below.</p>
+
+<p>Diagnostic events are created from defined fields, using an allowlist intended to exclude information not needed for the specified technical purposes.</p>
+
+<h3 id="s3-1">3.1 Application and device information</h3>
+
+<p>This may include:</p>
+
+<ul>
+  <li>Application version and release channel.</li>
+  <li>Operating system and version.</li>
+  <li>Processor architecture.</li>
+  <li>Processor core count.</li>
+  <li>Installed memory, rounded to whole gigabytes.</li>
+  <li>Application language.</li>
+  <li>Whether the application is being launched for the first time.</li>
+  <li>Display preferences, including dark mode and stealth mode.</li>
+  <li>Status and version of the optional Bambu Lab network plug-in.</li>
+</ul>
+
+<p>This information helps us understand compatibility, software performance, and technical issues across different systems.</p>
+
+<h3 id="s3-2">3.2 Application and feature usage</h3>
+
+<p>We may collect information about how application features are used, including:</p>
+
+<ul>
+  <li>Features and application tabs opened.</li>
+  <li>Built-in printer, process, and material presets selected.</li>
+  <li>Categories of files imported, such as STL or 3MF.</li>
+  <li>Types of exports performed.</li>
+  <li>Application session duration.</li>
+  <li>Software update activity.</li>
+  <li>General outcomes of account sign-in attempts.</li>
+</ul>
+
+<p>Diagnostic events do not include custom file names, user-defined preset names, printer network addresses, or account credentials.</p>
+
+<h3 id="s3-3">3.3 Slicing configurations and parameters</h3>
+
+<p>For individual slicing operations, we may collect:</p>
+
+<ul>
+  <li>Printer manufacturer or vendor.</li>
+  <li>Material types.</li>
+  <li>Built-in preset identifiers or general custom-preset classifications.</li>
+  <li>Enabled slicing features.</li>
+  <li>Slicing settings changed from built-in defaults.</li>
+  <li>Values of permitted settings, up to 60 modified settings per slice.</li>
+  <li>Number of plates, objects, and copies.</li>
+  <li>Estimated printing time.</li>
+  <li>Estimated model and support-material volumes.</li>
+  <li>Time required to perform the slicing operation.</li>
+  <li>Whether slicing succeeded, failed, or was canceled.</li>
+</ul>
+
+<p>This information allows us to understand how users configure slicing operations and how those configurations relate to technical performance.</p>
+
+<p>Settings are restricted to permitted fields, and individual values are limited to 80 characters.</p>
+
+<p>Custom G-code, post-processing scripts, credentials, file paths, private notes, and other excluded free-form values are not included in diagnostic settings.</p>
+
+<h3 id="s3-4">3.4 Numerical part characteristics</h3>
+
+<p>To better understand how geometry affects slicing and manufacturing, Unlayered may collect numerical measurements describing up to 20 parts associated with an individual slicing operation.</p>
+
+<p>These measurements may include:</p>
+
+<ul>
+  <li>Bounding-box dimensions.</li>
+  <li>Estimated part volume.</li>
+  <li>Surface area.</li>
+  <li>Percentage of overhanging surface.</li>
+  <li>Percentage of surface contacting the build plate.</li>
+  <li>Number of copies.</li>
+</ul>
+
+<p>These values describe certain characteristics of a part without transmitting the complete geometry.</p>
+
+<p><strong>Although numerical measurements are not complete CAD geometry, they may reveal information about a proprietary design.</strong></p>
+
+<p>Users working with confidential or sensitive engineering projects should consider this when deciding whether to share diagnostics.</p>
+
+<h3 id="s3-5">3.5 Slicing errors</h3>
+
+<p>If slicing fails, we may collect:</p>
+
+<ul>
+  <li>Error category.</li>
+  <li>Sanitized error message.</li>
+  <li>General operation status.</li>
+  <li>Slicing duration and result.</li>
+</ul>
+
+<p>Error messages are restricted to their first line, limited to 160 characters, and filtered to remove known private text, file paths, and project or object names.</p>
+
+<p>For errors involving custom G-code templates, only the error category is transmitted.</p>
+
+<h3 id="s3-6">3.6 Application crashes</h3>
+
+<p>When an unexpected application exit is detected, diagnostic information may be transmitted during the next launch.</p>
+
+<p>This information may include:</p>
+
+<ul>
+  <li>Application version.</li>
+  <li>General application activity at the time of failure.</li>
+  <li>Approximate session duration.</li>
+  <li>Exception code or signal.</li>
+  <li>Program module and offset.</li>
+</ul>
+
+<p>Memory dumps and unrestricted application logs are not transmitted through ordinary diagnostics.</p>
+
+<p>If you do not share usage diagnostics, this information is sent only if you agree: after an unexpected exit, the next launch asks whether to send a crash report, shows what it contains, and sends it once with a random identifier that is not linked to your installation. If you decline, or close the question, nothing is sent.</p>
+
+<h3 id="s3-7">3.7 Print results and user feedback</h3>
+
+<p>Unlayered may offer an optional prompt asking users to describe the outcome of a print.</p>
+
+<p>If a user provides feedback while diagnostics are enabled, we may collect:</p>
+
+<ul>
+  <li>Whether the print was successful or experienced a problem.</li>
+  <li>Selected problem categories, such as warping or stringing.</li>
+  <li>Whether G-code was exported or sent.</li>
+  <li>A random identifier linking the feedback to the relevant slicing operation.</li>
+</ul>
+
+<p>This information can help us understand relationships between slicing configurations, part characteristics, material selection, and printing results.</p>
+
+<h3 id="s3-8">3.8 Software updates and sign-in outcomes</h3>
+
+<p>Authorized diagnostics may include:</p>
+
+<ul>
+  <li>Whether an update was offered.</li>
+  <li>Whether an update was downloaded.</li>
+  <li>Whether an update was successfully installed.</li>
+  <li>General categories of update failures.</li>
+  <li>Whether an account sign-in attempt succeeded or failed.</li>
+</ul>
+
+<p>Optional diagnostic events do not include account passwords, email addresses, or authentication tokens.</p>
+
+<p>Actual account authentication is handled separately as described in Section 6.</p>
+
+<!-- ================================================================== 4 -->
+<h2 id="s4">4. How We Use Information</h2>
+
+<p>We may use diagnostic information for the purposes described below, to the extent authorized and permitted by applicable law.</p>
+
+<h3 id="s4-1">4.1 Software development and improvement</h3>
+
+<p>We use technical diagnostics to:</p>
+
+<ul>
+  <li>Diagnose crashes and errors.</li>
+  <li>Improve performance and stability.</li>
+  <li>Identify compatibility problems.</li>
+  <li>Improve slicing algorithms.</li>
+  <li>Evaluate software features.</li>
+  <li>Improve printer and material compatibility.</li>
+  <li>Develop new software functionality.</li>
+  <li>Identify common technical issues.</li>
+  <li>Inform engineering and product-development priorities.</li>
+</ul>
+
+<h3 id="s4-2">4.2 Artificial Intelligence and Machine Learning</h3>
+
+<p>Where you have joined the Slicing improvement program described in Section 2.7, Unlayered may use your diagnostic information to research, develop, train, fine-tune, test, validate, evaluate, and improve artificial intelligence, machine learning, statistical models, algorithms, and other computational systems.</p>
+
+<p>If you share usage diagnostics without joining the program, Unlayered does not use your diagnostics for these purposes.</p>
+
+<p>These activities may support the development of new technologies, improvement of existing products, and creation of future capabilities involving:</p>
+
+<ul>
+  <li>3D printing and additive manufacturing.</li>
+  <li>Slicing and toolpath optimization.</li>
+  <li>Computer-aided design.</li>
+  <li>Manufacturing processes and automation.</li>
+  <li>Material and printer performance.</li>
+  <li>Engineering analysis and optimization.</li>
+  <li>Software and hardware development.</li>
+  <li>Related technical and computational applications.</li>
+</ul>
+
+<p>Information used for these purposes may include:</p>
+
+<ul>
+  <li>Slicing configurations and parameters.</li>
+  <li>Numerical part measurements.</li>
+  <li>Printer and material information.</li>
+  <li>Feature usage and application interactions.</li>
+  <li>Slicing performance and results.</li>
+  <li>Errors and technical diagnostics.</li>
+  <li>Voluntarily provided print feedback.</li>
+  <li>Other permitted technical fields described in Section 3.</li>
+</ul>
+
+<p>Unlayered may use lawfully collected and authorized information to develop proprietary or commercial technologies, including technologies that are not yet publicly available.</p>
+
+<p><strong>Authorizing diagnostics does not authorize the automatic upload of complete 3D models, CAD files, G-code, or project geometry.</strong></p>
+
+<p>Separate authorization is required for model uploads.</p>
+
+<p>Where applicable law requires separate consent or another lawful basis for a particular AI or machine-learning purpose, we will satisfy that requirement before conducting the processing.</p>
+
+<h3 id="s4-3">4.3 Engineering and manufacturing research</h3>
+
+<p>Diagnostic information may support research and development involving:</p>
+
+<ul>
+  <li>Additive manufacturing methods.</li>
+  <li>Printer capabilities and limitations.</li>
+  <li>Slicing algorithms.</li>
+  <li>Material utilization and performance.</li>
+  <li>Manufacturing efficiency.</li>
+  <li>Geometric analysis.</li>
+  <li>Software and hardware integration.</li>
+  <li>Printing reliability and quality.</li>
+</ul>
+
+<p>These activities may inform existing and future products, algorithms, software, hardware, and manufacturing methods.</p>
+
+<h3 id="s4-4">4.4 Statistical and product analytics</h3>
+
+<p>We may analyze authorized diagnostics to understand:</p>
+
+<ul>
+  <li>Which features users commonly select.</li>
+  <li>Which printer and material combinations are used.</li>
+  <li>How slicing settings affect performance.</li>
+  <li>Common error categories.</li>
+  <li>Usage patterns across application versions.</li>
+  <li>Adoption and performance of application features.</li>
+</ul>
+
+<p>We may produce aggregate statistical reports and technical research findings based on these analyses.</p>
+
+<h3 id="s4-5">4.5 Commercial research and development</h3>
+
+<p>Unlayered may incorporate findings, algorithms, trained models, and other developments resulting from authorized diagnostic processing into commercial products and services.</p>
+
+<p>Sharing diagnostics does not transfer ownership of your underlying CAD files, models, or other intellectual property to Unlayered.</p>
+
+<p>Where data has been effectively anonymized so that it no longer constitutes personal information under applicable law, we may use the resulting information for ongoing research, statistical analysis, and technology development.</p>
+
+<h3 id="s4-6">4.6 Advertising</h3>
+
+<p>We do not use optional slicer diagnostic records for cross-context behavioral advertising.</p>
+
+<p>This does not govern separate website advertising, cookies, or marketing activities, which are addressed by our website privacy policy.</p>
+
+<p>Unlayered does not sell slicer diagnostics, training records, or your 3D models, and does not license them to third parties for their own purposes.</p>
+
+<p><span class="tbc">[TO CONFIRM: counsel: wording of the no-sale commitment, and whether any vendor disclosure is a "sale" or "sharing" under the CCPA]</span></p>
+
+<!-- ================================================================== 5 -->
+<h2 id="s5">5. Your 3D Models and Project Files</h2>
+
+<h3 id="s5-1">5.1 Models are not collected through diagnostics</h3>
+
+<p>Ordinary usage diagnostics do not automatically upload:</p>
+
+<ul>
+  <li>Complete 3D models.</li>
+  <li>STL, STEP, OBJ, or 3MF project files.</li>
+  <li>CAD geometry or meshes.</li>
+  <li>G-code or toolpaths.</li>
+  <li>Model thumbnails or screenshots.</li>
+  <li>Custom project names or local file paths.</li>
+</ul>
+
+<p>Numerical measurements and technical slicing parameters described in Section 3 are distinct from complete model files.</p>
+
+<p>In a future version, the Slicing improvement program described in Section 2.7 will also include model geometry, and Unlayered will notify program members and ask for their permission again before any geometry is collected; Unlayered Slicer 0.1.6 uploads no model geometry.</p>
+
+<h3 id="s5-2">5.2 Optional model uploads</h3>
+
+<p>Some application features may allow you to upload models or project files for support, troubleshooting, publication, or other purposes.</p>
+
+<p>Before transmitting a model, Unlayered Slicer will request separate authorization identifying:</p>
+
+<ol>
+  <li>The specific model or file.</li>
+  <li>What information will be uploaded.</li>
+  <li>The purpose of the upload.</li>
+  <li>The intended recipient or service.</li>
+  <li>The applicable retention terms.</li>
+  <li>Whether use of the model for AI training is proposed.</li>
+</ol>
+
+<p>Declining an optional model upload does not prevent you from using standard slicing functionality.</p>
+
+<h3 id="s5-3">5.3 AI development using uploaded models</h3>
+
+<p>Where model uploads are offered, Unlayered may separately request authorization to use uploaded model information for artificial intelligence or machine-learning purposes.</p>
+
+<p>Authorization to upload a file does not automatically constitute authorization for a separately presented AI-training purpose.</p>
+
+<p>The applicable permissions and terms will be communicated through the relevant upload process.</p>
+
+<h3 id="s5-4">5.4 Unlayered Universe</h3>
+
+<p>Users may choose to publish models through Unlayered Universe.</p>
+
+<p>Depending on the feature used, authorized uploads may include model geometry, project settings, and thumbnails.</p>
+
+<p>Uploaded and published content is governed by the applicable Unlayered Universe terms and website privacy policy.</p>
+
+<p><span class="tbc">[TO CONFIRM: align the Universe Terms of Service with per-upload AI-training permissions and server-side enforcement.]</span></p>
+
+<h3 id="s5-5">5.5 Technical support</h3>
+
+<p>If you voluntarily submit screenshots, logs, CAD files, models, or other information to obtain support, we may process that information to respond to your request and perform the disclosed support activity.</p>
+
+<p>Additional uses, including AI training on support files, will require an appropriate legal basis and any necessary authorization.</p>
+
+<!-- ================================================================== 6 -->
+<h2 id="s6">6. Network Communications Outside Optional Diagnostics</h2>
+
+<p>Certain application functions involve network communications regardless of your diagnostics preference.</p>
+
+<h3 id="s6-1">6.1 Software update checks</h3>
+
+<p>The application checks for software updates.</p>
+
+<p>Update requests include:</p>
+
+<ul>
+  <li>Application version.</li>
+  <li>Operating system.</li>
+  <li>Processor architecture.</li>
+</ul>
+
+<p>When diagnostics are enabled, update requests may also include the installation identifier to support installation counting and update analysis.</p>
+
+<p>When diagnostics are disabled, that identifier is not included in the update request.</p>
+
+<p>Whatever your choice, two update requests also carry one extra item each: the first one after an update installs says which version it updated from, and the first one after you make or change your privacy choice says which choice you made (share usage diagnostics, or keep my data private). We only count these; we do not store them with the installation identifier or with an account. If your organization has switched diagnostics off on your computer (Section 2.5), neither is sent.</p>
+
+<p>Connection metadata may still be processed by our hosting infrastructure.</p>
+
+<h3 id="s6-2">6.2 Account authentication</h3>
+
+<p>If you sign in to an Unlayered account, authentication is processed through our account infrastructure and is subject to our website privacy policy.</p>
+
+<p>Optional diagnostic events are not intentionally linked to your Unlayered account.</p>
+
+<h3 id="s6-3">6.3 Printer connections</h3>
+
+<p>If you configure Unlayered Slicer to communicate with a printer or print server, such as OctoPrint or Moonraker, the application communicates directly with the configured destination.</p>
+
+<p>Unlayered does not ordinarily receive the contents of those direct connections.</p>
+
+<h3 id="s6-4">6.4 Third-party plug-ins</h3>
+
+<p>Optional third-party software, including the Bambu Lab network plug-in, may process information or communicate with third-party services under its own terms.</p>
+
+<p>These communications are separate from optional Unlayered diagnostics.</p>
+
+<h3 id="s6-5">6.5 Website and Universe features</h3>
+
+<p>Application features that display pages from unlayered3d.com may create ordinary website requests.</p>
+
+<p>Those requests are governed by our website privacy policy and applicable Cookie Policy.</p>
+
+<!-- ================================================================== 7 -->
+<h2 id="s7">7. Identifiers and Pseudonymous Data</h2>
+
+<p>Authorized diagnostics may use three randomly generated identifiers.</p>
+
+<p><strong>Installation ID</strong></p>
+
+<p>Identifies an application installation and allows events from that installation to be associated over time.</p>
+
+<p><strong>Session ID</strong></p>
+
+<p>Identifies an application session.</p>
+
+<p><strong>Slice ID</strong></p>
+
+<p>Identifies an individual slicing operation and allows print feedback to be linked to that operation.</p>
+
+<p>These identifiers are not generated from hardware serial numbers, account credentials, or personal contact information.</p>
+
+<p>Because an installation identifier can connect multiple records, the resulting diagnostic information is <strong>pseudonymous, not necessarily anonymous</strong>.</p>
+
+<p>Unlayered does not intentionally link optional diagnostic records to user accounts, names, or email addresses.</p>
+
+<p>The identifiers may nevertheless constitute personal information under applicable law.</p>
+
+<p>The installation ID is a random UUID created on your computer the first time you choose to share diagnostics. It is stored in the application's configuration as <code>usage_diagnostics_id</code> and is sent only while diagnostics are enabled. If you switch diagnostics off, the identifier remains stored on your computer so that you can quote it in a privacy request. The installation ID is not rotated.</p>
+
+<!-- ================================================================== 8 -->
+<h2 id="s8">8. Collection, Transmission, and Storage</h2>
+
+<h3 id="s8-1">8.1 Diagnostic transmission</h3>
+
+<p>Authorized diagnostic events are sent using HTTPS to:</p>
+
+<p><code>https://unlayered3d.com/api/slicer/telemetry</code></p>
+
+<p>Events are generally transmitted periodically and when the application closes.</p>
+
+<p>If transmission is unsuccessful, up to 20 pending batches may be retained temporarily in the application's local data directory.</p>
+
+<p>Pending batches may be retried when the application next launches.</p>
+
+<p>Disabling diagnostics removes unsent pending events.</p>
+
+<h3 id="s8-2">8.2 Local filtering</h3>
+
+<p>Before transmission, the application applies an allowlist specifying permitted events and fields.</p>
+
+<p>Unexpected fields are discarded.</p>
+
+<p>Settings and error information are filtered to exclude defined categories of potentially private information.</p>
+
+<h3 id="s8-3">8.3 Service providers</h3>
+
+<p>Our documented diagnostic infrastructure includes:</p>
+
+<p><strong>Vercel</strong></p>
+
+<p>Provides hosting and API request processing for unlayered3d.com.</p>
+
+<p><strong>Upstash</strong></p>
+
+<p>Provides Redis database infrastructure for diagnostic counts, recent event batches, and retained development records.</p>
+
+<p>We may use additional service providers to operate, maintain, secure, or improve our services.</p>
+
+<p>Where these providers process personal information on our behalf, we will apply contractual and legal safeguards as required.</p>
+
+<p><span class="tbc">[TO CONFIRM: complete provider list, processor agreements, independent data-use restrictions, and whether any AI-processing providers receive diagnostics.]</span></p>
+
+<h3 id="s8-4">8.4 Administrative access</h3>
+
+<p>Access to diagnostic information is restricted to authorized Unlayered personnel who need it for legitimate business, technical, security, development, or research purposes.</p>
+
+<h3 id="s8-5">8.5 Legal and corporate disclosures</h3>
+
+<p>We may disclose information where necessary to comply with law, legal process, or valid regulatory requests; protect rights and security; or facilitate a financing, merger, acquisition, reorganization, or asset transaction, subject to applicable law.</p>
+
+<!-- ================================================================== 9 -->
+<h2 id="s9">9. IP Addresses and Geographic Information</h2>
+
+<p>Network requests to our infrastructure may expose IP addresses and other connection metadata to our hosting providers.</p>
+
+<p>For diagnostic requests, our application server uses IP addresses for short-term rate limiting.</p>
+
+<p>Our hosting infrastructure may derive an approximate country from an IP address. This information may be included in daily aggregate statistics.</p>
+
+<p>Full IP addresses are not intentionally stored alongside diagnostic training records.</p>
+
+<p>Our hosting and security providers may maintain separate operational request logs.</p>
+
+<p><span class="tbc">[TO CONFIRM: Vercel request logging, IP retention periods, infrastructure security logs, and backup behavior.]</span></p>
+
+<!-- ================================================================== 10 -->
+<h2 id="s10">10. Data Retention</h2>
+
+<p>We retain diagnostic information according to documented technical retention periods, applicable permissions, and legal requirements.</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th scope="col">Information</th><th scope="col">Retention Period</th></tr></thead>
+  <tbody>
+    <tr><td>Daily aggregate diagnostic statistics</td><td>400 days</td></tr>
+    <tr><td>Recent raw diagnostic batches</td><td>30 days</td></tr>
+    <tr><td>Development and AI-training records (Slicing improvement program members only)</td><td>90 days</td></tr>
+    <tr><td>Update-check aggregate statistics</td><td>400 days</td></tr>
+    <tr><td>Short-term rate-limit counters</td><td>Approximately one minute</td></tr>
+    <tr><td>Unsent diagnostics on your computer</td><td>Until transmitted or removed after diagnostics are disabled</td></tr>
+    <tr><td>Local privacy preference record</td><td>Until changed or application data is removed</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Recent raw diagnostic batches are limited to the newest 2,000 batches per day and use installation identifiers shortened to eight characters.</p>
+
+<p>Development and training records hold only the records of Slicing improvement program members, are limited to the newest 50,000 qualifying records per day, and may include full installation identifiers.</p>
+
+<h3 id="s10-1">10.1 Derived research information</h3>
+
+<p>Unlayered may create derived information from authorized diagnostics, including:</p>
+
+<ul>
+  <li>Aggregate statistics.</li>
+  <li>Research findings.</li>
+  <li>Technical performance analyses.</li>
+  <li>Processed training datasets.</li>
+  <li>Trained computational and machine-learning systems.</li>
+  <li>Software and algorithmic improvements.</li>
+</ul>
+
+<p>Derived information that remains personal information remains subject to applicable privacy laws, purpose limitations, retention requirements, and individual rights.</p>
+
+<p>Information that has been effectively anonymized may be retained and used for longer-term research and development where permitted by law.</p>
+
+<h3 id="s10-2">10.2 Exported datasets</h3>
+
+<p>Diagnostic records may be exported from primary storage for authorized analysis, software development, research, or, for Slicing improvement program members' records only, AI training.</p>
+
+<p>Exported datasets containing personal information remain subject to applicable security, retention, and deletion requirements.</p>
+
+<p><span class="tbc">[TO CONFIRM: actual retention periods, access restrictions, and deletion processes for exported datasets and third-party copies.]</span></p>
+
+<h3 id="s10-3">10.3 Withdrawn permissions</h3>
+
+<p>Disabling diagnostics stops future optional collection but does not by itself erase all previously received records.</p>
+
+<p>Previously received information remains subject to applicable privacy rights, including deletion and withdrawal requirements.</p>
+
+<h3 id="s10-4">10.4 Already developed systems</h3>
+
+<p>Information may have contributed to software improvements, statistical analyses, or trained computational systems before permission was withdrawn.</p>
+
+<p>Withdrawal does not necessarily reverse completed processing or make individual information technically separable from a trained model.</p>
+
+<p>We will assess applicable deletion and other requests in accordance with law, including where the information remains personal information.</p>
+
+<h3 id="s10-5">10.5 Retention exceptions</h3>
+
+<p>We may retain information beyond ordinary periods where lawfully necessary for legal obligations, security, dispute resolution, or preservation requirements.</p>
+
+<p>Backups may be subject to separate retention cycles.</p>
+
+<p><span class="tbc">[TO CONFIRM: backup-retention and support-request retention periods.]</span></p>
+
+<!-- ================================================================== 11 -->
+<h2 id="s11">11. Information Security</h2>
+
+<p>We use technical and organizational safeguards intended to protect information.</p>
+
+<p>Our documented safeguards include:</p>
+
+<ul>
+  <li>HTTPS transmission.</li>
+  <li>Client-side event allowlisting.</li>
+  <li>Filtering of excluded private fields.</li>
+  <li>Sanitization of diagnostic error messages.</li>
+  <li>Server-side validation.</li>
+  <li>Restricted administrative access.</li>
+  <li>Automatic expiration of primary diagnostic records.</li>
+</ul>
+
+<p>We also evaluate appropriate measures for access control, infrastructure security, and retention management.</p>
+
+<p>No method of transmission or storage can guarantee absolute security.</p>
+
+<p><span class="tbc">[TO CONFIRM: encryption at rest, multifactor authentication, administrative access logs, incident response, and contractual security controls.]</span></p>
+
+<!-- ================================================================== 12 -->
+<h2 id="s12">12. Your Privacy Rights</h2>
+
+<p>Depending on the law that applies to you, your rights may include:</p>
+
+<ul>
+  <li>Accessing personal information.</li>
+  <li>Requesting correction.</li>
+  <li>Requesting deletion.</li>
+  <li>Obtaining a portable copy.</li>
+  <li>Withdrawing consent.</li>
+  <li>Objecting to or restricting processing.</li>
+  <li>Opting out of certain sales, sharing, advertising, or profiling activities.</li>
+  <li>Appealing certain decisions.</li>
+  <li>Filing a complaint with a privacy regulator.</li>
+</ul>
+
+<p>These rights may be subject to verification procedures and lawful exceptions.</p>
+
+<h3 id="s12-1">12.1 Requesting access or deletion</h3>
+
+<p>To submit a privacy request, email:</p>
+
+<p><strong><a href="mailto:info@unlayered3d.com">info@unlayered3d.com</a></strong></p>
+
+<p>Because diagnostics are not intentionally connected to account identities, we may need your installation identifier to locate relevant records.</p>
+
+<p>Your installation identifier is stored as <code>usage_diagnostics_id</code> in the application's local configuration file.</p>
+
+<p>We may request reasonable verification before disclosing or deleting records.</p>
+
+<h3 id="s12-2">12.2 Individual diagnostic records</h3>
+
+<p>Records associated with an installation identifier may be identifiable and subject to applicable individual rights.</p>
+
+<p>We will respond to valid requests within applicable legal time limits.</p>
+
+<p>Where deletion is required, we will address retained personal information subject to lawful exceptions.</p>
+
+<h3 id="s12-3">12.3 Aggregate statistics</h3>
+
+<p>Some aggregate statistics cannot reasonably be connected to an individual installation.</p>
+
+<p>Where information has been effectively anonymized, individual access or deletion may no longer be technically possible or legally required.</p>
+
+<h3 id="s12-4">12.4 AI training and derived systems</h3>
+
+<p>Requests relating to data used for AI training or other derived systems will be evaluated according to applicable law and the technical characteristics of the information and systems involved.</p>
+
+<p><span class="tbc">[TO CONFIRM: operational verification, access, deletion, appeal, and processor-notification procedures.]</span></p>
+
+<h3 id="s12-5">12.5 Non-discrimination</h3>
+
+<p>We will not unlawfully discriminate against users for declining optional diagnostics or exercising applicable privacy rights.</p>
+
+<!-- ================================================================== 13 -->
+<h2 id="s13">13. International Data Processing</h2>
+
+<p>Unlayered 3D is based in the United States.</p>
+
+<p>Diagnostic information may be transmitted to and processed in the United States and other countries where authorized service providers operate.</p>
+
+<p>Different jurisdictions may have different data-protection laws and government-access requirements.</p>
+
+<p>Where required, we will use appropriate international transfer safeguards.</p>
+
+<p><span class="tbc">[TO CONFIRM: actual processing regions, transfer agreements, and safeguards applicable to the EU/EEA, UK, Switzerland, Canada, and other jurisdictions.]</span></p>
+
+<!-- ================================================================== 14 -->
+<h2 id="s14">14. Regional Privacy Information</h2>
+
+<h3 id="s14-1">14.1 United States</h3>
+
+<p>In Unlayered Slicer 0.1.6, for users who choose United States as their region, "Share usage diagnostics" starts selected, and users can switch to "Keep my data private" before continuing. The Slicing improvement program checkbox is not preselected.</p>
+
+<p>Depending on the applicable state law and relevant legal thresholds, users may have additional privacy rights.</p>
+
+<p><strong>California notice at collection</strong></p>
+
+<p>The following categories of personal information may be processed through optional diagnostics:</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th scope="col">Category</th><th scope="col">Examples</th><th scope="col">Purposes</th></tr></thead>
+  <tbody>
+    <tr><td>Identifiers</td><td>Pseudonymous installation, session, and slice identifiers</td><td>Event association, analytics, and development</td></tr>
+    <tr><td>Internet or electronic network activity</td><td>Feature usage, slicing configurations, performance, errors, and print ratings</td><td>Software improvement, technical research, and, for Slicing improvement program members only, AI development</td></tr>
+    <tr><td>Device information</td><td>Operating system, processor, memory, and application version</td><td>Compatibility and reliability</td></tr>
+    <tr><td>Approximate geolocation</td><td>Country derived from connection information</td><td>Aggregate usage statistics</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The recipients and retention periods are described in Sections 8 and 10.</p>
+
+<p>We do not use optional slicer diagnostics for cross-context behavioral advertising.</p>
+
+<p>Members of the Slicing improvement program receive early access to new features in exchange for participation (see Section 2.7).</p>
+
+<p><span class="tbc">[TO CONFIRM: counsel: if the early-access benefit is a CCPA financial incentive, insert here the Notice of Financial Incentive, the good-faith estimate of the value of the data, and how to withdraw]</span></p>
+
+<p><span class="tbc">[TO CONFIRM: California and other state-law applicability; precise category mapping; sale/sharing status; and required request or opt-out mechanisms.]</span></p>
+
+<h3 id="s14-2">14.2 Canada</h3>
+
+<p>Users in Canada must affirmatively choose to share optional diagnostics; neither option is preselected.</p>
+
+<p>We describe the information collected, the purposes of processing, the organizations involved, and the available withdrawal mechanisms throughout this policy.</p>
+
+<p>Where Canadian law requires separate consent for particular purposes, including AI training, Unlayered will request that consent.</p>
+
+<p><strong>Quebec</strong></p>
+
+<p>Additional obligations may apply under Quebec's private-sector privacy law, including:</p>
+
+<ul>
+  <li>Purpose-specific consent.</li>
+  <li>French-language disclosures.</li>
+  <li>Privacy-protective defaults.</li>
+  <li>Privacy impact assessments.</li>
+  <li>International data-transfer assessments.</li>
+  <li>Designation and publication of the appropriate privacy contact.</li>
+</ul>
+
+<p><span class="tbc">[TO CONFIRM: implementation of applicable Quebec requirements before collecting affected information.]</span></p>
+
+<h3 id="s14-3">14.3 European Union and European Economic Area</h3>
+
+<p>Where the GDPR applies, Unlayered relies on an appropriate lawful basis for each processing purpose.</p>
+
+<p>Optional diagnostics may be processed on the basis of consent under Article 6(1)(a).</p>
+
+<p>Users in the EU/EEA must affirmatively choose to share optional diagnostics; neither option is preselected.</p>
+
+<p>Where separate purposes require separate consent, users will be given appropriate granular choices.</p>
+
+<p>Necessary application and network operations may rely on other applicable lawful bases, including legitimate interests where justified.</p>
+
+<p>Users may withdraw consent and exercise their applicable GDPR rights.</p>
+
+<p><span class="tbc">[TO CONFIRM: lawful-basis assessments, purpose-specific consent controls, international transfer safeguards, and Article 27 representative obligations.]</span></p>
+
+<h3 id="s14-4">14.4 United Kingdom</h3>
+
+<p>Where UK data-protection law applies, we will comply with applicable requirements for transparency, consent, international transfers, and individual rights.</p>
+
+<p>Users may complain to the Information Commissioner's Office.</p>
+
+<p><span class="tbc">[TO CONFIRM: applicable UK representative and transfer obligations.]</span></p>
+
+<h3 id="s14-5">14.5 Switzerland</h3>
+
+<p>Where Swiss data-protection law applies, Unlayered will comply with relevant requirements under the Swiss Federal Act on Data Protection.</p>
+
+<p><span class="tbc">[TO CONFIRM: Swiss-specific disclosure, representation, and international-transfer obligations.]</span></p>
+
+<h3 id="s14-6">14.6 Mexico</h3>
+
+<p>Where Mexican privacy law applies, Unlayered will provide the required privacy notice and mechanisms for exercising applicable rights.</p>
+
+<p>These may include rights of access, rectification, cancellation, and opposition.</p>
+
+<p><span class="tbc">[TO CONFIRM: Spanish-language notice, company domicile, response procedures, and requirements under the applicable Mexican private-sector privacy law.]</span></p>
+
+<h3 id="s14-7">14.7 Other Countries and Territories</h3>
+
+<p>Privacy requirements vary by jurisdiction.</p>
+
+<p>We will apply additional notices, permissions, or safeguards where required by applicable law.</p>
+
+<p>A user's self-declared region does not eliminate rights or obligations arising from the user's actual jurisdiction.</p>
+
+<!-- ================================================================== 15 -->
+<h2 id="s15">15. Privacy-Choice Statistics</h2>
+
+<p>Unlayered Slicer 0.1.6 includes a planned capability to analyze privacy-choice activity, but that functionality is disabled.</p>
+
+<p>No statistics are currently transmitted through that feature.</p>
+
+<p>If activated in a future release, privacy-choice statistics may include:</p>
+
+<ul>
+  <li>Whether a privacy notice was displayed.</li>
+  <li>Whether diagnostics were accepted or declined.</li>
+  <li>Whether a preference changed.</li>
+  <li>The region selected by the user.</li>
+  <li>The applicable notice version.</li>
+  <li>Where the choice was made in the application.</li>
+</ul>
+
+<p>Where permitted by law, these statistics may be collected and processed as aggregate counts without persistent installation or session identifiers.</p>
+
+<p>They would not be used for AI training.</p>
+
+<p>We will provide any notice, consent, or other mechanism required before enabling such collection.</p>
+
+<!-- ================================================================== 16 -->
+<h2 id="s16">16. Children and Minors</h2>
+
+<p>Unlayered Slicer is a technical application intended for people engaged in 3D printing and is not directed to children under 13.</p>
+
+<p>We do not knowingly seek optional diagnostic personal information from children under 13 without any required parental authorization.</p>
+
+<p>Additional age or parental-permission requirements may apply in certain jurisdictions.</p>
+
+<p>Parents or guardians may contact us regarding privacy concerns involving a child.</p>
+
+<p><span class="tbc">[TO CONFIRM: age-related consent controls and applicable regional requirements.]</span></p>
+
+<!-- ================================================================== 17 -->
+<h2 id="s17">17. Changes to This Privacy Policy</h2>
+
+<p>We may update this policy to reflect changes to:</p>
+
+<ul>
+  <li>Software features.</li>
+  <li>Information collected.</li>
+  <li>Processing practices and purposes.</li>
+  <li>Research and development activities.</li>
+  <li>Service providers.</li>
+  <li>Retention periods.</li>
+  <li>Legal requirements.</li>
+</ul>
+
+<p>Updates will be published with a revised version and effective date.</p>
+
+<p>Where an updated practice requires new consent or another legal authorization, we will obtain it before beginning the affected processing.</p>
+
+<p>Privacy choices will not automatically be overridden by an application update.</p>
+
+<!-- ================================================================== 18 -->
+<h2 id="s18">18. Contact Information</h2>
+
+<p>For questions about this policy, privacy requests, or concerns about the handling of information, contact:</p>
+
+<p><strong>Unlayered 3D, Inc.</strong></p>
+
+<p>Website: <a href="https://unlayered3d.com">https://unlayered3d.com</a></p>
+
+<p>Email: <a href="mailto:info@unlayered3d.com">info@unlayered3d.com</a></p>
+
+<p>Mailing Address: <span class="tbc">[TO CONFIRM]</span></p>
+
+<p>Where applicable law requires a designated privacy officer or regional representative, the relevant contact details will be provided.</p>
+
+<hr>
+
+<p class="muted"><strong>Unlayered Slicer Privacy Policy</strong><br>
+<strong>Version:</strong> 2026-10-v3<br>
+<strong>Effective Date:</strong> <span class="tbc">[TO CONFIRM]</span></p>
+
+</main>
+</body>
+</html>

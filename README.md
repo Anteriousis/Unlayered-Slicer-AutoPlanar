@@ -10,11 +10,11 @@
 
 Unlayered Slicer is Unlayered 3D's fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer). It is built on OrcaSlicer 2.5.0-dev and keeps its feature set: calibration tools, wall and seam control, adaptive layer heights, tree supports, multi-material printing, and network printing through Klipper, PrusaLink, OctoPrint, Duet and others.
 
-This README describes **Unlayered Slicer 0.1.4**.
+This README describes **Unlayered Slicer 0.1.7**.
 
 - **Website:** <https://unlayered3d.com>
 - **What's new:** [CHANGELOG.md](CHANGELOG.md) lists the changes in each release.
-- **Source:** this repository. Each release is tagged; [`v0.1.4`](https://github.com/Unlayered3D/Unlayered-Slicer/tree/v0.1.4) is the exact source of the 0.1.4 installer.
+- **Source:** this repository. Each release is tagged; [`v0.1.7`](https://github.com/Unlayered3D/Unlayered-Slicer/tree/v0.1.7) is the source of the 0.1.7 installers.
 
 # What it adds
 
@@ -37,8 +37,10 @@ These features are switched on per printer: **Printer settings ▸ Motion abilit
 
 - **Unlayered 5 Axis Printer** profile (0.4, 0.6 and 0.8 mm nozzles), with its own process presets. Its start G-code calls macros that exist only on an Unlayered printer.
 - **Unlayered host type** for printers running RepRapFirmware. It sends and prints like the Duet host type, and it adds two buttons to the physical printer dialog:
-  - **Firmware**: updates the mainboard, Wi-Fi module and display. It uses releases of [Unlayered3D/RepRapFirmware](https://github.com/Unlayered3D/RepRapFirmware), or the bundle shipped with the installer.
-  - **Config**: installs printer configuration files.
+  - **Firmware**: updates the mainboard, Wi-Fi module and display, and the printer's web interface when the release carries a matching one. It uses releases of [Unlayered3D/RepRapFirmware](https://github.com/Unlayered3D/RepRapFirmware) published on unlayered3d.com, or the bundle shipped with the installer.
+  - **Config**: installs printer configuration files published on unlayered3d.com (with your Unlayered account), or from a zip. Files the printer measured for itself are never replaced, the replaced files are saved on this computer first, and a failed install is rolled back.
+
+  When the selected printer is an Unlayered printer on your network, the slicer also offers newer firmware or configuration once per session: Update / Not now / Skip this version. Nothing is installed without your confirmation.
 
   Both work over the network or USB. They target the Duet 3 Mini 5+ in an Unlayered printer. See [USB_UPDATES.md](USB_UPDATES.md).
 
@@ -54,17 +56,24 @@ A page talks to the slicer only through a documented bridge with per-tab permiss
 - **Online vendor profile updates.** Profiles come with the app.
 - **Bambu Lab cloud features:** cloud sign-in, cloud printing and account binding. Bambu Lab printers are used over the local network (LAN mode, with an access code), which needs the Bambu Lab network plug-in. The plug-in is optional: the first-run setup offers it, and it can be installed later from **Preferences ▸ Online**.
 
-**Stealth mode** is offered on the first-run setup page, off by default. It hides the remaining cloud account settings.
+## Importing from other slicers
+
+**File ▸ Import ▸ Import Settings from Other Slicers** (also offered during setup) reads the printers, filaments and your own presets of OrcaSlicer, PrusaSlicer, Bambu Studio, Creality Print, SuperSlicer, ElegooSlicer, Anycubic Slicer Next, Snapmaker Orca, QIDI Studio, Flash Studio, PhrozenOrca and FLSUN Slicer from their folders on this computer. Nothing in those apps is changed, and API keys and passwords are never copied. The home page's **Recently opened** list also shows those apps' recent projects, with a filter per app. All of this stays on your computer.
+
+## Stealth mode
+
+**Stealth mode** is off by default and set in **Preferences**. It hides the remaining cloud account settings, and stops the account sign-in check and the printer configuration offer.
 
 ## Network access
 
-These connections are not affected by stealth mode:
+These connections are not affected by stealth mode unless noted:
 
 - **At launch:** the app checks for a new version at `https://unlayered3d.com/slicer/latest.json`. You can also check manually with **Help ▸ Check for Updates**. Builds whose version ends in `-dev` skip the automatic check.
 - **Updates:** downloading an update needs an Unlayered account. **Help ▸ Sign in to Unlayered** opens unlayered3d.com in your browser; the slicer keeps the resulting sign-in token in the system credential store and sends it only to unlayered3d.com. Signed in, a new version downloads in the background and installs on **Help ▸ Restart to Update** or the next time the app closes. On macOS this works when the app is in *Applications* (or *Applications* in your home folder); a copy anywhere else opens the download page instead.
-- **Usage diagnostics:** on by default. The app sends which features are used, slicing results and errors, crashes, and basic system details (operating system, processor cores, memory, language) to `https://unlayered3d.com/api/slicer/telemetry`, with a random id that is not linked to you or your account. Models, G-code, file and object names, and the names of your own presets are never sent. The site also derives an approximate country from the request (the IP address itself is not stored). Turn it off in **Preferences ▸ Online ▸ Send anonymous usage diagnostics**, or set the `UNLAYERED_NO_TELEMETRY` environment variable to switch it off for every user of the computer. [USAGE_DIAGNOSTICS.md](USAGE_DIAGNOSTICS.md) lists every event and field that is sent, and how long it is kept.
+- **Usage diagnostics:** only if you choose to share them. First-run setup (or the first launch after updating from 0.1.5 or earlier) asks **Keep my data private** or **Share usage diagnostics**; nothing optional is sent before you answer. Shared diagnostics say which features are used, slicing results and errors, crashes, and basic system details (operating system, processor cores, memory, language), sent to `https://unlayered3d.com/api/slicer/telemetry` with a random id that is not linked to you or your account. Models, G-code, file and object names, and the names of your own presets are never sent. The site also derives an approximate country from the request (the IP address itself is not stored). The optional **Slicing improvement program**, a separate box under Share, adds early access to new features and lets that data be used to develop, train, test, evaluate, and improve AI, CAD, slicing, software, manufacturing, and hardware systems. Change either in **Preferences ▸ Online**, or set the `UNLAYERED_NO_TELEMETRY` environment variable to switch diagnostics off for every user of the computer. [USAGE_DIAGNOSTICS.md](USAGE_DIAGNOSTICS.md) lists every event and field that is sent, and how long it is kept; the bundled Slicer Privacy Policy covers the same data.
+- **Crash reports:** if you do not share usage diagnostics, the launch after the app closed unexpectedly asks whether to send that one crash report, and sends it once only if you agree.
 - **Universe tab:** loads its page from unlayered3d.com when opened.
-- **Firmware button:** reads release information from the GitHub API.
+- **Printer updates:** the Firmware and Config buttons, and the once-per-session update offer, read release information from `https://unlayered3d.com/printer-updates-api`. Configuration releases need your Unlayered account; with stealth mode on, only firmware is checked.
 
 If you install the Bambu Lab network plug-in, it is downloaded from Bambu Lab's servers.
 
@@ -72,7 +81,7 @@ If you install the Bambu Lab network plug-in, it is downloaded from Bambu Lab's 
 
 Installers are provided to Unlayered 3D customers. There are no public binary releases, so everyone else builds from source.
 
-Unlayered's own builds are Windows x64. The macOS and Linux build scripts are carried over from OrcaSlicer and use the renamed targets, but they are not regularly tested.
+Unlayered's own builds are Windows x64 and macOS (universal: Apple silicon and Intel). The Linux build scripts are carried over from OrcaSlicer and use the renamed targets, but they are not regularly tested.
 
 # How to build
 

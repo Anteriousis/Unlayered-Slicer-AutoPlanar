@@ -160,7 +160,7 @@ to `DuetSerialClient`.
 
 ## 6. Where the files come from
 
-Unchanged by any of this: both feeds are fetched over HTTP regardless of how the printer is reached.
-The `github_api_base` key in `Unlayered Slicer.conf` points the updaters at
-`https://unlayered3d.com/printer-updates-api`, which serves GitHub-shaped release JSON. Firmware is
-public; config needs the customer's slicer access token, sent as `Authorization: Bearer`.
+Unchanged by any of this: both feeds are fetched over HTTP regardless of how the printer is reached,
+from `https://unlayered3d.com/printer-updates-api` by default (`github_api_base` overrides it), which
+serves GitHub-shaped release JSON. Firmware is public; config needs the customer's Unlayered account
+device token, sent as `Authorization: Bearer` and only to that site.

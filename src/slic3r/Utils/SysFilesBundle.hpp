@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "PrinterUpdateCheck.hpp"
+
 namespace Slic3r {
 
 // The printer's configuration - config.g, the homing and tool-change macros, the macros the user
@@ -91,6 +93,17 @@ bool sys_map_path(const std::string &relative, std::string &card_path_out, std::
 // droppings, VCS metadata, and the marker file, which this code owns.
 bool sys_is_ignored_file(const std::string &relative_path);
 
+// File names (matched case-insensitively, in any folder) that describe ONE physical printer rather
+// than the machine model: its measured calibration, plate offsets, name, network, setup progress,
+// logs and odometer. tools/make_sys_bundle.py leaves the same names out of a package, and the
+// printer's own sys/factoryreset.g erases them; tools/verify_sys_updater.py checks the lists agree.
+const std::vector<std::string> &sys_machine_specific_names();
+
+// True for a card path whose file name is one of sys_machine_specific_names(). Such a file is never
+// installed, from any source: copying it from another card hands this printer another one's
+// calibration or identity, and no release has a reason to carry one.
+bool sys_is_machine_specific(const std::string &card_path);
+
 // Parses the manifest.json carried by a package:
 //   { "version": "...", "date": "...", "machine": "...", "notes": "...",
 //     "minFirmware": "3.7.0-beta.1+unlayered.15",
@@ -171,18 +184,48 @@ public:
         // Empty means "the newest published release".
         std::string tag;
         bool        allow_prerelease = true;
-        // Optional token for a private repository. Prefer a public repository over shipping one.
-        std::string token;
+        // The customer's Unlayered credential: the configuration feed needs their account sign-in.
+        // Sent only to requests on its own site (FeedCredential::token_for), never to GitHub.
+        FeedCredential credential;
         // Preferred asset name; any .zip asset is accepted when this one is not present.
         std::string asset_name = "sys.zip";
+        // Refuse a release whose archive does not declare a SHA-256 for every file it installs
+        // (a manifest.json from tools/make_sys_bundle.py always does). A release is written to a
+        // customer's printer without anyone looking at it first, so it must prove it arrived
+        // intact; a folder or zip picked by hand is the bench workflow and is not held to this.
+        bool require_checksums = true;
+    };
+
+    // The release the feed offers, resolved without downloading its archive.
+    struct Release
+    {
+        // Free-form on the Unlayered feed. The version that counts is the one in the archive's
+        // manifest.json, which is only known after fetch().
+        std::string tag;
+        // The tag without a leading "v": the version only for an archive with no manifest.
+        std::string version;
+        std::string notes;
+        std::string asset_name;
+        std::string asset_url;
+        // From the asset's "digest" ("sha256:<hex>"; lowercase hex here) when the feed gives one.
+        // The downloaded archive must match it before anything in it is read.
+        std::string asset_sha256;
     };
 
     explicit GitHubSysFileSource(Options opts);
     bool        fetch(SysFilePackage &pkg_out, SysProgressFn progress, std::string &error_out) override;
     std::string description() const override;
 
+    // One request: which release is current and where its archive is. fetch() starts with it.
+    bool fetch_release(Release &out, std::string &error_out);
+
+    // The release list's HTTP status from the last fetch_release()/fetch(), 0 when the feed never
+    // answered - so a caller can tell "sign in" (401) and "no access" (403) from "unreachable".
+    unsigned last_http_status() const { return m_last_status; }
+
 private:
-    Options m_opts;
+    Options  m_opts;
+    unsigned m_last_status = 0;
 };
 
 } // namespace Slic3r

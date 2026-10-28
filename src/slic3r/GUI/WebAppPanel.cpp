@@ -25,6 +25,9 @@
 #include <wx/tokenzr.h>
 #include <wx/uri.h>
 #include <wx/utils.h>
+#include <wx/timer.h>
+#include <wx/weakref.h>
+#include <chrono>
 
 #ifdef __linux__
 #include <webkit2/webkit2.h>
@@ -59,6 +62,15 @@ const char* const FORWARD_EDITION_TAG = "tabs-on-2026-09-20";
 
 const char* const ENV_UNIVERSE_URL   = "ORCA_UNIVERSE_APP_URL";
 const char* const ENV_UNIVERSE_TITLE = "ORCA_UNIVERSE_APP_TITLE";
+
+// The <slot>_allow_install keys (WebAppSlot::key_allow_install). Spelled here rather than beside
+// the other SETTING_*_APP_* keys in AppConfig.hpp only because that header is included across
+// libslic3r and the GUI, so touching it rebuilds most of both; nothing else reads these keys.
+// Like *_allow_export they have no AppConfig default, so "absent" survives long enough for
+// ensure_seeded to tell an installation that predates the key from a user who switched it off.
+const char* const SETTING_WEB_APP_ALLOW_INSTALL      = "web_app_allow_install";
+const char* const SETTING_AGENT_APP_ALLOW_INSTALL    = "agent_app_allow_install";
+const char* const SETTING_UNIVERSE_APP_ALLOW_INSTALL = "universe_app_allow_install";
 
 wxString env_or_empty(const char* name)
 {
@@ -146,6 +158,10 @@ void ensure_seeded(const WebAppSlot& slot)
         cfg->set_bool(slot.key_allow_settings, slot.default_allow_settings);
     if (!cfg->has(slot.key_allow_export))
         cfg->set_bool(slot.key_allow_export, slot.default_allow_export);
+    // On absence, exactly like allow_export and for the same reason: the key is newer than the
+    // installations it has to reach, and a false the user chose is non-empty and left alone.
+    if (!cfg->has(slot.key_allow_install))
+        cfg->set_bool(slot.key_allow_install, slot.default_allow_install);
 
     // Recorded here rather than after the overlay below, because the defaults above are a seed in
     // their own right and a shipped build never reaches the overlay at all. Without this the
@@ -197,6 +213,9 @@ void ensure_seeded(const WebAppSlot& slot)
         if (seed.contains("allow_export") && seed["allow_export"].is_boolean() &&
             !cfg->has(slot.key_allow_export))
             cfg->set_bool(slot.key_allow_export, seed["allow_export"].get<bool>());
+        if (seed.contains("allow_install") && seed["allow_install"].is_boolean() &&
+            !cfg->has(slot.key_allow_install))
+            cfg->set_bool(slot.key_allow_install, seed["allow_install"].get<bool>());
         if (seed.contains("extra_origins") && seed["extra_origins"].is_array() &&
             !cfg->has(slot.key_extra_origins)) {
             std::string joined;
@@ -252,6 +271,7 @@ const WebAppSlot& WebAppSlot::generic()
         s.key_seeded         = SETTING_WEB_APP_SEEDED;
         s.key_allow_settings = SETTING_WEB_APP_ALLOW_SETTINGS;
         s.key_allow_export   = SETTING_WEB_APP_ALLOW_EXPORT;
+        s.key_allow_install  = SETTING_WEB_APP_ALLOW_INSTALL;
         s.key_disable_once   = SETTING_WEB_APP_DISABLE_ONCE;
         s.env_url            = ENV_URL;
         s.env_title          = ENV_TITLE;
@@ -265,6 +285,7 @@ const WebAppSlot& WebAppSlot::generic()
         s.default_title          = nullptr;
         s.default_allow_settings = false;
         s.default_allow_export   = false;
+        s.default_allow_install  = false;
         s.download_hosts     = nullptr;
         s.legacy_url         = LEGACY_DEV_URL;
         s.live_theme         = false; // reloads on a theme toggle, as it always has
@@ -288,6 +309,7 @@ const WebAppSlot& WebAppSlot::agent()
         s.key_seeded         = SETTING_AGENT_APP_SEEDED;
         s.key_allow_settings = SETTING_AGENT_APP_ALLOW_SETTINGS;
         s.key_allow_export   = SETTING_AGENT_APP_ALLOW_EXPORT;
+        s.key_allow_install  = SETTING_AGENT_APP_ALLOW_INSTALL;
         s.key_disable_once   = SETTING_AGENT_APP_DISABLE_ONCE;
         s.env_url            = ENV_AGENT_URL;
         s.env_title          = ENV_AGENT_TITLE;
@@ -298,12 +320,8 @@ const WebAppSlot& WebAppSlot::agent()
         // withdrawal cleared it.
         s.visibility_once        = FORWARD_EDITION_TAG;
         s.visibility_once_enable = true;
-        s.default_url            = "https://unlayered3d.com/agent?host=unlayered-slicer";
-        s.default_title          = "Agent";
-        // The agent's whole purpose is to change print settings on the user's behalf, so the
-        // settings family of the bridge is on for this tab and off for the other two.
-        s.default_allow_settings = true;
         s.default_allow_export   = false;
+        s.default_allow_install  = false;
         s.download_hosts     = nullptr;
         s.legacy_url         = nullptr; // no build ever seeded this slot with a dead address
         s.live_theme         = true;    // the page holds a conversation; re-theme it in place
@@ -327,6 +345,7 @@ const WebAppSlot& WebAppSlot::universe()
         s.key_seeded         = SETTING_UNIVERSE_APP_SEEDED;
         s.key_allow_settings = SETTING_UNIVERSE_APP_ALLOW_SETTINGS;
         s.key_allow_export   = SETTING_UNIVERSE_APP_ALLOW_EXPORT;
+        s.key_allow_install  = SETTING_UNIVERSE_APP_ALLOW_INSTALL;
         s.key_disable_once   = SETTING_UNIVERSE_APP_DISABLE_ONCE;
         s.env_url            = ENV_UNIVERSE_URL;
         s.env_title          = ENV_UNIVERSE_TITLE;
@@ -342,6 +361,10 @@ const WebAppSlot& WebAppSlot::universe()
         // reads the bytes back -- and is a different thing to consent to, hence a separate gate.
         s.default_allow_settings = false;
         s.default_allow_export   = true;
+        // Universe is where printer profiles are shared, so it may OFFER one for installation.
+        // The user still confirms every install in a native dialog that shows the profile's
+        // machine, envelope and any risky custom G-code, and a profile never carries a print host.
+        s.default_allow_install  = true;
         // Universe answers a download with a redirect to blob storage, which is a DIFFERENT
         // host from the page and whose sub-domain belongs to the deployment -- so no exact
         // host can be baked in, and a leading dot matches the family. Without this every
@@ -395,7 +418,7 @@ bool WebAppPanel::is_enabled(const WebAppSlot& slot)
 {
     // Not in a release build, whatever the config or the ORCA_*_APP_URL environment says:
     // - the generic slot is a developer harness, not part of the product;
-    // - the Agent tab is not part of this release.
+    // - the second slot is not part of this release.
     // The dev edition keeps both.
     if (std::string(slot.id) == WebAppSlot::generic().id || std::string(slot.id) == WebAppSlot::agent().id)
         return false;
@@ -585,16 +608,43 @@ void WebAppPanel::load_url(const wxString& url)
 
     m_showing_fallback = false;
 
-    if (IsShown()) {
-        m_browser->LoadURL(url);
-    } else {
-        // Deferred, as PrinterWebView does: nothing is fetched until the user opens the tab.
-        m_url_deferred = url;
+    // Cleared in OnLoaded once the page itself has loaded, so showing the tab again retries a load
+    // that never finished.
+    m_url_deferred = url;
+    if (!IsShown()) {
+        BOOST_LOG_TRIVIAL(info) << "WebAppPanel[" << m_slot.id << "]: deferred until shown: " << url.ToUTF8().data();
+        return; // deferred, as PrinterWebView does: nothing is fetched until the user opens the tab
     }
+
+    BOOST_LOG_TRIVIAL(info) << "WebAppPanel[" << m_slot.id << "]: loading " << url.ToUTF8().data();
+    m_browser->LoadURL(url);
+    if (IsShownOnScreen())
+        return;
+    // The selected tab of a window that is not up yet (startup, with this tab last used). A load
+    // started now can end as a blank page (seen on macOS), and no Show() follows to retry it: load
+    // again once the window is on screen, if the page has not loaded by then.
+    wxWeakRef<WebAppPanel> self(this);
+    auto      *timer   = new wxTimer();
+    const auto started = std::chrono::steady_clock::now();
+    timer->Bind(wxEVT_TIMER, [self, timer, started](wxTimerEvent &) {
+        const bool gave_up = std::chrono::steady_clock::now() - started > std::chrono::minutes(2);
+        if (self && !self->IsShownOnScreen() && !gave_up)
+            return;
+        timer->Stop();
+        if (self && !gave_up && self->m_browser != nullptr && !self->m_url_deferred.empty()) {
+            BOOST_LOG_TRIVIAL(info) << "WebAppPanel: loading " << self->m_url_deferred.ToUTF8().data()
+                                    << " again now that the window is on screen";
+            self->m_browser->LoadURL(self->m_url_deferred);
+        }
+        wxTheApp->CallAfter([timer]() { delete timer; });
+    });
+    timer->Start(250);
 }
 
 bool WebAppPanel::Show(bool show)
 {
+    BOOST_LOG_TRIVIAL(info) << "WebAppPanel[" << m_slot.id << "]: " << (show ? "shown" : "hidden")
+                            << (m_url_deferred.empty() ? "" : ", its page not loaded yet");
     if (show && m_browser != nullptr && !m_url_deferred.empty()) {
         // m_url_deferred is cleared in OnLoaded, not here, so a failed load retries next time
         // the tab is shown.
@@ -802,6 +852,8 @@ void WebAppPanel::OnNewWindow(wxWebViewEvent& evt)
 
 void WebAppPanel::OnLoaded(wxWebViewEvent& evt)
 {
+    BOOST_LOG_TRIVIAL(info) << "WebAppPanel[" << m_slot.id << "]: loaded " << evt.GetURL().ToUTF8().data()
+                            << (m_url_deferred.empty() || evt.GetURL() == m_url_deferred ? "" : " (the tab's page is still to load)");
     if (evt.GetURL().IsEmpty())
         return;
 
@@ -809,6 +861,11 @@ void WebAppPanel::OnLoaded(wxWebViewEvent& evt)
     // WebKitGTK may finish loading its initial blank document while this tab is hidden.
     // Preserve the deferred home URL so showing the tab starts navigation.
     if (evt.GetURL() == "about:blank")
+        return;
+#else
+    // The same initial blank document on the other engines (WKWebView did it at startup, leaving the
+    // tab white): it is not the page this tab is waiting for.
+    if (evt.GetURL() == "about:blank" && !m_url_deferred.empty())
         return;
 #endif
 
@@ -895,6 +952,12 @@ bool WebAppPanel::allows_export() const
 {
     AppConfig* cfg = wxGetApp().app_config;
     return cfg != nullptr && cfg->get_bool(m_slot.key_allow_export);
+}
+
+bool WebAppPanel::allows_install() const
+{
+    AppConfig* cfg = wxGetApp().app_config;
+    return cfg != nullptr && m_slot.key_allow_install != nullptr && cfg->get_bool(m_slot.key_allow_install);
 }
 
 void WebAppPanel::notify_all(const std::string& method, const json& data)

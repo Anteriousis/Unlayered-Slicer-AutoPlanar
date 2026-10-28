@@ -71,6 +71,7 @@ namespace GUI{
 
 class RemovableDriveManager;
 class AutoUpdater;
+class PrinterUpdateOffer;
 class OtherInstanceMessageHandler;
 class MainFrame;
 class Sidebar;
@@ -319,6 +320,12 @@ private:
     std::unique_ptr<Downloader> m_downloader;
     // The Unlayered account and the "Restart to update" self-update. See AutoUpdater.hpp.
     std::unique_ptr<AutoUpdater> m_auto_updater;
+    // The setup wizard while it is up (run_wizard), and whether a Quit arrived during it: the
+    // wizard is closed first and the quit re-issued once it has returned (macOS, MacQuitHandler.h).
+    wxDialog*       m_running_wizard { nullptr };
+    bool            m_quit_after_wizard { false };
+    // "Printer update available" for the selected Unlayered printer. See PrinterUpdateOffer.hpp.
+    std::unique_ptr<PrinterUpdateOffer> m_printer_update_offer;
 
     //BBS
     std::atomic<bool> m_is_closing {false};
@@ -407,6 +414,8 @@ public:
     std::string logo_name() const { return is_editor() ? "UnlayeredSlicer" : "UnlayeredSlicer-gcodeviewer"; }
 
     bool is_closing() const { return m_is_closing.load(std::memory_order_acquire); }
+    // The setup wizard is open (run_wizard). Usage diagnostics hold every send meanwhile.
+    bool is_running_wizard() const { return m_running_wizard != nullptr; }
     void set_closing(bool closing) { m_is_closing.store(closing, std::memory_order_release); }
     
     // SoftFever
@@ -600,6 +609,7 @@ public:
     // Downloads and runs the installer the last check found, then closes the application.
     void            start_app_update();
     AutoUpdater*    auto_updater() { return m_auto_updater.get(); }
+    PrinterUpdateOffer* printer_update_offer() { return m_printer_update_offer.get(); }
     bool            process_network_msg(std::string dev_id, std::string msg);
     void            request_new_version(int by_user);
     void            enter_force_upgrade();
@@ -883,6 +893,9 @@ private:
     void set_live_printer_agent(std::shared_ptr<IPrinterAgent> agent); // null clears the selection
 
     bool            config_wizard_startup();
+    // A Quit while the setup wizard is up: close the wizard (nothing is saved, so it returns at the
+    // next launch) and quit once run_wizard() has returned. True when a wizard was up.
+    bool            quit_from_wizard();
 	void            check_updates(const bool verbose);
 
     // select or add MachineObject

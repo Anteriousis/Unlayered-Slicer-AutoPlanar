@@ -300,6 +300,10 @@ function build_slicer() {
             resources_path=$(readlink ./UnlayeredSlicer.app/Contents/Resources)
             rm ./UnlayeredSlicer.app/Contents/Resources
             cp -R "$resources_path" ./UnlayeredSlicer.app/Contents/Resources
+            # "What's new" after an update reads its version's sections from here (AutoUpdater). It lives
+            # at the repository root, not in resources/, so it has to be copied in; until 0.1.6 no macOS
+            # build carried it and the dialog was empty on Mac.
+            cp "$PROJECT_DIR/CHANGELOG.md" ./UnlayeredSlicer.app/Contents/Resources/CHANGELOG.md
             relocate_python_runtime ./UnlayeredSlicer.app
             # delete .DS_Store file
             find ./UnlayeredSlicer.app/ -name '.DS_Store' -delete

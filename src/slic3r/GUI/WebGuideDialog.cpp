@@ -1,4 +1,7 @@
 #include "WebGuideDialog.hpp"
+#include "OtherSlicerImportDialog.hpp"
+#include "AutoUpdater.hpp"
+#include "slic3r/Utils/UsageTelemetry.hpp"
 #include "libslic3r/libslic3r.h"
 #include "ConfigWizard.hpp"
 
@@ -37,6 +40,8 @@
 #include <libslic3r/miniz_extension.hpp>
 #include <libslic3r/Utils.hpp>
 #include "CreatePresetsDialog.hpp"
+#include <wx/filesys.h>
+#include <wx/filename.h>
 
 using namespace nlohmann;
 
@@ -121,6 +126,8 @@ GuideFrame::GuideFrame(GUI_App *pGUI, long style)
     InstallNetplugin = false;
 
     m_MainPtr = pGUI;
+    // A first setup, or the wizard opened again from the menu (which counts as changing the choice).
+    m_privacy = std::make_unique<PrivacyFlow>(false, pGUI->app_config->get("firstguide", "finish") == "1" ? "preferences" : "initial_setup");
 
     // set the frame icon
     wxBoxSizer *topsizer = new wxBoxSizer(wxVERTICAL);
@@ -187,6 +194,16 @@ GuideFrame::GuideFrame(GUI_App *pGUI, long style)
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(",  finished");
     wxGetApp().UpdateDlgDarkUI(this);
+}
+
+void GuideFrame::DetectOtherSlicers()
+{
+    wxBusyCursor busy;
+    m_other_slicers         = std::make_unique<OtherSlicersFound>(find_other_slicers());
+    m_other_slicers_offered = m_other_slicers->total() > 0;
+    m_bambu_printers_in     = into_u8(m_other_slicers->bambu_printers_in());
+    BOOST_LOG_TRIVIAL(info) << "GuideFrame: other slicers " << (m_other_slicers_offered ? "have" : "have nothing") << " to import"
+                            << (m_bambu_printers_in.empty() ? std::string() : ", Bambu Lab printers in " + m_bambu_printers_in);
 }
 
 GuideFrame::~GuideFrame()
@@ -433,6 +450,19 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
         wxString strCmd = j["command"];
         BOOST_LOG_TRIVIAL(trace) << "GuideFrame::OnScriptMessage;Command:" << strCmd;
 
+        // The privacy pages (guide 11 / 12 / 13) talk to the privacy flow.
+        std::string privacy_reply;
+        if (m_privacy && m_privacy->handle(j, privacy_reply)) {
+            // The region page names a place; its printer-profile region is the wizard's region.
+            if (const std::string region = m_privacy->guide_region(); !region.empty())
+                m_Region = region;
+            if (!privacy_reply.empty()) {
+                const wxString js = wxString::FromUTF8(privacy_reply);
+                wxGetApp().CallAfter([this, js] { RunScript(js); });
+            }
+            return;
+        }
+
         if (strCmd == "close_page") {
             this->EndModal(wxID_CANCEL);
         }
@@ -472,9 +502,9 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
             // (MainFrame.cpp, GLGizmoCutPlanes.cpp). Launched in the real browser rather than in
             // this WebView so it survives the wizard closing, and so the user keeps it open
             // alongside the slicer afterwards.
-            wxLaunchDefaultBrowser(wxString::Format("file://%s/web/tutorial/multiplanar.html",
-                                                    from_u8(Slic3r::resources_dir())),
-                                   wxBROWSER_NEW_WINDOW);
+            // FileNameToURL escapes spaces ("Unlayered Slicer.app", "Program Files") and writes file:///;
+            // a raw "file://" + path did not open on macOS.
+            wxLaunchDefaultBrowser(wxFileSystem::FileNameToURL(wxFileName(from_u8(Slic3r::resources_dir() + "/web/tutorial/multiplanar.html"))), wxBROWSER_NEW_WINDOW);
         }
         else if (strCmd == "request_userguide_detail_status") {
             // The loading page asks this so it can hold its spinner until the filament data is in.
@@ -631,6 +661,154 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
             else
                 InstallNetplugin = false;
         }
+        else if (strCmd == "request_page_after_privacy" || strCmd == "request_page_before_models") {
+            // Unlayered 0.1.7: the "Settings from other slicers" step (guide 5import) sits between
+            // the privacy page (13) and the printer picker (21), and only when something can be
+            // imported. The privacy page asks where Continue goes (detecting the other slicers
+            // there, once); the picker asks where Back goes.
+            // Unlayered 0.1.7: before both, "Sign in to Unlayered" (guide 13signin)
+            // whenever the slicer is not signed in - every run of the wizard, not once.
+            const bool after_privacy = strCmd == "request_page_after_privacy";
+            if (after_privacy && !m_other_slicers)
+                DetectOtherSlicers();
+            if (after_privacy && !m_signin_decided) {
+                m_signin_decided = true;
+                m_signin_shown   = !AutoUpdater::stored_sign_in(wxGetApp().app_config);
+            }
+            json res           = json::object();
+            res["command"]     = after_privacy ? "page_after_privacy" : "page_before_models";
+            res["sequence_id"] = "10002";
+            if (after_privacy)
+                res["page"] = m_signin_shown ? "13signin" : (m_other_slicers_offered ? "5import" : "21");
+            else
+                res["page"] = m_other_slicers_offered ? "5import" : (m_signin_shown ? "13signin" : "13");
+            const wxString strJS = wxString::Format("HandleStudio(%s)", res.dump(-1, ' ', true));
+            wxGetApp().CallAfter([this, strJS] { RunScript(strJS); });
+        }
+        else if (strCmd == "request_page_after_signin" || strCmd == "request_page_before_import") {
+            // Guide 13signin's Next/Skip, and Back on guide 5import.
+            const bool after_signin = strCmd == "request_page_after_signin";
+            if (after_signin && !m_other_slicers)
+                DetectOtherSlicers();
+            json res           = json::object();
+            res["command"]     = after_signin ? "page_after_signin" : "page_before_import";
+            res["sequence_id"] = "10002";
+            res["page"]        = after_signin ? (m_other_slicers_offered ? "5import" : "21") : (m_signin_shown ? "13signin" : "13");
+            const wxString strJS = wxString::Format("HandleStudio(%s)", res.dump(-1, ' ', true));
+            wxGetApp().CallAfter([this, strJS] { RunScript(strJS); });
+        }
+        else if (strCmd == "request_signin_state") {
+            // Guide 13signin: its texts, translated here, and whether the slicer is signed in already
+            // (Back from a later page after signing in).
+            std::string email;
+            const bool  in     = AutoUpdater::stored_sign_in(wxGetApp().app_config, &email);
+            json        res    = json::object();
+            res["command"]     = "signin_state";
+            res["sequence_id"] = "10002";
+            res["title"]       = into_u8(_L("Sign in to Unlayered"));
+            res["text"]        = into_u8(_L("Sign in with your Unlayered account. Unlayered Slicer then keeps itself up to date "
+                                            "and offers configuration updates for your printers."));
+            res["button"]      = into_u8(_L("Sign in"));
+            res["skip"]        = into_u8(_L("Skip for now"));
+            res["signed_in"]   = in;
+            if (in)
+                res["signed_in_text"] = into_u8(wxString::Format(_L("Signed in as %s."), from_u8(email)));
+            const wxString strJS = wxString::Format("HandleStudio(%s)", res.dump(-1, ' ', true));
+            wxGetApp().CallAfter([this, strJS] { RunScript(strJS); });
+        }
+        else if (strCmd == "account_sign_in") {
+            // Guide 13signin pressed Sign in: the browser sign-in, modal over the wizard. Not from
+            // inside the script handler.
+            wxGetApp().CallAfter([this] {
+                if (m_destroy)
+                    return;
+                std::string email;
+                const bool  in   = AutoUpdater::sign_in_for_setup(this, wxGetApp().app_config, &email);
+                json        res  = json::object();
+                res["command"]   = "signin_result";
+                res["sequence_id"] = "10002";
+                res["signed_in"] = in;
+                if (in)
+                    res["signed_in_text"] = into_u8(wxString::Format(_L("Signed in as %s."), from_u8(email)));
+                else
+                    res["failed_text"] = into_u8(_L("Not signed in. Press Sign in to try again."));
+                RunScript(wxString::Format("HandleStudio(%s)", res.dump(-1, ' ', true)));
+            });
+        }
+        else if (strCmd == "request_other_slicers") {
+            // Guide 5import: what was found, per app, with the texts translated here.
+            if (!m_other_slicers)
+                DetectOtherSlicers();
+            const OtherSlicersFound &found = *m_other_slicers;
+            json res           = json::object();
+            res["command"]     = "other_slicers";
+            res["sequence_id"] = "10002";
+            res["total"]       = found.total();
+            res["title"]       = into_u8(_L("Settings from other slicers"));
+            res["text"]        = into_u8(_L("We found these slicers on this computer. Import their printers, filaments and presets now, "
+                                            "and they are already ticked on the next pages. Nothing in those apps is changed."));
+            res["note"]        = into_u8(_L("Printer network addresses come along; API keys and passwords do not."));
+            res["import"]      = into_u8(_L("Import"));
+            res["importing"]   = into_u8(_L("Importing..."));
+            res["imported"]    = m_other_slicers_imported;
+            res["summary"]     = m_other_slicers_summary;
+            json apps          = json::array();
+            for (size_t i = 0; i < found.scans.size(); ++i)
+                if (found.counts[i].total() > 0)
+                    apps.push_back({{"index", int(i)},
+                                    {"label", into_u8(from_u8(OtherSlicers::app_name(found.scans[i].location.app)) + ": " +
+                                                      OtherSlicersFound::describe(found.counts[i]))}});
+            res["apps"]          = apps;
+            const wxString strJS = wxString::Format("HandleStudio(%s)", res.dump(-1, ' ', true));
+            wxGetApp().CallAfter([this, strJS] { RunScript(strJS); });
+        }
+        else if (strCmd == "import_other_slicers") {
+            // Guide 5import pressed Import: import the ticked apps now, then refresh what the printer
+            // picker and the filament page show from the app config the import just changed.
+            std::vector<int> indices;
+            if (j.contains("apps") && j["apps"].is_array())
+                for (const json &v : j["apps"])
+                    if (v.is_number_integer())
+                        indices.push_back(v.get<int>());
+            wxGetApp().CallAfter([this, indices] {
+                if (m_destroy || !m_other_slicers)
+                    return;
+                std::vector<OtherSlicers::Scan> selected;
+                for (int i : indices)
+                    if (i >= 0 && size_t(i) < m_other_slicers->scans.size())
+                        selected.push_back(m_other_slicers->scans[size_t(i)]);
+                const OtherSlicersImportResult result = import_other_slicers(this, selected);
+                m_other_slicers_imported = true;
+                m_other_slicers_summary  = into_u8(result.summary.empty() ? _L("Nothing was imported.") : result.summary);
+                // The enabled printer models (nozzle_selected) and filaments come from the app config.
+                // SaveProfileData() also reloads the region from it, which the region page may have
+                // changed without saving yet: keep that.
+                const std::string region = m_Region;
+                SaveProfileData();
+                m_Region = region;
+                json res           = json::object();
+                res["command"]     = "other_slicers_imported";
+                res["sequence_id"] = "10002";
+                res["summary"]     = m_other_slicers_summary;
+                res["next"]        = into_u8(_L("Next"));
+                RunScript(wxString::Format("HandleStudio(%s)", res.dump(-1, ' ', true)));
+            });
+        }
+        else if (strCmd == "request_network_plugin_hint") {
+            // The last page: the Bambu Lab network plug-in box stays unticked (it is
+            // Bambu's closed DLL) unless OrcaSlicer or Bambu Studio has Bambu Lab printers in its
+            // printer list, imported or not.
+            if (!m_other_slicers)
+                DetectOtherSlicers();
+            json res           = json::object();
+            res["command"]     = "network_plugin_hint";
+            res["sequence_id"] = "10002";
+            res["tick"]        = !m_bambu_printers_in.empty() && !network_plugin_ready;
+            if (!m_bambu_printers_in.empty())
+                res["text"] = into_u8(wxString::Format(_L("We found Bambu Lab printers in %s, so this is ticked."), from_u8(m_bambu_printers_in)));
+            const wxString strJS = wxString::Format("HandleStudio(%s)", res.dump(-1, ' ', true));
+            wxGetApp().CallAfter([this, strJS] { RunScript(strJS); });
+        }
         else if (strCmd == "save_stealth_mode") {
             wxString strAction = j["data"]["action"];
             m_stealth_answered = true;
@@ -746,14 +924,13 @@ int GuideFrame::SaveProfile()
     //     m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "privacyuse", "0");
 
     m_MainPtr->app_config->set("region", m_Region);
-    // Unlayered: the last first-run page (guide 4unlayered, "Stealth mode & Bambu Lab printers",
-    // back in the flow 2026-10-09 at Alex's request: one page, stealth unticked, plug-in ticked)
-    // asks about stealth mode. Write the answer only when that page actually reported it: a wizard
-    // opened on another start page (filaments only, printers only) must keep whatever the user
-    // chose in Preferences. The one-shot stealth migrations in AppConfig::set_defaults() have
-    // already run by the time the wizard shows, so an "off" written here sticks.
+    // Unlayered: since 2026-10-22 no wizard page asks about stealth mode (off by default, Preferences
+    // only), so nothing reports save_stealth_mode and this never writes. Kept so a page that asks
+    // again only has to report the answer.
     if (m_stealth_answered)
         m_MainPtr->app_config->set_bool("stealth_mode", StealthMode);
+    // Usage diagnostics are not decided here: the privacy page saved the person's choice the moment
+    // they pressed Continue (PrivacyFlow), and nothing is sent while the wizard is open.
 
     //finish
     m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "finish", "1");

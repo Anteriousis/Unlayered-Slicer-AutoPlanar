@@ -16,6 +16,7 @@
 class wxWindow;
 
 namespace Slic3r {
+class AppConfig;
 namespace GUI {
 
 class GUI_App;
@@ -38,6 +39,12 @@ class GUI_App;
 class AutoUpdater
 {
 public:
+    // The version a just-finished update came from, which the next update check reports once as
+    // ?updated= (GUI_App::check_new_version_sf), so a successful install is counted even with usage
+    // diagnostics off. Only a version number; the site adds one to a per-day counter. Cleared once
+    // the site has answered.
+    static constexpr const char *UPDATED_REPORT_KEY = "update_check_report_updated";
+
     explicit AutoUpdater(GUI_App &app);
     ~AutoUpdater();
 
@@ -62,6 +69,18 @@ public:
     void sign_in(wxWindow *parent, std::function<void(bool signed_in)> done = {});
     void sign_out();
 
+    // Unlayered 0.1.7: the setup wizard asks for a sign-in every time it runs while
+    // the slicer is not signed in (guide 13signin). It runs before any AutoUpdater exists, so these
+    // use an account object of their own; the token is stored as usual, and the AutoUpdater created
+    // after the wizard loads it. No network for stored_sign_in().
+    static bool stored_sign_in(AppConfig *config, std::string *email = nullptr);
+    static bool sign_in_for_setup(wxWindow *parent, AppConfig *config, std::string *email = nullptr);
+
+    // Once per version, after on_startup(): on the first launch of a newer version (0.1.6 -> 0.1.7
+    // included) a slicer that is not signed in asks for a sign-in. It can be skipped. A run that
+    // showed the setup wizard only records the version - the wizard asked already.
+    void ask_sign_in_after_update(bool wizard_showed);
+
     // From GUI_App::OnExit: starts the silent install of a downloaded update, if there is one. The
     // installer waits for this process to exit before it touches anything.
     void on_app_exit();
@@ -77,7 +96,16 @@ private:
     void start_download();
     void on_download_finished(bool ok, const boost::filesystem::path &installer, const std::string &error,
                               unsigned http_status);
-    void notify_ready();
+    // An installer the previous session downloaded but never ran: checks it in the background and,
+    // if it is intact, makes it this session's ready update instead of downloading it again.
+    void reuse_download(const std::string &version, const boost::filesystem::path &installer, const std::string &sha256,
+                        bool interrupted);
+    void on_reuse_checked(bool ok, const std::string &version, const boost::filesystem::path &installer,
+                          const std::string &error, bool interrupted);
+    // Ready to install on exit: remembers it across a restart and says so. `interrupted`: the last
+    // session ended before it could install this, so the notice offers to install it now.
+    void mark_ready(const boost::filesystem::path &installer, bool interrupted);
+    void notify_ready(bool interrupted = false);
     void notify(const std::string &text, const std::string &link = {}, std::function<void()> on_link = {});
 
     GUI_App                          &m_app;
@@ -91,6 +119,13 @@ private:
     std::string                    m_version;
     AccountDownload                m_download;
     boost::filesystem::path        m_installer;
+    // The sha256 m_installer was checked against: a ready installer is only good while that is
+    // still what the site publishes for m_version.
+    std::string                    m_installer_sha256;
+    // m_installer came from the previous session (reuse_download); while m_reusing it is still being
+    // checked and m_state is Downloading.
+    bool                           m_reused{false};
+    bool                           m_reusing{false};
     std::optional<boost::filesystem::path> m_install_dir;
     bool                           m_relaunch{false};
     // UNLAYERED_MOD -- for the update_download diagnostics event: how long the download took.

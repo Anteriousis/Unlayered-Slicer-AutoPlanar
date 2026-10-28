@@ -1294,6 +1294,9 @@ elseif (SLIC3R_FHS)
     endforeach()
 elseif (CMAKE_MACOSX_BUNDLE)
     # install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/UnlayeredSlicer.app/Contents/resources")
+    # The "What's new" dialog reads CHANGELOG.md from the resources directory, as on Windows and Linux.
+    # build_release_macos.sh (which the release builds and CI use) copies it into the bundle too.
+    install(FILES "${CMAKE_SOURCE_DIR}/CHANGELOG.md" DESTINATION "${CMAKE_INSTALL_PREFIX}/UnlayeredSlicer.app/Contents/Resources")
     if(ORCA_BUNDLED_UV_EXECUTABLE)
         install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "${CMAKE_INSTALL_PREFIX}/UnlayeredSlicer.app/Contents/Resources/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
     endif()

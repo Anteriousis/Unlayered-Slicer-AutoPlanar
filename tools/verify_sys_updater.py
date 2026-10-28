@@ -78,6 +78,33 @@ def test_generator_agreement():
           "unlayered-sys.json" in cpp and "unlayered-sys.json" in gen)
 
 
+def test_machine_specific_agreement():
+    """The bundler leaves these names out of a package and the slicer refuses to install them from
+    any source. If the lists drift, a name only one side knows is either shipped and then silently
+    dropped, or worse, protected by the bundler and installed by the slicer from a hand-made zip."""
+    print("\n[Machine-specific files: bundler and slicer agree]")
+    with open(BUNDLE_CPP, "r", encoding="utf-8", errors="replace") as f:
+        cpp = f.read()
+    m = re.search(r"sys_machine_specific_names\(\)\s*\{.*?names\s*=\s*\{(.*?)\};", cpp, re.S)
+    if not check("SysFilesBundle.cpp declares sys_machine_specific_names()", m is not None):
+        return
+    cpp_names = set(re.findall(r'"([^"]+)"', re.sub(r"//[^\n]*", "", m.group(1))))
+
+    sys.path.insert(0, os.path.dirname(GENERATOR))
+    try:
+        import importlib
+        gen = importlib.import_module("make_sys_bundle")
+    finally:
+        sys.path.pop(0)
+    py_names = set(gen.MACHINE_SPECIFIC)
+    check("the same names on both sides", cpp_names == py_names,
+          "only in C++: %s; only in make_sys_bundle.py: %s" % (sorted(cpp_names - py_names), sorted(py_names - cpp_names)))
+    # What the printer's factory reset erases is per-machine state by definition.
+    for name in ("setupdone.g", "setupskip.g", "setupprog.g", "zstall.g", "plates.g", "machinename.g",
+                 "piezopol.g", "config-override.g", "heightmap.csv", "printerstats.json"):
+        check("%s is protected" % name, name in cpp_names)
+
+
 def test_package_roundtrip():
     """Build a package the way a release would, then read it back the way the slicer does."""
     print("\n[Package round trip]")
@@ -226,6 +253,7 @@ def main():
     args = ap.parse_args()
 
     test_generator_agreement()
+    test_machine_specific_agreement()
     test_package_roundtrip()
     if args.probe:
         probe(args.probe)

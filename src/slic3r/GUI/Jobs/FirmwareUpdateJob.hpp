@@ -39,8 +39,11 @@ public:
         // PanelDue or PanelOta to flash that display; Unknown to leave the display alone. Never
         // guessed here - the dialog resolves it from DisplayInfo or from the user.
         FirmwareRole display = FirmwareRole::Unknown;
+        // The web interface (role Www), unpacked into 0:/www after the firmware. Like a display,
+        // RRF reports no version for it, so it is installed whenever it is asked for.
+        bool www = false;
 
-        bool nothing() const { return !mainboard && !wifi && display == FirmwareRole::Unknown; }
+        bool nothing() const { return !mainboard && !wifi && display == FirmwareRole::Unknown && !www; }
     };
 
     struct Result
@@ -115,8 +118,25 @@ private:
 
     bool ui_alive() const { return !m_ui_alive || m_ui_alive->load(); }
 
+    // While a web interface install follows the firmware, the firmware steps' own percentages
+    // (45..100) are squeezed into 45..m_firmware_end (see update_status) and the web interface,
+    // which is the bigger transfer - ~12 MB, about 90 s over USB - gets the rest.
+    int                                m_firmware_end    = 100;
+    bool                               m_unscaled_status = false;
+
     void update_status(Ctl &ctl, int percent, const std::string &msg);
     void fail(Ctl &ctl, const std::string &msg, bool recovery_hint = false);
+
+    // Steps 6-9: upload the images, M997, wait out the reboot, verify. On success sets
+    // m_result.outcome = Success with its message and returns true; otherwise m_result says why.
+    bool flash_images(Ctl &ctl, DuetClient &client, FirmwarePackage &pkg, const DuetClient::BoardInfo &board);
+
+    // Puts a web interface on the card: lists 0:/www, creates the folders, uploads every file
+    // (CRC-checked by the board) with index.html.gz last, then deletes what the new bundle does not
+    // contain. Progress runs from first_percent to 99. Returns false with error_out set, or with
+    // error_out == "Cancelled" when the user stopped it before the switch-over.
+    bool install_web_interface(Ctl &ctl, DuetClient &client, const std::vector<WebInterfaceFile> &files,
+                               int first_percent, std::string &summary_out, std::string &error_out);
 };
 
 wxDECLARE_EVENT(EVT_FIRMWARE_UPDATE_MESSAGE, wxCommandEvent);

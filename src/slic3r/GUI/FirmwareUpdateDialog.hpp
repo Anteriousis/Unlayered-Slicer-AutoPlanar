@@ -41,6 +41,11 @@ public:
 
     void on_dpi_changed(const wxRect &suggested_rect) override;
 
+    // The "Printer update available" flow: start the update (with its usual confirmation) as soon
+    // as the opening query finds a different version, and close once it has succeeded so the next
+    // step of the flow can open.
+    void begin_when_ready() { m_begin_when_ready = m_close_on_success = true; }
+
 private:
     enum class Phase { Querying, Ready, Working, Finished };
 
@@ -48,6 +53,8 @@ private:
     std::string m_password;
 
     Phase m_phase = Phase::Querying;
+    bool  m_begin_when_ready = false;
+    bool  m_close_on_success = false;
     // Populated by the initial query and used to build the source for the real run.
     DuetClient::BoardInfo m_board;
     bool                     m_board_known = false;
@@ -71,6 +78,7 @@ private:
     wxChoice     *m_display_choice  = nullptr;
     wxStaticText *m_display_note    = nullptr;
     wxSizer      *m_display_row     = nullptr;
+    wxCheckBox   *m_www_check       = nullptr;
     wxGauge      *m_gauge           = nullptr;
     wxStaticText *m_status          = nullptr;
     wxButton     *m_update_btn      = nullptr;

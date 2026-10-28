@@ -1,0 +1,51 @@
+/* Unlayered 0.1.7: the sign-in step (guide 13signin), styled like 5import. */
+#Content
+{
+	padding: 0% 15%;
+}
+
+.FeatureText
+{
+	line-height: 26px;
+	margin-top: 4mm;
+}
+
+#SignInArea
+{
+	margin-top: 10mm;
+	text-align: center;
+}
+
+#SignInBtn
+{
+	display: inline-block;
+	min-width: 220px;
+	height: 44px;
+	line-height: 44px;
+	font-size: 16px;
+	cursor: pointer;
+}
+
+#SignInBtn.Busy
+{
+	opacity: 0.6;
+	pointer-events: none;
+}
+
+/* The way past this page without signing in. */
+#SkipLink
+{
+	position: absolute;
+	right: 24px;
+	bottom: 6px;
+	font-size: 11px;
+	color: #9a9a9a;
+	opacity: 0.7;
+	cursor: pointer;
+	text-decoration: none;
+}
+
+[hidden]
+{
+	display: none !important;
+}

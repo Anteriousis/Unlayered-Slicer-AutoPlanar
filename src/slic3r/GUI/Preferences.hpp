@@ -74,6 +74,13 @@ public:
     ::CheckBox * m_developer_mode_ckeckbox   = {nullptr};
     ::CheckBox * m_internal_developer_mode_ckeckbox = {nullptr};
     ::CheckBox * m_sync_user_preset_checkbox = {nullptr};
+    // Online > Usage diagnostics (0.1.6): the switch and the line saying what is chosen.
+    ::CheckBox  *m_usage_diagnostics_checkbox = {nullptr};
+    ::CheckBox  *m_improvement_program_checkbox = {nullptr};
+    wxStaticText *m_privacy_status            = {nullptr};
+    void          on_usage_diagnostics_toggled(bool on);
+    void          on_improvement_program_toggled(bool on);
+    void          update_privacy_controls();
     ::CheckBox * m_bambu_cloud_checkbox      = {nullptr};
     ::TextInput *m_backup_interval_textinput = {nullptr};
     ::SpinInput *m_dim_previous_layers_brightness_input = {nullptr};

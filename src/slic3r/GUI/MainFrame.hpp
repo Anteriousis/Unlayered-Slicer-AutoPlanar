@@ -3,6 +3,9 @@
 
 #include "libslic3r/PrintConfig.hpp"
 
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <wx/frame.h>
 #include <wx/settings.h>
 #include <wx/string.h>
@@ -13,6 +16,8 @@
 
 #include <string>
 #include <map>
+#include <set>
+#include <vector>
 
 #include "GUI_Utils.hpp"
 #include "Event.hpp"
@@ -52,7 +57,7 @@
 #define TAB_ID_CALIBRATION   "calibration"
 // Unlayered: optional trailing tab hosting an embedded web application (WebAppPanel).
 #define TAB_ID_WEB_APP       "web_app"
-// Unlayered: the second WebAppPanel slot, home of the Unlayered Agent tab. Sits just before
+// Unlayered: the second WebAppPanel slot (off in release builds). Sits just before
 // TAB_ID_WEB_APP when both are present.
 #define TAB_ID_AGENT         "agent_app"
 // Unlayered: the third WebAppPanel slot, home of the Unlayered Universe tab.
@@ -186,6 +191,7 @@ class MainFrame : public DPIFrame
     struct FileHistory : wxFileHistory
     {
         FileHistory(int max) : wxFileHistory(max) {}
+        ~FileHistory();
         std::wstring GetThumbnailUrl(int index) const;
         bool        GetPublished(int index) const;
 
@@ -193,16 +199,52 @@ class MainFrame : public DPIFrame
         virtual void RemoveFileFromHistory(size_t i);
         size_t FindFileInHistory(const wxString &file);
 
-        void LoadThumbnails();
+        // Reads the thumbnails off the main thread, then calls on_loaded on it. Opening a project
+        // file can block for as long as macOS shows a folder-access prompt, and the frame must not
+        // wait for that: until then the entries have no picture.
+        void LoadThumbnails(std::function<void()> on_loaded);
 
         void SetMaxFiles(int max);
     private:
         std::deque<std::string> m_thumbnails;
         std::deque<bool>        m_published_files; // parallel to m_thumbnails: is it a published 3mf?
         bool m_load_called = false;
+        struct Pending; // shared with the thumbnail thread; see LoadThumbnails
+        std::shared_ptr<Pending> m_pending;
     };
 
     FileHistory m_recent_projects;
+
+    // Unlayered 2026-10-22: other slicers' recent projects on the home page, with a filter by
+    // slicer. Read once per session (OtherSlicers::recent_projects); thumbnails as for our own.
+    struct OtherRecent
+    {
+        std::string app;   // OtherSlicers::app_name(), what the filter shows
+        std::string path;
+        std::string thumbnail; // png bytes from the 3mf, "" for none
+    };
+    std::vector<OtherRecent> m_other_recent;
+    bool                     m_other_recent_loaded = false;
+    void                     load_other_recent();
+    // Their thumbnails are read off the main thread (load_other_recent). The token tells that thread
+    // whether this frame is still there; declared after m_other_recent so it goes first.
+    struct OtherRecentToken
+    {
+        std::mutex mutex;
+        bool       alive = true;
+    };
+    struct OtherRecentGuard
+    {
+        std::shared_ptr<OtherRecentToken> token = std::make_shared<OtherRecentToken>();
+        ~OtherRecentGuard()
+        {
+            std::lock_guard<std::mutex> lock(token->mutex);
+            token->alive = false;
+        }
+    } m_other_recent_guard;
+    // Hidden by "Clear all" or a delete on the home page: app config "other_slicer_recent_hidden".
+    std::set<std::string> other_recent_hidden() const;
+    void                  hide_other_recent(const std::vector<std::string> &paths);
 
     enum class ESettingsLayout
     {
@@ -482,6 +524,12 @@ wxDECLARE_EVENT(EVT_SHOW_IP_DIALOG, wxCommandEvent);
 wxDECLARE_EVENT(EVT_UPDATE_MACHINE_LIST, wxCommandEvent);
 wxDECLARE_EVENT(EVT_UPDATE_PRESET_CB, SimpleEvent);
 
+// Unlayered: installs, from the profiles shipped with the application, the vendors the given preset
+// parents ((type subdir, preset name) pairs) come from, enables their printer models as the setup
+// wizard would, and reloads the presets. `ask`: ask before installing each vendor (File > Import >
+// Import Configs); false installs without asking (the import from other slicers, already asked for).
+// True when the presets were reloaded.
+bool install_preset_parents_from_resources(wxWindow *parent, const std::vector<std::pair<std::string, std::string>> &parents, bool ask);
 
 
 } // GUI

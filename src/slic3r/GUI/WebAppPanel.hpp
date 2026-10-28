@@ -32,8 +32,8 @@ class WebAppBridge;
 // Fluidd, Mainsail) the same way.
 //
 // A panel is instantiated over a WebAppSlot: the AppConfig keys, environment overrides and seed
-// file it is configured from (WebAppSlot.hpp). Two slots ship -- the generic web application tab
-// and the Unlayered Agent tab -- and everything in this class is written once, per slot.
+// file it is configured from (WebAppSlot.hpp). Every slot shares this class, and everything in it
+// is written once, per slot.
 class WebAppPanel : public wxPanel
 {
 public:
@@ -79,6 +79,10 @@ public:
     // Whether the page in this tab may have the slicer export the open project and read the bytes
     // back. Read live from AppConfig, like allows_settings().
     bool            allows_export() const;
+    // Whether the page in this tab may offer a printer profile for installation
+    // (slicer.installPrinterPreset). Read live from AppConfig, like the two above. Even when true,
+    // each install still waits on the user's own confirmation in a native dialog.
+    bool            allows_install() const;
 
     // Deliver a bridge event to every live panel. Each bridge decides for itself whether its page
     // gets it (no session token, or a gated family, means it is dropped there). This is how

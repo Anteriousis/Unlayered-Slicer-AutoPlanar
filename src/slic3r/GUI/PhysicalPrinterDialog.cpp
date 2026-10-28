@@ -94,7 +94,7 @@ PhysicalPrinterDialog::PhysicalPrinterDialog(wxWindow* parent) :
 
     wxStaticText *label_top = new wxStaticText(this, wxID_ANY, from_u8((boost::format(_utf8(L("Save %s as"))) % into_u8(tab->title())).str()));
     label_top->SetFont(::Label::Body_14);
-    label_top->SetForegroundColour(wxColour(38,46,48));
+    label_top->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#262E30")));
 
     m_input_area = new RoundedRectangle(this, StateColor::darkModeColorFor(wxColour("#DBDBDB")), wxDefaultPosition, wxSize(-1,-1), 3, 1);
     m_input_area->SetMinSize(wxSize(FromDIP(360), FromDIP(32)));
@@ -103,7 +103,10 @@ PhysicalPrinterDialog::PhysicalPrinterDialog(wxWindow* parent) :
     wxBoxSizer *input_sizer_v  = new wxBoxSizer(wxVERTICAL);
 
     m_input_ctrl = new wxTextCtrl(m_input_area, -1, from_u8(preset_name), wxDefaultPosition, wxSize(wxSize(FromDIP(360), FromDIP(32)).x, -1), 0 | wxBORDER_NONE);
-    m_input_ctrl->SetBackgroundColour(wxColour(255, 255, 255));
+    // Unlayered 2026-10-22: both colours from the slicer's theme. Only the background was set (white),
+    // so the text took the SYSTEM's colour - white when the OS is dark and the slicer is light.
+    m_input_ctrl->SetBackgroundColour(StateColor::darkModeColorFor(*wxWHITE));
+    m_input_ctrl->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#262E30")));
     m_input_ctrl->Bind(wxEVT_TEXT, [this](wxCommandEvent &) { update(); });
 
 

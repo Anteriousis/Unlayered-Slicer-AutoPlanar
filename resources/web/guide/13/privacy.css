@@ -1,0 +1,263 @@
+/* Unlayered 0.1.6: the North America country page (guide 12) and the privacy page (guide 13). */
+
+#Content
+{
+	padding: 8px 12%;
+}
+
+.Lead
+{
+	font-size: 15px;
+	line-height: 24px;
+	margin-bottom: 14px;
+}
+
+.ChoiceGroup
+{
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	border: 0;
+	margin: 0 0 12px 0;
+	padding: 0;
+}
+
+/* Both answers look exactly alike: same size, same weight, same colours, nothing preselected
+   unless a legal approval says otherwise. */
+.Choice
+{
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	padding: 12px 14px;
+	border: 2px solid #C7C7C7;
+	border-radius: 6px;
+	cursor: pointer;
+	user-select: text;
+	-webkit-user-select: text;
+}
+
+.Choice:hover
+{
+	border-color: #9a9a9a;
+}
+
+.Choice:has(input:checked)
+{
+	border-color: var(--main-color);
+}
+
+/* Drawn here rather than left to the web view, whose native radio stays white-filled in the dark
+   theme and then looks selected when it is not. Same idea as common.css's checkbox. */
+.Choice input[type=radio]
+{
+	-webkit-appearance: none;
+	appearance: none;
+	display: grid;
+	place-content: center;
+	width: 18px;
+	height: 18px;
+	margin: 2px 0 0 0;
+	flex: none;
+	border: 2px solid #9a9a9a;
+	border-radius: 50%;
+	background: transparent;
+	cursor: pointer;
+}
+
+.Choice input[type=radio]::before
+{
+	content: "";
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--main-color);
+	transform: scale(0);
+}
+
+.Choice input[type=radio]:checked
+{
+	border-color: var(--main-color);
+}
+
+.Choice input[type=radio]:checked::before
+{
+	transform: scale(1);
+}
+
+#ProgramBox input[type=checkbox]
+{
+	width: 18px;
+	height: 18px;
+	margin: 2px 0 0 0;
+	flex: none;
+}
+
+.Choice:focus-within
+{
+	outline: 3px solid var(--main-color);
+	outline-offset: 2px;
+}
+
+/* "Share usage diagnostics" holds its radio and, once chosen, the program box. */
+.ShareChoice
+{
+	flex-direction: column;
+	gap: 10px;
+	cursor: default;
+}
+
+.ChoiceMain
+{
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	cursor: pointer;
+}
+
+/* A separate opt-in, indented under Share, never ticked in advance. The id outranks common.css
+   label:has(input[type="checkbox"]), which zeroes a checkbox label's margin and padding. */
+#ProgramBox
+{
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	margin: 0 0 0 30px;
+	padding: 10px 12px;
+	border: 1px solid #C7C7C7;
+	border-radius: 6px;
+	cursor: pointer;
+}
+
+#ProgramBox[hidden]
+{
+	display: none;
+}
+
+#ProgramBox:has(input:checked)
+{
+	border-color: var(--main-color);
+}
+
+.Question
+{
+	font-size: 15px;
+	font-weight: 600;
+	margin: 4px 0 10px 0;
+}
+
+/* Only where Share may start selected (the United States). */
+.Badge[hidden]
+{
+	display: none;
+}
+
+.Badge
+{
+	display: inline-block;
+	margin-left: 6px;
+	padding: 0 6px;
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 18px;
+	border-radius: 9px;
+	border: 1px solid var(--main-color);
+	color: var(--main-color);
+	vertical-align: middle;
+}
+
+.ChoiceTitle
+{
+	display: block;
+	font-size: 15px;
+	font-weight: 600;
+	line-height: 22px;
+}
+
+.ChoiceText
+{
+	display: block;
+	margin-top: 3px;
+	line-height: 20px;
+}
+
+.Notice
+{
+	margin: 8px 0;
+	line-height: 20px;
+	user-select: text;
+	-webkit-user-select: text;
+}
+
+.Notice.Strong
+{
+	font-weight: 600;
+}
+
+.Hint
+{
+	font-size: 12px;
+	color: #767676;
+	margin-top: 4px;
+}
+
+.FieldLabel
+{
+	display: block;
+	font-weight: 600;
+	margin: 6px 0 4px 0;
+}
+
+#OtherCountry
+{
+	min-width: 320px;
+	height: 32px;
+	padding: 0 6px;
+	border: 1px solid #C7C7C7;
+	border-radius: 4px;
+	font: inherit;
+	color: inherit;
+	background: transparent;
+}
+
+#OtherCountry option
+{
+	color: #262E30;
+}
+
+#OrgNotice
+{
+	padding: 8px 12px;
+	border-left: 4px solid var(--main-color);
+	margin-bottom: 10px;
+}
+
+.LinkButton
+{
+	background: none;
+	color: var(--main-color);
+	text-decoration: underline;
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+	padding: 0;
+}
+
+button.ButtonTypeChoice
+{
+	font-family: inherit;
+	cursor: pointer;
+	margin-left: var(--dialog-button-gap, 10px);
+}
+
+button.ButtonTypeChoice:disabled
+{
+	opacity: 0.45;
+	cursor: default;
+}
+
+button:focus-visible, .LinkButton:focus-visible, #OtherCountry:focus-visible
+{
+	outline: 3px solid var(--main-color);
+	outline-offset: 2px;
+}

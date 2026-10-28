@@ -2,6 +2,164 @@
 
 All notable changes to Unlayered Slicer are listed here, newest first.
 
+## 0.1.7 — 2026-10-23
+
+### Added
+
+- **Import your settings from other slicers.** Unlayered Slicer finds OrcaSlicer, PrusaSlicer,
+  Bambu Studio, Creality Print (6 and 7), SuperSlicer, ElegooSlicer, Anycubic Slicer Next,
+  Snapmaker Orca, QIDI Studio, Flash Studio, PhrozenOrca and FLSUN Slicer on your computer and
+  brings over the printers and filaments you picked from their built-in lists, and your own
+  printer, filament and process presets, in one step. You choose which apps to import from. The
+  setup wizard offers it as its own step before you pick printers (only when there is something to
+  import), so what it found is already ticked on the next pages. Also from **File > Import > Import
+  Settings from Other Slicers**, or a one-time question on the first launch after updating (Import /
+  Not now / Don't ask again). On a fresh install the printer, process and filament you last used
+  there are selected too; an existing selection is never changed. Your presets keep their values,
+  and stay linked to the matching Unlayered Slicer profile where there is one; PrusaSlicer-style
+  settings are translated to their names here. Nothing in the other apps is changed and nothing
+  here is overwritten: a name that is already taken gets " (OrcaSlicer)" or similar added, and
+  importing again only adds what is new. Printer network addresses come along; API keys, user
+  names and passwords never do. The summary lists per app what came over, what was skipped and
+  why, and which printers need their key entered again.
+- **Recent projects from other slicers on the home page.** "Recently opened" also lists the projects
+  your other slicers opened recently, each marked with the slicer it came from, with a filter per
+  slicer. Removing one or "Clear all" hides them here; the other slicers' own lists are untouched.
+- **Printer update available.** When the selected printer is an Unlayered printer on your network,
+  the slicer checks once per session whether newer firmware or printer configuration has been
+  published, and offers it in a notification: Update / Not now / Skip this version. Update installs
+  the firmware first, then the configuration, each with its usual confirmation. Nothing is
+  installed on its own.
+- **Printer configuration updates from unlayered3d.com.** The printer's Config button checks
+  unlayered3d.com for new Unlayered printer configuration releases. Configuration updates come with
+  your Unlayered account: sign in from the Help menu (the "Access token" setting in Preferences is
+  gone). Every file is checked against its published checksum before anything is written; the files
+  a printer measured for itself (its calibration, name, network and setup) are never replaced; the
+  files being replaced are saved to this computer first; and if an install fails partway, the
+  previous files are put back.
+- **The printer's web interface is updated with its firmware.** A firmware release that carries a
+  matching web interface installs it after the firmware (the "Web interface" box in the Firmware
+  dialog), so the printer's web page no longer warns about mismatched versions.
+- **Unlayered Universe: share your printer profile and install others'.** Publish the printer you
+  have set up to Universe, or install one someone else shared. Before anything is installed the
+  slicer shows the profile and lists every custom G-code line that updates firmware, touches files
+  or the network, changes safety limits or restarts the controller, and installs nothing unless you
+  agree. Printer connections (network addresses, API keys, passwords) and local file paths are
+  never shared, and are removed again on install. The profile is added as your own printer preset.
+- **A crash report is your choice when you do not share usage diagnostics.** After the app closes
+  unexpectedly, the next launch asks whether to send that one crash report and shows what it
+  contains. It is sent once, with a random identifier that is not linked to your installation.
+  Decline or close the question and nothing is sent. See USAGE_DIAGNOSTICS.md.
+
+### Changed
+
+- **Stealth Mode is off by default and no longer asked in setup.** With it on, the slicer also
+  skipped the account sign-in check and printer update offers. It is switched off once on existing
+  installs; turn it on again in Preferences and it stays on.
+- **Signing in.** While the slicer is not signed in to your Unlayered account, the setup wizard has a
+  "Sign in to Unlayered" step, and the first launch of a new version asks once. Both can be skipped.
+  The Help menu has one item that reads Sign in or Sign out.
+- **Setup wizard.** The multiplanar tutorial page says Next instead of Finish (the network plug-in
+  question still follows), and the two choices on that last page are larger. The Bambu Lab network
+  plug-in box is ticked when another slicer on this computer has Bambu Lab printers, with a line
+  saying so; otherwise it stays unticked.
+- **Choosing a theme switches to it**, also when the colour scheme is set to System.
+- **Usage diagnostics** (only when you share them) now include how a printer configuration install
+  ended (versions and outcome; never the printer's address, name or files) and how many presets were
+  imported from each slicer (a number, never a name). See USAGE_DIAGNOSTICS.md.
+
+### Fixed
+
+- **Z contouring failed with several copies of an object on the plate.**
+- **Universe and other web tabs could stay white** when the app started on one (macOS).
+- **Startup and the home page could wait on macOS folder-permission prompts** while reading project
+  thumbnails; thumbnails now load in the background.
+- **The "Save as" name field in the printer's network settings was unreadable** with a dark
+  operating system and a light slicer theme.
+- **The multiplanar tutorial link did not open on macOS.**
+
+## 0.1.6 — 2026-10-14
+
+Changes since **0.1.5** (2026-10-13).
+
+### Changed
+
+- **No Orca Cloud.** The home page no longer shows an Orca Cloud or Bambu Lab account panel, and
+  Preferences no longer has a login region or login side panel. Nothing in the slicer signs in to
+  Orca Cloud.
+- **The Bambu Lab network plug-in is off by default** on the first-run setup page; tick it there,
+  in the installer, or later in Preferences if you print to Bambu Lab printers over the network.
+- **Usage diagnostics are off until you choose to share them.** Setup now asks where you live, in
+  one click (United States, Canada, Mexico, Central America & Caribbean, European Union / EEA,
+  United Kingdom, Switzerland, Asia-Pacific, China, Rest of the world), then asks **Help us build a
+  better slicer**: **Keep my data private** or **Share usage diagnostics**. Outside the United
+  States neither is selected; in the United States, Share starts selected and can be changed before
+  continuing. Your answer is saved before anything optional starts. Updating from 0.1.5 or earlier
+  (where diagnostics were on by default) asks the same question once the app has started; nothing
+  is collected or sent until you answer. If you had switched diagnostics off, that is kept.
+- **Slicing improvement program**: an optional, separate box under Share, never ticked in advance.
+  Members get early access to new features, and their shared data may be used to develop, train,
+  test, evaluate, and improve AI, CAD, slicing, software, manufacturing, and hardware systems.
+  Ordinary usage diagnostics are not used for that. Join or leave any time in Preferences > Online.
+- Shared diagnostics now include the values of the settings you change (never custom G-code, names,
+  paths, file references or credentials) and coarse measurements of each part (never its shape).
+  After you export or send a print, a notification asks once how it came out (only while
+  diagnostics are on). See [USAGE_DIAGNOSTICS.md](USAGE_DIAGNOSTICS.md).
+- **The installation id is created only when you choose to share diagnostics**, not at first launch.
+  It is kept if you later switch them off, so you can quote it in a privacy request, but no longer sent.
+- **Privacy policy 2026-10-v3** is bundled, with the consent wording it sets
+  out. Anyone who answered the earlier wording is asked again.
+- **Preferences > Online > Privacy** shows your choice and where you live, switches diagnostics on or off at
+  once (switching off deletes anything not yet sent), lets you join or leave the Slicing improvement
+  program, lets you choose where you live again, and opens the full privacy policy.
+- **Sharing a project to Unlayered Universe asks first, every time**, saying exactly what is
+  uploaded, why, to whom and for how long, with a separate, unticked box for AI training. Usage
+  diagnostics never upload models.
+- Diagnostics carry only allowlisted fields; error messages hide paths with spaces in them and model
+  file names; part measurements are rounded.
+- **Crash reports on Windows say how the session ended**, read from the Windows event log at the
+  next launch (the faulting module and offset, or that the app stopped responding), when
+  diagnostics are shared.
+- When a copy cannot update itself (for example, one unzipped or run from a build folder rather than
+  installed), shared diagnostics now say why.
+- **The update check notes, once, that an update installed and which privacy choice you made**
+  (keep private or share), with no identifier, so we can count both without usage diagnostics.
+  See [USAGE_DIAGNOSTICS.md](USAGE_DIAGNOSTICS.md).
+
+### Fixed
+
+- **macOS: "What's new" after an update was empty.** The changelog was missing from the macOS app.
+- Unlayered's own macOS builds are counted as internal copies in usage diagnostics, as on Windows.
+- Long sessions no longer build diagnostics batches too large for the site to accept: batches are
+  split by size as well as by number of events.
+- **An update downloaded before the app crashed is no longer lost.** It used to be downloaded
+  again and only installed at the next clean exit. Now the next launch reuses the download (after
+  checking it again) and offers **Install now**.
+
+## 0.1.5 — 2026-10-13
+
+Changes since **0.1.4** (2026-10-12).
+
+### Fixed
+
+- **macOS: Quit while the setup wizard was open did nothing.** Dock › Quit, logging out and Cmd-Q
+  were ignored while the first-run wizard was up, so the only way out was Force Quit, and the
+  wizard came back at the next launch. Quitting now closes the wizard (it returns next time, since
+  nothing was saved) and quits normally. The wizard's red close button cancels setup.
+- **macOS: a crash when quitting within the first half-minute** after launch.
+- **macOS: Quit with another dialog open** (such as the Bambu Lab network plug-in prompt) is refused,
+  as it always was on macOS, instead of leaving a half-closed app behind.
+- **A crash measuring text in the 3D view** (an empty label).
+- **Updates only offer a version that has an installer for your system.** A release published for
+  one platform no longer prompts the others to update.
+
+### Changed
+
+- **Crash reports name the calling code**, not just where the crash happened, on Windows, and macOS
+  and Linux now report crashes and hangs at all. See [USAGE_DIAGNOSTICS.md](USAGE_DIAGNOSTICS.md).
+- Unlayered's own copies of the slicer (developer builds, copies run from a build folder, or with
+  `UNLAYERED_INTERNAL` set) report diagnostics as `dev`, so they are not counted with customers'.
+
 ## 0.1.4 — 2026-10-12
 
 Changes since **0.1.3** (2026-10-11).

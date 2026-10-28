@@ -1,6 +1,9 @@
 //var TestData={"sequence_id":"0","command":"get_recent_projects","response":[{"path":"D:\\work\\Models\\Toy\\3d-puzzle-cube-model_files\\3d-puzzle-cube.3mf","time":"2022\/3\/24 20:33:10"},{"path":"D:\\work\\Models\\Art\\Carved Stone Vase - remeshed+drainage\\Carved Stone Vase.3mf","time":"2022\/3\/24 17:11:51"},{"path":"D:\\work\\Models\\Art\\Kity & Cat\\Cat.3mf","time":"2022\/3\/24 17:07:55"},{"path":"D:\\work\\Models\\Toy\\鐩村墤.3mf","time":"2022\/3\/24 17:06:02"},{"path":"D:\\work\\Models\\Toy\\minimalistic-dual-tone-whistle-model_files\\minimalistic-dual-tone-whistle.3mf","time":"2022\/3\/22 21:12:22"},{"path":"D:\\work\\Models\\Toy\\spiral-city-model_files\\spiral-city.3mf","time":"2022\/3\/22 18:58:37"},{"path":"D:\\work\\Models\\Toy\\impossible-dovetail-puzzle-box-model_files\\impossible-dovetail-puzzle-box.3mf","time":"2022\/3\/22 20:08:40"}]};
 
 var m_HotModelList=null;
+// Unlayered: whether the backend has reported a cloud provider (cloud_providers_info). It never does
+// in this build, so the left board, which holds the cloud account row, stays hidden.
+var m_HasCloudProvider=false;
 
 function OnInit()
 {
@@ -79,8 +82,11 @@ function Set_RecentFile_MouseRightBtn_Event()
 }
 
 function SetLoginPanelVisibility(visible) {
+  // Unlayered: this used to show the board whatever `visible` said, and the backend sends it after every
+  // login-info request, so the Orca Cloud row came back whenever it arrived after cloud_providers_info.
+  // Only cloud_providers_info decides now.
   var leftBoard = document.getElementById("LeftBoard");
-  leftBoard.style.display = "block";
+  leftBoard.style.display = visible && m_HasCloudProvider ? "block" : "none";
 }
 
 function HandleStudio( pVal )
@@ -113,7 +119,8 @@ function HandleStudio( pVal )
       $("#BambuCloudSection").hide();
     }
 
-    if (providers.indexOf("orca") >= 0) {
+    m_HasCloudProvider = providers.indexOf("orca") >= 0;
+    if (m_HasCloudProvider) {
       $("#LeftBoard").show();
     } else {
       $("#LeftBoard").hide();
@@ -292,8 +299,39 @@ function SetMallUrl( strUrl )
 }
 
 
+// Unlayered 2026-10-22: the list also holds other slicers' recent projects (MainFrame::
+// get_recent_projects tags each with "source"); a chip per slicer filters it.
+var m_RecentAll=[];
+var m_RecentSource='';
+
+function EscapeHtml( s )
+{
+	return $('<div>').text(s || '').html();
+}
+
 function ShowRecentFileList( pList )
 {
+	m_RecentAll=pList || [];
+	let sources=[];
+	for(let n=0;n<m_RecentAll.length;n++)
+	{
+		let s=m_RecentAll[n]['source'];
+		if( s && sources.indexOf(s)<0 )
+			sources.push(s);
+	}
+	if( m_RecentSource!='' && sources.indexOf(m_RecentSource)<0 )
+		m_RecentSource='';
+	let chips='';
+	if( sources.length>1 )
+	{
+		chips+='<span class="SourceChip'+(m_RecentSource==''?' SourceChipOn':'')+'" data-source="">All</span>';
+		for(let n=0;n<sources.length;n++)
+			chips+='<span class="SourceChip'+(m_RecentSource==sources[n]?' SourceChipOn':'')+'" data-source="'+EscapeHtml(sources[n])+'">'+EscapeHtml(sources[n])+'</span>';
+	}
+	$("#RecentSourceFilter").html(chips);
+	$("#RecentSourceFilter .SourceChip").on('click', function(){ m_RecentSource=$(this).attr('data-source'); ShowRecentFileList(m_RecentAll); });
+
+	pList=m_RecentAll.filter(function(f){ return m_RecentSource=='' || f['source']==m_RecentSource; });
 	let nTotal=pList.length;
 	
 	let strHtml='';
@@ -312,6 +350,8 @@ function ShowRecentFileList( pList )
 		//let sShortName=sPath.substring(index+1,sPath.length);
 		
 		let sBadge=sPublished? '<span class="FilePublishedBadge">PUB</span>':'';
+		if( OneFile['other']=='1' )
+			sBadge+='<span class="FileSourceBadge">'+EscapeHtml(OneFile['source'])+'</span>';
 		let sLogoBadge=sPublished? '<img class="FileLogoBadge" src="../../images/UnlayeredSlicer_gradient_circle.svg" alt="" />':'';
 
 		let TmpHtml='<div class="FileItem"  fpath="'+sPath+'"  >'+

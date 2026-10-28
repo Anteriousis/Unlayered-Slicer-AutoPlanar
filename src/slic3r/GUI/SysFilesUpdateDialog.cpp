@@ -18,6 +18,7 @@
 #include "GUI_App.hpp"
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
+#include "PrinterUpdateOffer.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
 #include "Jobs/PlaterWorker.hpp"
 #include "slic3r/Utils/DuetRrfClient.hpp"
@@ -214,25 +215,21 @@ SysFilesUpdateJob::SourceFactory SysFilesUpdateDialog::make_source_factory() con
     // Read on the UI thread and captured by value: the factory runs on the job's worker, where
     // touching wxGetApp() is not safe.
     const std::string api_base = wxGetApp().app_config->github_api_base();
-    // The configuration feed is per-customer and gated; the token identifies who is asking. Read
-    // here on the UI thread with api_base, for the same reason: the factory below runs on the
-    // job's worker thread, where wxGetApp() is not safe to touch. Empty is normal and simply
-    // sends no Authorization header, which is what a public repository expects.
+    // The configuration feed needs the customer's Unlayered account sign-in, which identifies who
+    // is asking. Read here on the UI thread with api_base, for the same reason: the factory below
+    // runs on the job's worker thread, where wxGetApp() is not safe to touch. Empty is normal
+    // (signed out) and simply sends no Authorization header.
     //
-    // Withheld unless the feed has actually been pointed somewhere other than GitHub. This token
-    // belongs to the Unlayered account service, and "github_api_base" is unset by default, so
-    // without this check a customer who pastes their token would send it as a Bearer credential
-    // to api.github.com -- a third party that has no use for it and should never see it. GitHub
-    // would reject it and the user would see an auth failure, but the credential would already
-    // have left the machine.
-    const bool        is_github = boost::algorithm::icontains(api_base, "api.github.com");
-    const std::string token     = is_github ? std::string() : wxGetApp().app_config->printer_updates_token();
-    return [local, api_base, token]() -> std::unique_ptr<SysFileSource> {
+    // The credential is bound to the Unlayered site and the source attaches it per request, only
+    // to URLs on that site - so "github_api_base" pointed at GitHub, or a release asset hosted
+    // elsewhere, never receives it.
+    const FeedCredential credential = printer_feed_credential();
+    return [local, api_base, credential]() -> std::unique_ptr<SysFileSource> {
         if (!local.empty())
             return std::make_unique<LocalSysFileSource>(local);
         GitHubSysFileSource::Options opts;
-        opts.api_base = api_base;
-        opts.token    = token;
+        opts.api_base   = api_base;
+        opts.credential = credential;
         return std::make_unique<GitHubSysFileSource>(std::move(opts));
     };
 }
@@ -516,6 +513,9 @@ void SysFilesUpdateDialog::on_job_finished(wxCommandEvent &evt)
             available = _L("(no version declared)");
         if (!m_job_result->available_date.empty())
             available += wxString::Format(" (%s)", wxString::FromUTF8(m_job_result->available_date.c_str()));
+        // Never enforced (see SysFilePackage::machine), so at least said before the install.
+        if (!m_job_result->available_machine.empty())
+            available += wxString::Format(_L(" for %s"), wxString::FromUTF8(m_job_result->available_machine.c_str()));
         if (!m_job_result->available_origin.empty())
             available += wxString::Format(" - %s", wxString::FromUTF8(m_job_result->available_origin.c_str()));
         m_available_label->SetLabel(wxString::Format(_L("Available: %s"), available));
@@ -552,6 +552,18 @@ void SysFilesUpdateDialog::on_job_finished(wxCommandEvent &evt)
                                         "first."),
                                      need, wxString::FromUTF8(m_job_result->required_firmware_reason.c_str()), running);
             m_notes->SetValue(text);
+        }
+
+        // Opened from "Printer update available": go straight to the install's own confirmation,
+        // once, when there is something new that this firmware can run. Otherwise the dialog just
+        // shows why not, as it would from the Config button.
+        if (m_begin_when_ready) {
+            m_begin_when_ready = false;
+            if (!same && !m_job_result->firmware_too_old && !m_file_paths.empty() && m_local_path.empty())
+                CallAfter([this]() {
+                    if (m_phase == Phase::Ready)
+                        start_install(/* force */ false);
+                });
         }
         break;
     }

@@ -1,68 +1,88 @@
-var m_OldRegion='';
-var m_Region='';
+// Unlayered 0.1.6: the one-click region page (see index.html). The places come from the slicer
+// (privacy_state); the choice is saved there (privacy_save_place) before the privacy page opens.
+
+var m_Place='';
+var m_Saving=false;
 
 function OnInit()
 {
-	//let strInput=JSON.stringify(cData);
-	//HandleStudio(strInput);
-	
 	TranslatePage();
-	
-	RequestProfile();
+
+	SendPrivacy({'command':'privacy_request_state'});
 }
 
-
-function RequestProfile()
+function SendPrivacy( tSend )
 {
-	var tSend={};
 	tSend['sequence_id']=Math.round(new Date() / 1000);
-	tSend['command']="request_userguide_profile";
-	
 	SendWXMessage( JSON.stringify(tSend) );
 }
 
 function HandleStudio( pVal )
 {
 	let strCmd=pVal['command'];
-	//alert(strCmd);
-	
-	if(strCmd=='response_userguide_profile')
+
+	if( strCmd=='privacy_state' )
 	{
-		HandleRegionlList(pVal['response']);
+		let list=$('#RegionList');
+		list.empty();
+		for( let p of pVal['places'] )
+		{
+			let item=$('<div class="RegionItem" role="radio" aria-checked="false" tabindex="0">');
+			item.attr('data-place', p['id']).text(p['label']);
+			list.append(item);
+		}
+		// Only a choice made earlier in this same run of the flow is shown again (after Back).
+		if( pVal['place'] )
+			ChoosePlace(pVal['place']);
+		UpdateState();
+	}
+	else if( strCmd=='privacy_place_saved' )
+	{
+		m_Saving=false;
+		if( pVal['ok'] )
+			window.location.href="../13/index.html";
+		else
+			UpdateState();
 	}
 }
 
-function HandleRegionlList(  pItem )
+function ChoosePlace( id )
 {
-	m_OldRegion=pItem['region'];
-	
-	let nNum=$(".RegionItem[region='"+m_OldRegion+"']").length;
-	if( nNum==1 )
-		ChooseRegion(m_OldRegion);
+	m_Place=id;
+	$('.RegionItem').removeClass('RegionSelected').attr('aria-checked','false');
+	$(".RegionItem[data-place='"+id+"']").addClass('RegionSelected').attr('aria-checked','true');
+	UpdateState();
 }
 
-
-function ChooseRegion( strRegion )
+function UpdateState()
 {
-	m_Region=strRegion;
-	
-	$('.RegionItem').removeClass('RegionSelected');
-	$(".RegionItem[region='"+strRegion+"']").addClass('RegionSelected');
+	$('#AcceptBtn').prop('disabled', m_Saving || $('.RegionSelected').length!=1);
 }
+
+// Keyboard and mouse both choose (the list is a radio group).
+$(document).on('click', '.RegionItem', function() { ChoosePlace($(this).attr('data-place')); });
+$(document).on('keydown', '.RegionItem', function(e) {
+	if( e.key==' ' || e.key=='Enter' )
+	{
+		e.preventDefault();
+		ChoosePlace($(this).attr('data-place'));
+	}
+	else if( e.key=='ArrowDown' || e.key=='ArrowUp' || e.key=='ArrowRight' || e.key=='ArrowLeft' )
+	{
+		e.preventDefault();
+		let items=$('.RegionItem');
+		let step=( e.key=='ArrowDown' || e.key=='ArrowRight' ) ? 1 : -1;
+		let n=items.index(this)+step;
+		if( n>=0 && n<items.length )
+			items[n].focus();
+	}
+});
 
 function GotoPolicyPage()
 {
-	let ItemSelected=$('.RegionSelected')[0];
-	let RegionFinal=$(ItemSelected).attr("region");
-	
-	var tSend={};
-	tSend['sequence_id']=Math.round(new Date() / 1000);
-	tSend['command']="save_region";
-	tSend['region']=RegionFinal;
-	
-	SendWXMessage( JSON.stringify(tSend) );
-	
-	window.location.href="../21/index.html";
+	if( m_Place=='' )
+		return;
+	m_Saving=true;
+	UpdateState();
+	SendPrivacy({'command':'privacy_save_place','place':m_Place});
 }
-
-

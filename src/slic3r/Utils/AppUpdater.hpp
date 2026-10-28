@@ -49,11 +49,26 @@ const char *updater_arch();
 // installer that cannot be verified is never run unattended.
 std::optional<AccountDownload> select_account_download(const std::vector<AccountDownload> &downloads);
 
+// Platform-specific rollouts: whether a manifest release was published for this platform, so that
+// publishing a Mac-only 0.1.5 does not announce 0.1.5 to Windows or Linux. True when the release
+// lists an installer for this platform: an unlayered_downloads entry naming it, or an asset of its
+// file type (.exe/.msi on Windows, .dmg on macOS, .AppImage on Linux). A release that lists no
+// installers at all (a page-only manifest) is still true, as before, so an old manifest cannot
+// silently stop updates. Unlike the select_* functions this does not ask whether the update can be
+// installed in place, only whether it exists for this platform.
+bool release_targets_platform(const std::vector<AppUpdateAsset> &assets, const std::vector<AccountDownload> &downloads);
+
 // Where this copy is installed, if - and only if - it can update itself without asking: a per-user
 // installation made by our NSIS installer (its uninstaller sits next to the executable and the
 // current user's registry hive names this folder). A Program Files install, a portable copy, a
 // development build or another platform return nothing, and get the interactive path instead.
 std::optional<boost::filesystem::path> self_updatable_install_dir();
+// Why self_updatable_install_dir() refused this copy, for the updater's diagnostics; "" when it did
+// not. Windows: "no_uninstaller" (an unzipped or development copy), "all_users" (registered under
+// HKLM: a per-machine install), "registered_elsewhere" (the per-user registration points at a
+// different folder: a second copy), "not_registered". macOS: "not_in_applications". Linux:
+// "unsupported".
+std::string self_update_blocker();
 
 // True when another process is running this same executable. A silent install would fail on its
 // locked files, so the update waits until it is the last window.
@@ -85,6 +100,21 @@ bool launch_installer(const boost::filesystem::path &installer, std::string &err
 // With `relaunch` the installer starts the application again when it is done.
 bool launch_silent_update(const boost::filesystem::path &installer, const boost::filesystem::path &install_dir,
                           bool relaunch, std::string &error_out);
+
+// Where download_installer() put `installer`, relative to the temp directory
+// ("unlayered-update-<pid>/<file>"), for keeping across a restart. Empty if it is not one of ours.
+std::string download_relative_path(const boost::filesystem::path &installer);
+
+// Takes over an installer an earlier session downloaded but never ran (it crashed or was ended
+// before it could hand over, or another copy was open): `relative` is what download_relative_path()
+// gave that session. The file moves into this process's download directory, so
+// cleanup_stale_download_dirs() keeps it. Quick; call it before that sweep. The file is not trusted
+// yet: check it with verify_installer().
+bool claim_previous_installer(const std::string &relative, boost::filesystem::path &dest_out, std::string &error_out);
+
+// Whether the file on disk matches the sha256 the update manifest declared. Reads the whole file,
+// so call it from a worker thread.
+bool verify_installer(const boost::filesystem::path &installer, const std::string &sha256, std::string &error_out);
 
 // Best-effort removal of a directory left behind by download_installer(). Never throws.
 void cleanup_download_dir(const boost::filesystem::path &installer);

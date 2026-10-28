@@ -66,7 +66,7 @@ MACHINE_SPECIFIC = (
     "printerstats.json", "eventlog.txt", "piezolog.csv",
     # Written by the Duet configurator and by DWC to describe one installation.
     "configtool.json", "dwc-plugins.json",
-    # The ship card's OVERLAYS: files config.g loads over its own defaults, written on the machine
+    # The printer's own OVERLAYS: files config.g loads over its own defaults, written on the machine
     # by the panels, the setup wizard and calibration. Installing a copy would hand this machine
     # another one's plate offsets, name, network, probe polarity or measured tilt - or mark it as
     # set up when it never was. The printer's sys/factoryreset.g carries the full list.
@@ -76,6 +76,10 @@ MACHINE_SPECIFIC = (
     # .bin). Installed onto another card it names an image that card may not hold, and daemon.g
     # then pushes whatever panel binary is actually there - possibly an older one.
     "panelimage.g",
+    # Setup progress (Do not ask again, resume point) and the Z stop's measured tip height: state
+    # sys/factoryreset.g erases. The slicer refuses to install any name on this list from any
+    # source (SysFilesBundle.cpp sys_machine_specific_names; verify_sys_updater.py checks they agree).
+    "setupskip.g", "setupprog.g", "zstall.g",
 )
 
 

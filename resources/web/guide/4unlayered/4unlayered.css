@@ -24,9 +24,35 @@
 
 .CheckArea
 {
-	display: block;
-	margin-top: 3mm;
+	display: flex;
+	align-items: center;
+	margin-top: 4mm;
 	line-height: 30px;
+	cursor: pointer;
+}
+
+/* Unlayered 2026-10-21: the two choices on this page were too small to notice. Bigger box and text than
+   the shared checkbox style (common.css sizes the box at 1em of a 14px line). */
+.CheckArea input[type="checkbox"]
+{
+	width: 24px;
+	height: 24px;
+	flex: none;
+	margin-right: 12px;
+	border-width: 2px;
+	border-radius: 4px;
+}
+
+.CheckArea input[type="checkbox"]::before
+{
+	width: 18px;
+	height: 18px;
+}
+
+.CheckArea .TextS1
+{
+	font-size: 17px;
+	font-weight: 600;
 }
 /* ORCA brokes shape of custom css checkbox
 #StealthMode

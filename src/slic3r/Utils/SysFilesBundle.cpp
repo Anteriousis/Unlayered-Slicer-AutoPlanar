@@ -152,6 +152,38 @@ bool sys_is_ignored_file(const std::string &relative_path)
     return false;
 }
 
+const std::vector<std::string> &sys_machine_specific_names()
+{
+    // Keep in step with MACHINE_SPECIFIC in tools/make_sys_bundle.py (verify_sys_updater.py checks).
+    static const std::vector<std::string> names = {
+        // Calibration measured on one printer, and the state DWC and RRF keep about it.
+        "heightmap.csv", "probePoints.csv", "config-override.g", "dwc-settings.json", "dwc-cache.json",
+        "resurrect.g", "resurrect-prologue.g",
+        // What a printer accumulates about itself: the odometer and the logs.
+        "printerstats.json", "eventlog.txt", "piezolog.csv",
+        // Written by the Duet configurator and by DWC to describe one installation.
+        "configtool.json", "dwc-plugins.json",
+        // The printer's own overlays, written on the machine by the panels, the setup wizard and
+        // calibration: plate offsets, name, network, display, probe polarity, measured deflection.
+        "plates.g", "machinename.g", "panelnet.g", "display.g", "setupdone.g", "piezopol.g", "callast.g", "cdefl.g",
+        "filaments.csv", "panelfw.g", "fwflash.g", "panelimage.g",
+        // Setup progress and the measured Z-stop height, both erased by sys/factoryreset.g.
+        "setupskip.g", "setupprog.g", "zstall.g",
+    };
+    return names;
+}
+
+bool sys_is_machine_specific(const std::string &card_path)
+{
+    const std::vector<std::string> parts = split_path(normalize_separators(card_path));
+    if (parts.empty())
+        return false;
+    for (const auto &n : sys_machine_specific_names())
+        if (boost::iequals(parts.back(), n))
+            return true;
+    return false;
+}
+
 // -----------------------------------------------------------------------------------------------
 // Package
 // -----------------------------------------------------------------------------------------------
@@ -478,6 +510,21 @@ bool build_package(std::vector<RawEntry> entries,
         break;
     }
 
+    // A file that belongs to one printer is never installed, whatever the manifest says about it.
+    // Dropped from the declared list here, so the declared-but-missing check below does not read it
+    // as a broken package. Whether the manifest enumerated files is decided BEFORE that, so a list
+    // left empty by it can never fall through to "install everything that was found".
+    static const char *MACHINE_SPECIFIC_REASON =
+        "belongs to one printer (its calibration, name, network, setup or logs) and is never replaced";
+    const bool manifest_lists_files = have_manifest && !pkg.files.empty();
+    if (manifest_lists_files) {
+        auto keep = std::stable_partition(pkg.files.begin(), pkg.files.end(),
+                                          [](const SysFile &f) { return !sys_is_machine_specific(f.path); });
+        for (auto it = keep; it != pkg.files.end(); ++it)
+            pkg.skipped.emplace_back(it->path, MACHINE_SPECIFIC_REASON);
+        pkg.files.erase(keep, pkg.files.end());
+    }
+
     // Everything the package actually carries, keyed by where it would land on the card.
     std::vector<SysFile> found;
     for (auto &e : entries) {
@@ -488,6 +535,14 @@ bool build_package(std::vector<RawEntry> entries,
         std::string card_path, reason;
         if (!sys_map_path(e.path, card_path, reason)) {
             pkg.skipped.emplace_back(e.path, reason);
+            continue;
+        }
+        if (sys_is_machine_specific(card_path)) {
+            // Reported once: a manifest that declared it has already been answered above.
+            const bool reported = std::any_of(pkg.skipped.begin(), pkg.skipped.end(),
+                                              [&card_path](const auto &s) { return boost::iequals(s.first, card_path); });
+            if (!reported)
+                pkg.skipped.emplace_back(e.path, MACHINE_SPECIFIC_REASON);
             continue;
         }
         if (e.data.empty()) {
@@ -503,7 +558,7 @@ bool build_package(std::vector<RawEntry> entries,
         found.push_back(std::move(f));
     }
 
-    if (have_manifest && !pkg.files.empty()) {
+    if (manifest_lists_files) {
         // Take the declared list, in the declared order, and fill it from what was found.
         std::vector<SysFile> resolved;
         for (auto &declared : pkg.files) {
@@ -716,8 +771,10 @@ std::string GitHubSysFileSource::description() const
             % m_opts.owner % m_opts.repo % (m_opts.tag.empty() ? std::string("latest") : m_opts.tag)).str();
 }
 
-bool GitHubSysFileSource::fetch(SysFilePackage &pkg_out, SysProgressFn progress, std::string &error_out)
+bool GitHubSysFileSource::fetch_release(Release &out, std::string &error_out)
 {
+    m_last_status = 0;
+
     // /releases/latest skips pre-releases, so list them and take the newest published one instead.
     std::string url;
     if (!m_opts.tag.empty())
@@ -730,52 +787,50 @@ bool GitHubSysFileSource::fetch(SysFilePackage &pkg_out, SysProgressFn progress,
         url = (boost::format("%1%/repos/%2%/%3%/releases/latest") % m_opts.api_base
                % m_opts.owner % m_opts.repo).str();
 
-    auto github_headers = [this](Http &http) {
-        http.header("User-Agent", "UnlayeredSlicer");
-        if (!m_opts.token.empty())
-            http.header("Authorization", std::string("Bearer ") + m_opts.token);
-    };
-
     std::string body;
     bool        ok   = false;
     auto        http = Http::get(url);
     http.timeout_connect(10)
         .timeout_max(30)
         .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28");
-    github_headers(http);
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "UnlayeredSlicer");
+    const bool sent_credential = apply_feed_credential(http, url, m_opts.credential);
     http.on_error([&](std::string b, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("SysFiles: GitHub request failed: %1%, HTTP %2%") % error % status;
+            m_last_status = status;
+            BOOST_LOG_TRIVIAL(error) << boost::format("SysFiles: release request failed: %1%, HTTP %2%") % error % status;
             if (status == 404)
                 error_out = (boost::format("No configuration releases found at %1%/%2%") % m_opts.owner % m_opts.repo).str();
-            // The gated feed distinguishes the two cases and so must this: 401 means no token was
-            // sent at all, 403 means one was sent and refused. Both are failures a customer can
-            // act on, and neither reads that way as a bare HTTP code -- "HTTP 401" looks like a
-            // fault in the slicer rather than a setting that was never filled in, which is the
-            // normal first-run state.
+            // The feed needs the customer's Unlayered account sign-in. It distinguishes the two cases
+            // and so must this. 401: no sign-in was sent, or the site no longer knows it (revoked,
+            // expired, signed out on the website).
+            // 403: the site knows the account, and the account has no printer-update access. Both
+            // are things a customer can act on, and neither reads that way as a bare HTTP code.
             else if (status == 401)
-                error_out = "Configuration updates need an access token. Open your account page on "
-                            "the Unlayered website, copy the slicer access token, and paste it into "
-                            "Preferences > Printer updates.";
-            else if (status == 403 && !m_opts.token.empty())
-                error_out = "That access token was not accepted. Check it against the one on your "
-                            "account page -- it may have been replaced, or the account it belongs "
-                            "to may no longer have access to configuration updates.";
+                error_out = sent_credential
+                    ? "The Unlayered website no longer accepts this computer's sign-in. Sign out and "
+                      "sign in again to your Unlayered account from the Help menu, then try again."
+                    : "Configuration updates come with your Unlayered account. Sign in with "
+                      "Help > Sign in to Unlayered, then try again.";
+            else if (status == 403 && sent_credential)
+                error_out = "Your Unlayered account does not have access to printer configuration "
+                            "updates. Contact Unlayered if it should.";
             else if (status == 403)
-                error_out = "GitHub rejected the request (rate limited, or the repository is private)";
+                error_out = "The update feed rejected the request (rate limited, or the repository is private)";
             else
                 error_out = error.empty() ? (boost::format("HTTP %1%") % status).str() : error;
         })
-        .on_complete([&](std::string b, unsigned) { body = std::move(b); ok = true; })
+        .on_complete([&](std::string b, unsigned status) {
+            m_last_status = status;
+            body = std::move(b);
+            ok   = true;
+        })
         .perform_sync();
 
     if (!ok)
         return false;
 
-    std::string tag;
-    std::string release_notes;
-    std::string asset_url;
-    std::string asset_name;
+    out = Release();
     try {
         pt::ptree root;
         std::istringstream iss(body);
@@ -801,8 +856,9 @@ bool GitHubSysFileSource::fetch(SysFilePackage &pkg_out, SysProgressFn progress,
             release = &root;
         }
 
-        tag           = release->get<std::string>("tag_name", "");
-        release_notes = release->get<std::string>("body", "");
+        out.tag     = release->get<std::string>("tag_name", "");
+        out.version = boost::starts_with(out.tag, "v") ? out.tag.substr(1) : out.tag;
+        out.notes   = release->get<std::string>("body", "");
 
         // Prefer the asset the options name; fall back to any zip, so a release that calls it
         // something else still works.
@@ -812,26 +868,48 @@ bool GitHubSysFileSource::fetch(SysFilePackage &pkg_out, SysProgressFn progress,
                 const std::string durl = kv.second.get<std::string>("browser_download_url", "");
                 if (name.empty() || durl.empty())
                     continue;
+                // GitHub's own field, which unlayered3d.com sends too: "sha256:<hex>". Anything else
+                // (another algorithm, a malformed value) is treated as absent, not as a failure.
+                std::string digest = boost::algorithm::to_lower_copy(kv.second.get<std::string>("digest", ""));
+                if (boost::starts_with(digest, "sha256:"))
+                    digest = digest.substr(7);
+                else
+                    digest.clear();
+                if (digest.size() != 64 ||
+                    !std::all_of(digest.begin(), digest.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)) != 0; }))
+                    digest.clear();
                 if (boost::iequals(name, m_opts.asset_name)) {
-                    asset_name = name;
-                    asset_url  = durl;
+                    out.asset_name   = name;
+                    out.asset_url    = durl;
+                    out.asset_sha256 = digest;
                     break;
                 }
-                if (asset_url.empty() && boost::iends_with(name, ".zip")) {
-                    asset_name = name;
-                    asset_url  = durl;
+                if (out.asset_url.empty() && boost::iends_with(name, ".zip")) {
+                    out.asset_name   = name;
+                    out.asset_url    = durl;
+                    out.asset_sha256 = digest;
                 }
             }
         }
-        if (asset_url.empty()) {
-            error_out = (boost::format("Release %1% has no configuration archive attached") % tag).str();
+        if (out.asset_url.empty()) {
+            error_out = (boost::format("Release %1% has no configuration archive attached") % out.tag).str();
             return false;
         }
     } catch (const std::exception &e) {
-        error_out = (boost::format("Could not parse the GitHub release response: %1%") % e.what()).str();
+        error_out = (boost::format("Could not parse the release response: %1%") % e.what()).str();
         return false;
     }
+    return true;
+}
 
+bool GitHubSysFileSource::fetch(SysFilePackage &pkg_out, SysProgressFn progress, std::string &error_out)
+{
+    Release release;
+    if (!fetch_release(release, error_out))
+        return false;
+    const std::string &tag        = release.tag;
+    const std::string &asset_name = release.asset_name;
+    const std::string &asset_url  = release.asset_url;
     std::vector<uint8_t> zip_bytes;
     bool                 download_ok = false;
     bool                 cancelled   = false;
@@ -839,7 +917,8 @@ bool GitHubSysFileSource::fetch(SysFilePackage &pkg_out, SysProgressFn progress,
     dl.timeout_connect(10)
       .timeout_max(120)
       .header("Accept", "application/octet-stream");
-    github_headers(dl);
+    dl.header("User-Agent", "UnlayeredSlicer");
+    apply_feed_credential(dl, asset_url, m_opts.credential);
     dl.on_error([&](std::string b, std::string error, unsigned status) {
             if (!cancelled)
                 error_out = (boost::format("Could not download %1%: %2%") % asset_name
@@ -864,6 +943,19 @@ bool GitHubSysFileSource::fetch(SysFilePackage &pkg_out, SysProgressFn progress,
         error_out = (boost::format("%1% is empty") % asset_name).str();
         return false;
     }
+    // Checked before the archive is opened: a download cut short, or changed on the way, is refused
+    // as a whole rather than half read.
+    if (!release.asset_sha256.empty()) {
+        const std::string actual = sha256_hex(zip_bytes);
+        if (!boost::iequals(actual, release.asset_sha256)) {
+            BOOST_LOG_TRIVIAL(error) << "SysFiles: " << asset_name << " has sha256 " << actual << ", the release says "
+                                     << release.asset_sha256;
+            error_out = (boost::format("%1% did not arrive intact (its checksum does not match the release). Nothing "
+                                       "was installed; try again.") % asset_name).str();
+            return false;
+        }
+        BOOST_LOG_TRIVIAL(info) << "SysFiles: " << asset_name << " matches the release digest sha256:" << actual;
+    }
 
     MZ_Archive zip;
     if (!mz_zip_reader_init_mem(&zip.arch, zip_bytes.data(), zip_bytes.size(), 0)) {
@@ -883,9 +975,23 @@ bool GitHubSysFileSource::fetch(SysFilePackage &pkg_out, SysProgressFn progress,
     // A manifest inside the archive is authoritative; without one the tag stands in, exactly as it
     // does for a firmware release with no manifest.
     if (pkg_out.version.empty())
-        pkg_out.version = boost::starts_with(tag, "v") ? tag.substr(1) : tag;
+        pkg_out.version = release.version;
     if (pkg_out.notes.empty())
-        pkg_out.notes = release_notes;
+        pkg_out.notes = release.notes;
+
+    // validate_sys_package() checks every DECLARED checksum before an install; this makes declaring
+    // them compulsory for a release, so a package that would be written unverified never gets that far.
+    if (m_opts.require_checksums) {
+        auto unchecked = std::find_if(pkg_out.files.begin(), pkg_out.files.end(),
+                                      [](const SysFile &f) { return f.sha256.empty(); });
+        if (unchecked != pkg_out.files.end()) {
+            error_out = (boost::format("Release %1% does not declare a checksum for %2%, so it cannot be verified and "
+                                       "was not used. Configuration releases are built with tools/make_sys_bundle.py.")
+                         % tag % unchecked->path).str();
+            pkg_out = SysFilePackage();
+            return false;
+        }
+    }
     return true;
 }
 

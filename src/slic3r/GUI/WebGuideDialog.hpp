@@ -29,7 +29,9 @@
 #include "GUI_App.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/PresetUpdater.hpp"
+#include "PrivacySetupDialog.hpp"
 
+#include <memory>
 #include <unordered_map>
 #include <mutex>
 #include <set>
@@ -37,6 +39,8 @@
 #include <nlohmann/json.hpp>
 
 namespace Slic3r { namespace GUI {
+
+struct OtherSlicersFound;
 
 class GuideFrame : public DPIDialog
 {
@@ -132,6 +136,22 @@ private:
     bool m_destroy{false};
     boost::thread* m_load_task{ nullptr };
 
+    // Unlayered 0.1.7, the "Settings from other slicers" step (guide 5import) between the privacy
+    // page and the printer picker. Detected once, when the privacy page moves on; the step is shown
+    // only when something can be imported. Imported right there, so the picker shows the result.
+    void                               DetectOtherSlicers();
+    std::unique_ptr<OtherSlicersFound> m_other_slicers;
+    bool                               m_other_slicers_offered{false};  // the step is in the flow
+    // Unlayered 0.1.7: the "Sign in to Unlayered" step (guide 13signin) is in this run's flow: the
+    // slicer was not signed in when the privacy page moved on. Decided once per run, so Back keeps it.
+    bool                               m_signin_shown{false};
+    bool                               m_signin_decided{false};
+    bool                               m_other_slicers_imported{false};
+    std::string                        m_other_slicers_summary;         // shown again on Back
+    // "Bambu Studio" / "OrcaSlicer" when its printer list has Bambu Lab printers: the last page then
+    // ticks the network plug-in box.
+    std::string                        m_bambu_printers_in;
+
     // User Config
     bool PrivacyUse;
     bool StealthMode;
@@ -142,6 +162,9 @@ private:
     // Set only by the page itself: an answer the user never saw must not be written back.
     bool m_stealth_answered {false};
     bool m_netplugin_answered {false};
+    // The privacy steps (region, North America country, "Slicer Privacy Policy"): 0.1.6. The choice
+    // is saved by the flow itself when the person presses Continue on the privacy page.
+    std::unique_ptr<PrivacyFlow> m_privacy;
 
     json m_OrcaFilaList;
     std::string m_OrcaFilaLibPath;

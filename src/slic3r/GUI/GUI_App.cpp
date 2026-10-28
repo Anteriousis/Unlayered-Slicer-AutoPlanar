@@ -3,6 +3,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/Platform.hpp"
 #include "GUI_App.hpp"
+#include <wx/choicdlg.h>
 #include "GUI_Init.hpp"
 #include "GUI_ObjectList.hpp"
 #include "slic3r/GUI/UserManager.hpp"
@@ -122,6 +123,7 @@
 #include "InstanceCheck.hpp"
 #ifdef __APPLE__
 #include "DeepLinkHandlerMac.h"
+#include "MacQuitHandler.h"
 #endif
 #include "NotificationManager.hpp"
 #include "UnsavedChangesDialog.hpp"
@@ -150,6 +152,10 @@
 #include "ReleaseNote.hpp"
 #include "AutoUpdater.hpp"
 #include "slic3r/Utils/UsageTelemetry.hpp"
+#include "slic3r/Utils/PrivacyConsent.hpp"
+#include "PrivacySetupDialog.hpp"
+#include "PrinterUpdateOffer.hpp"
+#include "OtherSlicerImportDialog.hpp"
 #include "ModelMall.hpp"
 #include "HintNotification.hpp"
 
@@ -849,6 +855,7 @@ namespace {
 bool                     s_usage_first_run      = false;
 bool                     s_usage_app_start_sent = false;
 std::unique_ptr<wxTimer> s_usage_timer;
+std::unique_ptr<wxTimer> s_usage_heartbeat; // UsageTelemetry::heartbeat(): the hang watchdog's pulse
 
 void record_usage_app_start()
 {
@@ -873,15 +880,102 @@ void record_usage_app_start()
         {"stealth", app.app_config->get_stealth_mode()},
         {"dark_mode", GUI_App::dark_mode()},
     };
-    // The Bambu network plug-in: never opted into, or opted in and did / did not load.
+    // The Bambu network plug-in: never opted into, or opted in and did / did not load. Not asked once
+    // the app is closing: GUI_App::shutdown() has shut the plug-in down, and is_loaded() on it then
+    // crashed (SIGSEGV) -- on macOS a Quit takes seconds, so a Quit 20-30 s after launch met the
+    // first app_start tick mid-shutdown, and stop_usage_diagnostics() runs after shutdown too.
     if (!app.app_config->get_bool("installed_networking"))
         props["bambu_plugin"] = "off";
+    else if (app.is_closing())
+        props["bambu_plugin"] = "unknown";
     else if (BBLNetworkPlugin::instance().is_loaded()) {
         props["bambu_plugin"]         = "loaded";
         props["bambu_plugin_version"] = BBLNetworkPlugin::instance().get_version();
     } else
         props["bambu_plugin"] = "not loaded";
     UsageTelemetry::record("app_start", std::move(props));
+}
+
+
+// 0.1.6: "How did it print?" -- the outcome label for the slice it rates. Asked once per
+// exported or sent slice (Plater's usage_remember_print writes "usage_print_pending"; same key there)
+// when the print should be done: its estimated time plus 10 minutes, and no sooner than 20 minutes
+// after the export. A notification, never a popup; an unanswered one is forgotten after 3 days.
+void usage_rate_print(const nlohmann::json &pending)
+{
+    if (!wxGetApp().mainframe)
+        return;
+    MessageDialog dlg(wxGetApp().mainframe, _L("How did the print come out?"), _L("Rate this print"),
+                      wxYES_NO | wxCANCEL | wxICON_QUESTION);
+    dlg.SetButtonLabel(wxID_YES, _L("Good"));
+    dlg.SetButtonLabel(wxID_NO, _L("Had a problem"));
+    dlg.SetButtonLabel(wxID_CANCEL, _L("Skip"));
+    const int answer = dlg.ShowModal();
+    wxGetApp().app_config->set("usage_print_pending", "");
+    if (answer != wxID_YES && answer != wxID_NO)
+        return;
+    nlohmann::json props = {{"slice_id", pending.value("slice_id", std::string())},
+                            {"rating", answer == wxID_YES ? "good" : "problem"},
+                            {"via", pending.value("via", std::string())}};
+    if (answer == wxID_NO) {
+        const std::vector<std::pair<std::string, wxString>> problems = {
+            {"warping", _L("Warping or corners lifting")},  {"adhesion", _L("Did not stick to the bed")},
+            {"stringing", _L("Stringing or blobs")},         {"layer_shift", _L("Layer shift")},
+            {"supports", _L("Supports failed or hard to remove")},
+            {"under_extrusion", _L("Gaps or under-extrusion")}, {"over_extrusion", _L("Too much plastic")},
+            {"surface", _L("Poor surface or overhangs")},    {"failed", _L("Print failed part-way")},
+            {"other", _L("Something else")}};
+        wxArrayString labels;
+        for (const auto &p : problems)
+            labels.Add(p.second);
+        wxMultiChoiceDialog choice(wxGetApp().mainframe, _L("What went wrong? Choose all that apply."), _L("Rate this print"),
+                                   labels);
+        std::vector<std::string> chosen;
+        if (choice.ShowModal() == wxID_OK)
+            for (int i : choice.GetSelections())
+                if (i >= 0 && size_t(i) < problems.size())
+                    chosen.push_back(problems[size_t(i)].first);
+        props["problems"] = chosen;
+    }
+    UsageTelemetry::record("print_rating", std::move(props));
+}
+
+void usage_maybe_ask_print_rating(GUI_App &app)
+{
+    if (!app.app_config)
+        return;
+    const std::string raw = app.app_config->get("usage_print_pending");
+    if (raw.empty())
+        return;
+    // Diagnostics switched off since the export: the answer could not be sent, so do not ask
+    // (policy 2026-10-v2, section 3.7: feedback is collected only while diagnostics are on).
+    if (!UsageTelemetry::enabled()) {
+        app.app_config->set("usage_print_pending", "");
+        return;
+    }
+    nlohmann::json pending = nlohmann::json::parse(raw, nullptr, false);
+    const int64_t  now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const int64_t  at  = pending.is_object() ? pending.value("at", int64_t(0)) : 0;
+    if (!pending.is_object() || now - at > 3 * 24 * 3600) {
+        app.app_config->set("usage_print_pending", "");
+        return;
+    }
+    if (pending.value("asked", false))
+        return;
+    if (now < at + std::max<int64_t>(pending.value("print_s", int64_t(0)) + 600, 1200))
+        return;
+    Plater *plater = app.plater();
+    if (!plater)
+        return;
+    pending["asked"] = true;
+    app.app_config->set("usage_print_pending", pending.dump());
+    plater->get_notification_manager()->push_notification(
+        NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
+        _u8L("How did your last print come out? Your answer helps us improve print quality."),
+        _u8L("Rate it"), [pending](wxEvtHandler *) {
+            wxGetApp().CallAfter([pending]() { usage_rate_print(pending); });
+            return true;
+        });
 }
 
 void start_usage_diagnostics(GUI_App &app)
@@ -896,8 +990,12 @@ void start_usage_diagnostics(GUI_App &app)
     app.Bind(wxEVT_TIMER, [](wxTimerEvent &) {
         static int ticks = 0;
         ++ticks;
-        if (!UsageTelemetry::enabled())
+        // Nothing to do mid-shutdown; stop_usage_diagnostics() sends what is left. Nothing goes out
+        // while the setup wizard is open either: its last page asks about diagnostics, and an answer
+        // of "don't send" must mean nothing was ever sent (WebGuideDialog applies it on Finish).
+        if (!UsageTelemetry::enabled() || wxGetApp().is_closing() || wxGetApp().is_running_wizard())
             return;
+        usage_maybe_ask_print_rating(wxGetApp());
         if (!s_usage_app_start_sent) {
             record_usage_app_start();
             UsageTelemetry::flush();
@@ -906,29 +1004,122 @@ void start_usage_diagnostics(GUI_App &app)
     }, timer_id);
     s_usage_timer->Start(30 * 1000);
 
-    // Said once, where it can be switched off. On by default, so the person is told rather than asked.
-    if (UsageTelemetry::enabled() && !app.app_config->get_bool("usage_diagnostics_notice_shown")) {
-        app.app_config->set_bool("usage_diagnostics_notice_shown", true);
-        app.CallAfter([]() {
-            Plater *plater = wxGetApp().plater();
-            if (!plater)
-                return;
-            plater->get_notification_manager()->push_notification(
-                NotificationType::CustomNotification, NotificationManager::NotificationLevel::ImportantNotificationLevel,
-                _u8L("Unlayered Slicer sends anonymous usage diagnostics to help us improve it: the features you use, "
-                     "slicing results, crashes and system details. Never your models, files or names."),
-                _u8L("Turn off in Preferences"), [](wxEvtHandler *) {
-                    // Online is the fifth Preferences tab.
-                    wxGetApp().open_preferences(4, "usage_diagnostics");
-                    return true;
-                });
-        });
+    // The hang watchdog's pulse: it stops when the main thread's event loop does. Also beats in
+    // modal loops (wxTimer runs in the common run-loop modes on macOS), so an open dialog is not a hang.
+    const int heartbeat_id = wxWindow::NewControlId();
+    s_usage_heartbeat      = std::make_unique<wxTimer>(&app, heartbeat_id);
+    app.Bind(wxEVT_TIMER, [](wxTimerEvent &) { UsageTelemetry::heartbeat(); }, heartbeat_id);
+    s_usage_heartbeat->Start(5 * 1000);
+    UsageTelemetry::heartbeat();
+
+    // Nothing is collected until the person has made a privacy choice: the setup wizard's privacy
+    // page, or for an installation that never saw it (an update from 0.1.5 or earlier, a setup
+    // closed early) the privacy dialog ask_privacy_choice_once() opens after start-up.
+    // UsageTelemetry::start() has already applied whatever choice exists.
+}
+
+// The privacy question for an installation without a valid choice: updated from 0.1.5 or earlier
+// (whose "on by default" was never a choice), a setup closed before its privacy page, or a choice
+// made for an older notice. After the setup wizard (which asks itself) and What's new. Closing the
+// dialog chooses nothing and diagnostics stay off; it is offered again on the next launch, three
+// times at most, and after that only from Preferences > Online. Never asked when the organisation
+// has switched diagnostics off (UNLAYERED_NO_TELEMETRY): there is nothing to choose.
+void ask_privacy_choice_once(GUI_App &app, bool wizard_showed)
+{
+    if (wizard_showed || !app.app_config || PrivacyConsent::organization_opt_out())
+        return;
+    const PrivacyConsent::Status status = PrivacyConsent::status(PrivacyConsent::load(*app.app_config), PrivacyConsent::legal_approvals());
+    if (status == PrivacyConsent::Status::Granted || status == PrivacyConsent::Status::Declined)
+        return;
+    int dismissed = 0;
+    try {
+        dismissed = std::stoi(app.app_config->get("privacy_prompt_dismissed"));
+    } catch (...) {}
+    if (dismissed >= 3)
+        return;
+    app.CallAfter([&app, dismissed]() {
+        if (!app.mainframe || app.is_closing())
+            return;
+        if (!run_privacy_setup(app.mainframe, "update_prompt")) {
+            app.app_config->set("privacy_prompt_dismissed", std::to_string(dismissed + 1));
+            app.app_config->save();
+        }
+    });
+}
+
+// Unlayered 2026-10-22: after a crash usage diagnostics did not cover, the next launch asks
+// whether to send that one report. Shared diagnostics already send it, unasked.
+class CrashReportDialog : public DPIDialog
+{
+public:
+    CrashReportDialog(wxWindow *parent, const std::vector<nlohmann::json> &crashes)
+        : DPIDialog(parent, wxID_ANY, _L("Send a crash report?"), wxDefaultPosition, wxDefaultSize,
+                    wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU)
+    {
+        auto *main = new wxBoxSizer(wxVERTICAL);
+        auto *text = new wxStaticText(
+            this, wxID_ANY,
+            wxString::Format(_L("%s closed unexpectedly last time. Send a crash report to Unlayered so we can fix it?"),
+                             SLIC3R_APP_FULL_NAME));
+        text->Wrap(FromDIP(440));
+        main->Add(text, 0, wxALL, FromDIP(16));
+
+        // Exactly what would be sent: the same properties, in plain words.
+        wxString details = _L("It contains only:") + "\n";
+        const nlohmann::json &c = crashes.back();
+        auto line = [&](const wxString &label, const char *key) {
+            if (c.contains(key) && !c[key].is_null())
+                details += "  " + label + ": " + wxString::FromUTF8(c[key].is_string() ? c[key].get<std::string>() : c[key].dump()) + "\n";
+        };
+        line(_L("Version"), "version");
+        line(_L("What it was doing"), "phase");
+        line(_L("Error"), "exception");
+        line(_L("Where"), "at");
+        line(_L("Running for (seconds)"), "uptime_s");
+        details += _L("No models, file names, settings or personal information. Sent once, not linked to this computer.");
+        auto *list = new wxStaticText(this, wxID_ANY, details);
+        list->Wrap(FromDIP(440));
+        main->Add(list, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+
+        auto *buttons = new wxBoxSizer(wxHORIZONTAL);
+        auto *no      = new wxButton(this, wxID_NO, _L("Don't Send"));
+        auto *yes     = new wxButton(this, wxID_YES, _L("Send Crash Report"));
+        no->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_NO); });
+        yes->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_YES); });
+        yes->SetDefault();
+        buttons->AddStretchSpacer();
+        buttons->Add(no, 0, wxRIGHT, FromDIP(8));
+        buttons->Add(yes);
+        main->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+
+        SetSizerAndFit(main);
+        Centre(wxBOTH);
+        wxGetApp().UpdateDlgDarkUI(this);
+        yes->SetFocus();
     }
+
+protected:
+    void on_dpi_changed(const wxRect &) override { Fit(); Refresh(); }
+};
+
+void ask_crash_report_once(GUI_App &app)
+{
+    std::vector<nlohmann::json> crashes = UsageTelemetry::unreported_crashes();
+    if (crashes.empty())
+        return;
+    run_when_no_dialog(app, [&app, crashes]() {
+        CrashReportDialog dlg(app.mainframe, crashes);
+        const bool        send = dlg.ShowModal() == wxID_YES; // closing the window counts as no
+        UsageTelemetry::answer_unreported_crashes(send);
+        BOOST_LOG_TRIVIAL(info) << "crash report: " << crashes.size() << " unreported crash(es), the person said "
+                                << (send ? "send" : "don't send");
+    });
 }
 
 void stop_usage_diagnostics()
 {
     s_usage_timer.reset();
+    s_usage_heartbeat.reset();
     // A session too short for the timer still says what it ran on.
     if (UsageTelemetry::enabled())
         record_usage_app_start();
@@ -1158,7 +1349,19 @@ void GUI_App::post_init()
             m_auto_updater = std::make_unique<AutoUpdater>(*this);
             m_auto_updater->on_startup();
             m_auto_updater->show_whats_new(cw_showed);
+            ask_privacy_choice_once(*this, cw_showed);
+            ask_crash_report_once(*this);
+            // Unlayered 0.1.7: a slicer that is not signed in is asked to, once per new version.
+            m_auto_updater->ask_sign_in_after_update(cw_showed);
+            // Unlayered 0.1.7: presets in PrusaSlicer / OrcaSlicer / Bambu Studio, offered once.
+            ask_import_other_slicers_once(*this, cw_showed);
             this->check_new_version_sf();
+            // After the account is loaded, which the configuration feed needs. The selected
+            // printer was already loaded before this existed, so it is handed over once here;
+            // later selections arrive through Sidebar::update_all_preset_comboboxes().
+            m_printer_update_offer = std::make_unique<PrinterUpdateOffer>(*this);
+            if (preset_bundle)
+                m_printer_update_offer->on_printer_selected(preset_bundle->printers.get_edited_preset().config);
             const auto cloud_provider = get_printer_cloud_provider();
             if (is_user_login(cloud_provider) && !app_config->get_stealth_mode()) {
               // this->check_privacy_version(0);
@@ -1234,6 +1437,13 @@ void GUI_App::post_init()
     // next launch would otherwise count as a crash.
     Bind(wxEVT_END_SESSION, [](wxCloseEvent &evt) {
         UsageTelemetry::end_session_by_os();
+#ifdef __APPLE__
+        // A macOS Quit ends here: AppKit exit()s after applicationWillTerminate, so OnExit (and its
+        // stop_usage_diagnostics) never runs. Send session_end and clear the marker now. Guarded
+        // against running twice. (AutoUpdater::on_app_exit is NOT run here: this event also fires at
+        // logout / shut down, when starting an installer is not safe.)
+        stop_usage_diagnostics();
+#endif
         evt.Skip();
     });
 //BBS: remove the single instance currently
@@ -2122,6 +2332,10 @@ bool GUI_App::has_network_update_available() const
 
 void GUI_App::show_network_plugin_download_dialog(bool is_update)
 {
+    // Never mid-quit: a plug-in check that lands during shutdown opened this modal over the closing
+    // app, and on macOS a modal holds the Quit back -- the app hung until Force Quit.
+    if (is_closing() || mainframe == nullptr)
+        return;
     auto load_error = Slic3r::NetworkAgent::get_load_error();
 
     NetworkPluginDownloadDialog::Mode mode;
@@ -2930,6 +3144,9 @@ int GUI_App::OnExit()
         BOOST_LOG_TRIVIAL(error) << "Failed to clean up encrypt bbl network log file";
     }
 
+    // Its worker threads re-check a liveness flag before touching it, so this only stops them.
+    m_printer_update_offer.reset();
+
     // Last, so nothing above can still be holding a file the installer replaces. The installer
     // itself also waits for this process to be gone before it starts.
     if (m_auto_updater) {
@@ -3092,6 +3309,9 @@ bool GUI_App::on_init_inner()
     // Override wxWidgets' kAEGetURL handler so unlayeredslicer:// deep links keep
     // working after the wxWidgets 3.3.2 upgrade on macOS (#13119).
     register_mac_deep_link_handler();
+    // Same regression for the Quit Apple event (Dock > Quit, logout): without this, a Quit while the
+    // setup wizard is up was dropped and new users Force Quit (MacQuitHandler.h).
+    register_mac_quit_handler([this] { return quit_from_wizard(); });
 #endif
 #if BBL_RELEASE_TO_PUBLIC
     wxLog::SetLogLevel(wxLOG_Message);
@@ -3150,6 +3370,13 @@ bool GUI_App::on_init_inner()
 
     wxGetApp().Bind(wxEVT_QUERY_END_SESSION, [this](auto & e) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< "received wxEVT_QUERY_END_SESSION";
+#ifdef __APPLE__
+        // Never close the main frame under the setup wizard: end the wizard, and quit after it returns.
+        if (quit_from_wizard()) {
+            e.Veto();
+            return;
+        }
+#endif
         if (mainframe) {
             wxCloseEvent e2(wxEVT_CLOSE_WINDOW);
             e2.SetCanVeto(true);
@@ -5589,41 +5816,28 @@ std::string GUI_App::handle_web_request(std::string cmd)
         boost::optional<std::string> command = root.get_optional<std::string>("command");
         if (command.has_value()) {
             std::string command_str = command.value();
-            // Unlayered: Bambu login commands removed with the account surface.
-            static const std::unordered_set<std::string> stealth_blocked_info_commands = {
+            // Unlayered: there is no cloud account to sign in to (no Orca Cloud, no Bambu cloud; see
+            // WebViewPanel::SendCloudProvidersInfo), stealth mode or not. The home page's account
+            // queries get the empty provider list, which keeps its panel hidden, and the login
+            // buttons do nothing. Before 0.1.6 this applied only in stealth mode, and its dialog
+            // even offered to leave stealth mode and carry on into an Orca Cloud login.
+            static const std::unordered_set<std::string> cloud_info_commands = {
                 "get_login_info",
                 "get_orca_login_info",
             };
-            static const std::unordered_set<std::string> stealth_blocked_login_commands = {
+            static const std::unordered_set<std::string> cloud_login_commands = {
                 "homepage_login_or_register",
                 "homepage_orca_login_or_register",
             };
-            if (app_config->get_stealth_mode() && stealth_blocked_info_commands.count(command_str)) {
+            if (cloud_info_commands.count(command_str)) {
                 CallAfter([this] {
                     if (mainframe && mainframe->m_webview)
                         mainframe->m_webview->SendCloudProvidersInfo();
                 });
                 return "";
             }
-            if (app_config->get_stealth_mode() && stealth_blocked_login_commands.count(command_str)) {
-                CallAfter([this, command_str] {
-                    MessageDialog dlg(mainframe,
-                        _L("You are currently in Stealth Mode. To log into the Cloud, you need to disable Stealth Mode first."),
-                        _L("Stealth Mode"),
-                        wxOK | wxCANCEL | wxCENTRE);
-                    dlg.SetButtonLabel(wxID_OK, _L("Quit Stealth Mode"));
-                    if (dlg.ShowModal() == wxID_OK) {
-                        app_config->set_bool("stealth_mode", false);
-                        app_config->save();
-                        if (mainframe && mainframe->m_webview)
-                            mainframe->m_webview->SendCloudProvidersInfo();
-                        // Continue with login
-                        if (command_str == "homepage_login_or_register")
-                            this->request_login(true);
-                        else if (command_str == "homepage_orca_login_or_register")
-                            this->request_login(true, ORCA_CLOUD_PROVIDER);
-                    }
-                });
+            if (cloud_login_commands.count(command_str)) {
+                BOOST_LOG_TRIVIAL(info) << "handle_web_request: ignoring " << command_str << " (no cloud account in this build)";
                 return "";
             }
             if (command_str.compare("request_project_download") == 0) {
@@ -6234,8 +6448,10 @@ namespace
 {
 
 // Unlayered: the update check used to sign every request with an HMAC key and carry a persistent
-// installation UUID, the OS description and the CPU architecture. All of that is gone. The check is
-// now a plain GET of a static JSON file, with no query string and nothing identifying the machine.
+// installation UUID, the OS description and the CPU architecture. That is gone. The check is now a
+// GET of a static JSON file with only ?platform=&arch= (which installer to offer). The diagnostics
+// install id goes along in X-Unlayered-Install only while the person's privacy choice permits
+// diagnostics (UsageTelemetry::install_id()); see docs/privacy/NETWORK_TRAFFIC.md.
 
 // Identifies the build to the update host, so its access log can be filtered. Matches the token
 // used by FirmwareBundle and AppUpdater.
@@ -6289,6 +6505,27 @@ void GUI_App::check_new_version_sf(int by_user)
         return;
     }
 
+    // Two one-time reports, so the site can count them whatever the privacy choice: that an update
+    // just installed (?updated=<the version it came from>) and the privacy choice just made
+    // (?choice=private|shared). No identifier goes with them; the site only adds one to a per-day
+    // counter. Each is cleared once the site has answered, so an offline launch reports it next time.
+    // UNLAYERED_NO_TELEMETRY: an organization that switched diagnostics off is told nothing is shared,
+    // so these are dropped, not kept for later.
+    if (PrivacyConsent::organization_opt_out()) {
+        app_config->set(AutoUpdater::UPDATED_REPORT_KEY, "");
+        app_config->set(PrivacyConsent::CHOICE_REPORT_KEY, "");
+    }
+    std::string reported_updated, reported_choice;
+    if (std::string from = app_config->get(AutoUpdater::UPDATED_REPORT_KEY);
+        std::regex_match(from, version_tag_matcher()))
+        reported_updated = std::move(from);
+    if (std::string choice = app_config->get(PrivacyConsent::CHOICE_REPORT_KEY); choice == "private" || choice == "shared")
+        reported_choice = std::move(choice);
+    if (!reported_updated.empty())
+        url += "&updated=" + reported_updated;
+    if (!reported_choice.empty())
+        url += "&choice=" + reported_choice;
+
     BOOST_LOG_TRIVIAL(info) << "updater: checking " << url;
 
     auto http = Http::get(url);
@@ -6297,6 +6534,10 @@ void GUI_App::check_new_version_sf(int by_user)
     // site keeps no ids, only a per-day hash sketch that counts how many (USAGE_DIAGNOSTICS.md).
     if (const std::string install = UsageTelemetry::install_id(); !install.empty())
         http.header("X-Unlayered-Install", install);
+    // Unlayered's own copies (dev edition, build trees, UNLAYERED_INTERNAL) are counted apart from
+    // customers', on the same rule as the diagnostics channel.
+    if (UsageTelemetry::is_internal_copy())
+        http.header("X-Unlayered-Edition", "dev");
     // Verified TLS: since the manifest can now start an unattended install, it must come from the
     // real site. (Its sha256 is the only check on the installer, so a forged manifest would be a
     // forged installer.)
@@ -6313,9 +6554,22 @@ void GUI_App::check_new_version_sf(int by_user)
           BOOST_LOG_TRIVIAL(error) << format("Error getting: `%1%`: HTTP %2%, %3%", "check_new_version_sf", http_status,
                                              error);
         })
-        .on_complete([this, by_user, check_stable_only, current_version](std::string body, unsigned http_status) {
+        .on_complete([this, by_user, check_stable_only, current_version, reported_updated,
+                      reported_choice](std::string body, unsigned http_status) {
           if (http_status != 200)
             return;
+          if (!reported_updated.empty() || !reported_choice.empty()) {
+              // Delivered. On the GUI thread, like every other app_config write; only if nothing
+              // newer was stored meanwhile.
+              this->CallAfter([this, reported_updated, reported_choice]() {
+                  // this->app_config, the member: the function's local `app_config` is not captured
+                  // and is long gone when this runs (clang refuses it; MSVC compiled it).
+                  if (!reported_updated.empty() && this->app_config->get(AutoUpdater::UPDATED_REPORT_KEY) == reported_updated)
+                      this->app_config->set(AutoUpdater::UPDATED_REPORT_KEY, "");
+                  if (!reported_choice.empty() && this->app_config->get(PrivacyConsent::CHOICE_REPORT_KEY) == reported_choice)
+                      this->app_config->set(PrivacyConsent::CHOICE_REPORT_KEY, "");
+              });
+          }
           try {
             boost::trim(body);
             if (body.empty()) {
@@ -6384,6 +6638,15 @@ void GUI_App::check_new_version_sf(int by_user)
                         if (!d.name.empty() && !d.url.empty())
                             candidate.account_downloads.push_back(std::move(d));
                     }
+                }
+
+                // Platform-specific rollouts: a release published for other platforms only is not an
+                // update here, so a Mac-only release is never announced on Windows (and the newest
+                // release that does have this platform's installer is chosen instead).
+                if (!release_targets_platform(candidate.assets, candidate.account_downloads)) {
+                    BOOST_LOG_TRIVIAL(info) << "updater: " << *tag_opt << " lists no installer for "
+                                            << updater_platform() << "; not an update on this platform";
+                    return;
                 }
 
                 const bool is_prerelease = node.get_optional<bool>("prerelease").get_value_or(false);
@@ -9961,7 +10224,13 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
     std::string strFinish = wxGetApp().app_config->get("firstguide", "finish");
     long        pStyle    = wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU;
     if (strFinish == "false" || strFinish.empty())
+#ifdef __APPLE__
+        // macOS keeps the red button on the first run too: it cancels the wizard (skip setup), so a
+        // new user is never trapped in it.
+        pStyle = wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU | wxTAB_TRAVERSAL;
+#else
         pStyle = wxCAPTION | wxTAB_TRAVERSAL;
+#endif
 
     GuideFrame wizard(this, pStyle);
     auto page = start_page == ConfigWizard::SP_WELCOME ? GuideFrame::BBL_WELCOME :
@@ -9969,7 +10238,27 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
                 start_page == ConfigWizard::SP_PRINTERS ? GuideFrame::BBL_MODELS_ONLY :
                 GuideFrame::BBL_MODELS;
     wizard.SetStartPage(page);
+    m_running_wizard    = &wizard;
+    m_quit_after_wizard = false;
+#ifdef __APPLE__
+    // Cmd-Q: the menu bar is disabled under the modal wizard, so catch the key itself.
+    void *quit_key_monitor = add_mac_quit_key_monitor([this] { quit_from_wizard(); });
+#endif
     bool       res = wizard.run();
+#ifdef __APPLE__
+    remove_mac_event_monitor(quit_key_monitor);
+#endif
+    m_running_wizard = nullptr;
+    if (m_quit_after_wizard) {
+        // A Quit arrived during the wizard, which quit_from_wizard() closed without saving anything.
+        // Re-issue it now that no modal dialog is up: the normal Quit path, so a clean exit.
+        m_quit_after_wizard = false;
+        BOOST_LOG_TRIVIAL(info) << "run_wizard: quitting, as requested while the wizard was up";
+#ifdef __APPLE__
+        CallAfter([] { request_mac_terminate(); });
+#endif
+        return false;
+    }
 
     if (res) {
         load_current_presets();
@@ -9987,7 +10276,22 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
         CallAfter([this] { ShowDownNetPluginDlg(); });
     }
 
+    // Unlayered 0.1.7: settings from other slicers are imported by the wizard itself, on its own
+    // step before the printer picker (guide 5import), so there is nothing left to do here.
+
     return res;
+}
+
+bool GUI_App::quit_from_wizard()
+{
+    if (m_running_wizard == nullptr)
+        return false;
+    m_quit_after_wizard = true;
+    // wxID_ABORT, not wxID_CANCEL: cancelling installs the default printer, and a user who quit
+    // has chosen nothing, so the wizard should come back at the next launch.
+    if (m_running_wizard->IsModal())
+        m_running_wizard->EndModal(wxID_ABORT);
+    return true;
 }
 
 void GUI_App::show_desktop_integration_dialog()

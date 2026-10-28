@@ -44,6 +44,10 @@ public:
 
     void on_dpi_changed(const wxRect &suggested_rect) override;
 
+    // Starts the install (with its usual confirmation) as soon as the opening query finds newer
+    // files the printer's firmware can run. Used by the "Printer update available" flow.
+    void begin_when_ready() { m_begin_when_ready = true; }
+
 private:
     enum class Phase { Querying, Ready, Working, Finished };
 
@@ -51,6 +55,7 @@ private:
     std::string m_password;
 
     Phase m_phase = Phase::Querying;
+    bool  m_begin_when_ready = false;
     // Set when the user picks a folder or a zip by hand; overrides the release source.
     std::string m_local_path;
     // The card already reports the version on offer, so the button says Reinstall and the version

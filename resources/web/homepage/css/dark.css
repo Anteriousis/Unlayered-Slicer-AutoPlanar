@@ -149,3 +149,21 @@ body
 	--account-dot-on       : #4CAF50;
 	--account-menu-shadow  : 0 10px 28px rgba(0, 0, 0, 0.45);
 }
+
+/* Recent list: slicer filter chips and source tags (global.css only goes dark with the OS). */
+.SourceChip, .FileSourceBadge
+{
+	color: #B3B3B5;
+	border-color: #4A4A51;
+}
+.SourceChip:hover
+{
+	color: #EFEFF0;
+	background-color: #3A3A3E;
+}
+.SourceChipOn, .SourceChipOn:hover
+{
+	color: #EFEFF0;
+	background-color: #4F4F53;
+	border-color: #B2B3B5;
+}

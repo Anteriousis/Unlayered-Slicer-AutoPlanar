@@ -37,6 +37,12 @@ function HandleStudio( pVal )
 	{
 		HandleModelList(pVal['response']);
 	}
+	else if(strCmd=='page_before_models')
+	{
+		// Unlayered 0.1.7: the answer to GoBackFromModels() (guide 21 only).
+		let known={'5import':1,'13signin':1};
+		window.open('../'+(known[pVal['page']] ? pVal['page'] : '13')+'/index.html','_self');
+	}
 	else if(strCmd=='check_new_printers_result')
 	{
 		let button = document.getElementById("CheckNewPrintersBtn");

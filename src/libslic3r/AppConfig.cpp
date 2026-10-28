@@ -61,10 +61,12 @@ namespace Slic3r {
 // a request without it is answered as Windows, which every earlier build was.
 static const std::string VERSION_CHECK_URL = "https://unlayered3d.com/slicer/latest.json";
 
-// Where the firmware and printer-config updaters look for releases. Both speak the GitHub releases
-// API shape, so anything serving that shape can stand in - a local file server while testing, or
-// our own host if those artifacts ever need to stop being public.
-static const std::string GITHUB_API_BASE = "https://api.github.com";
+// Where the firmware and printer-config updaters look for releases: unlayered3d.com, which answers
+// the GitHub releases API paths and shape (repos/Unlayered3D/RepRapFirmware/releases and
+// repos/Unlayered3D/printer-config/releases), so the same parsers serve both. Firmware is public;
+// configuration needs the customer's Unlayered account sign-in. Anything else serving that shape can
+// stand in through "github_api_base" - a local copy of the site while testing, or GitHub itself.
+static const std::string PRINTER_UPDATES_API_BASE = "https://unlayered3d.com/printer-updates-api";
 static const std::string MODELS_STR = "models";
 
 const std::string AppConfig::SECTION_FILAMENTS = "filaments";
@@ -109,10 +111,8 @@ std::string AppConfig::get_hms_host()
 
 bool AppConfig::get_stealth_mode()
 {
-    // always return true when user did not finish setup wizard yet
-    if (!get_bool("firstguide","finish")) {
-        return true;
-    }
+    // Unlayered 2026-10-22: no longer forced on until the setup wizard finishes. Stealth mode is off
+    // by default and only ever turned on in Preferences; the wizard does not ask about it.
     return get_bool("stealth_mode");
 }
 
@@ -126,6 +126,47 @@ void AppConfig::reset()
     m_storage.clear();
     set_defaults();
 };
+
+// Unlayered one-shot migrations of a config read from disk. Called by load() only: run from
+// set_defaults(), they ran first on the empty config that reset() builds before load(), set their
+// "done" flag there, and never touched the file's values (stealth_mode stayed on everywhere). The
+// flags were renamed when that was fixed (2026-10-23), so every install gets each one for real once.
+static void migrate_loaded_config(AppConfig &config)
+{
+    // Configs written before this fork detached from OrcaSlicer.
+    if (config.get("unlayered_detach_migrated_v2").empty()) {
+        BOOST_LOG_TRIVIAL(info) << "Applying the Unlayered detach migration to this config";
+        // The persistent installation identifier the old update check sent with every request.
+        config.erase("app", "updater_iid");
+        config.erase("app", "iid");
+        // Left over from the Bambu network-plugin update flow.
+        config.erase("app", "update_network_plugin");
+        // Only ever read by the preset sync that no longer exists.
+        config.erase("app", "sync_system_preset");
+        // The same identifier was also mirrored to a bare file next to the config.
+        try {
+            const auto machine_id = boost::filesystem::path(Slic3r::data_dir()) / ".orcaslicer_machine_id";
+            boost::system::error_code ec;
+            if (boost::filesystem::exists(machine_id, ec))
+                boost::filesystem::remove(machine_id, ec);
+        } catch (...) {
+            // Never let a leftover file stop the application from starting.
+        }
+        config.set_bool("unlayered_detach_migrated_v2", true);
+    }
+
+    // Unlayered 2026-10-22: stealth mode is OFF by default and the setup wizard no longer
+    // asks about it. Earlier builds forced it on, so nearly every existing install has it on without
+    // anyone having chosen it - and on, it silently skips the account sign-in check and the printer
+    // configuration update offer. One-shot reset to off; turning it back on in Preferences sticks.
+    if (config.get("unlayered_stealth_off_migrated_v2").empty()) {
+        if (config.get_bool("stealth_mode")) {
+            BOOST_LOG_TRIVIAL(info) << "Turning stealth_mode off (the Unlayered default)";
+            config.set_bool("stealth_mode", false);
+        }
+        config.set_bool("unlayered_stealth_off_migrated_v2", true);
+    }
+}
 
 // Override missing or keys with their defaults.
 void AppConfig::set_defaults()
@@ -167,45 +208,8 @@ void AppConfig::set_defaults()
         if (!get("use_legacy_opengl").empty())
             erase("app", "use_legacy_opengl");
 
-        // Unlayered: one-shot cleanup for configs written before this fork detached from OrcaSlicer.
-        // Without it, everyone who has ever run an earlier build keeps stealth_mode=false and the
-        // dead updater keys forever, because set_defaults() only fills in values that are absent.
-        if (get("unlayered_detach_migrated").empty()) {
-            BOOST_LOG_TRIVIAL(info) << "Applying the Unlayered detach migration to this config";
-            // Stealth mode is the default now, and the services it used to gate are gone anyway.
-            set_bool("stealth_mode", true);
-            // The persistent installation identifier the old update check sent with every request.
-            erase("app", "updater_iid");
-            erase("app", "iid");
-            // Left over from the Bambu network-plugin update flow.
-            erase("app", "update_network_plugin");
-            // Only ever read by the preset sync that no longer exists.
-            erase("app", "sync_system_preset");
-            // The same identifier was also mirrored to a bare file next to the config.
-            try {
-                const auto machine_id = boost::filesystem::path(Slic3r::data_dir()) / ".orcaslicer_machine_id";
-                boost::system::error_code ec;
-                if (boost::filesystem::exists(machine_id, ec))
-                    boost::filesystem::remove(machine_id, ec);
-            } catch (...) {
-                // Never let a leftover file stop the application from starting.
-            }
-            set_bool("unlayered_detach_migrated", true);
-        }
-
-        // Unlayered: the setup wizard used to carry a stealth-mode page (guide 4unlayered) whose
-        // checkbox rendered unchecked and reported its state on load, so merely walking through
-        // the wizard wrote stealth_mode=false over the on-by-default value set below. That page is
-        // out of the flow now, but configs written by a build that had it still carry the forced-off
-        // value, and the detach migration above has already run for them so it will not fire again.
-        // One-shot correction so "on by default" actually holds for existing installs too.
-        if (get("unlayered_stealth_default_migrated").empty()) {
-            if (!get_bool("stealth_mode")) {
-                BOOST_LOG_TRIVIAL(info) << "Restoring stealth_mode to the Unlayered default (on)";
-                set_bool("stealth_mode", true);
-            }
-            set_bool("unlayered_stealth_default_migrated", true);
-        }
+        // The Unlayered one-shot migrations are not here: set_defaults() also runs on the empty
+        // config before load(), where they would only mark themselves done. See migrate_loaded_config().
 
         // Migrate legacy_networking boolean to network_plugin_version string
         std::string legacy_networking = get("legacy_networking");
@@ -482,20 +486,18 @@ void AppConfig::set_defaults()
     }
 
     // Orca
-    // Unlayered: on by default. get_stealth_mode() already forces it on until the setup wizard
-    // finishes; this is the value the wizard bakes in afterwards. See the migration below for
-    // configs written by a build that predates the change.
+    // Unlayered 2026-10-22: off by default (see the stealth migration above).
     if (get("stealth_mode").empty()) {
-        set_bool("stealth_mode", true);
+        set_bool("stealth_mode", false);
     }
     if (get("hide_login_side_panel").empty()) {
         set_bool("hide_login_side_panel", false);
     }
-    // Unlayered: anonymous usage diagnostics, on unless switched off (slic3r/Utils/UsageTelemetry).
-    // Its own setting, NOT part of stealth mode: stealth mode is on for everyone by default.
-    if (get("usage_diagnostics").empty()) {
-        set_bool("usage_diagnostics", true);
-    }
+    // Unlayered: usage diagnostics (slic3r/Utils/UsageTelemetry). Since 0.1.6 "usage_diagnostics"
+    // is only a mirror of the privacy choice record "privacy_consent" (slic3r/Utils/PrivacyConsent),
+    // written with it; permission is never read from it. No default is written here: an explicit
+    // "false" in a config from before 0.1.6 is an opt-out that PrivacyConsent::migrate_legacy_setting
+    // keeps, and a default written by this function would look exactly like one.
     if (get("allow_abnormal_storage").empty()) {
         set_bool("allow_abnormal_storage", false);
     }
@@ -524,8 +526,8 @@ void AppConfig::set_defaults()
     if (get(SETTING_WEB_APP_ALLOW_SETTINGS).empty())
         set_bool(SETTING_WEB_APP_ALLOW_SETTINGS, false);
 
-    // Unlayered: the second slot, the Unlayered Agent tab, seeded once from
-    // resources/web/webapp/agent.json. Same defaults as the generic slot above.
+    // Unlayered: the second web-application slot (off in release builds), seeded once from its
+    // development overlay file. Same defaults as the generic slot above.
     if (get(SETTING_AGENT_APP_ENABLED).empty())
         set_bool(SETTING_AGENT_APP_ENABLED, false);
     if (!has(SETTING_AGENT_APP_URL))
@@ -1094,6 +1096,8 @@ std::string AppConfig::load()
         }
     }
 
+    if (m_mode == EAppMode::Editor)
+        migrate_loaded_config(*this);
     // Override missing or keys with their defaults.
     this->set_defaults();
     m_dirty = false;
@@ -1400,6 +1404,8 @@ std::string AppConfig::load()
         }
     }
 
+    if (m_mode == EAppMode::Editor)
+        migrate_loaded_config(*this);
     // Override missing or keys with their defaults.
     this->set_defaults();
     m_dirty = false;
@@ -1987,23 +1993,10 @@ std::string AppConfig::github_api_base() const
     // stripped here rather than at each of the six call sites.
     std::string base = get("github_api_base");
     if (base.empty())
-        return GITHUB_API_BASE;
+        return PRINTER_UPDATES_API_BASE;
     while (!base.empty() && base.back() == '/')
         base.pop_back();
     return base;
-}
-
-std::string AppConfig::printer_updates_token() const
-{
-    // Trimmed because this value is pasted by hand: copying it out of a web page very often picks
-    // up a trailing newline or a leading space, and an untrimmed token would be sent in the
-    // Authorization header verbatim and rejected, with nothing on screen to suggest why.
-    std::string token = get(SETTING_PRINTER_UPDATES_TOKEN);
-    const auto  first = token.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos)
-        return {};
-    const auto last = token.find_last_not_of(" \t\r\n");
-    return token.substr(first, last - first + 1);
 }
 
 bool AppConfig::exists()

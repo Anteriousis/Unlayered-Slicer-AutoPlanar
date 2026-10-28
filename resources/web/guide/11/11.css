@@ -70,3 +70,48 @@
 	height: 24px;
 	margin-right: 5px;
 }
+
+/* Unlayered 0.1.6 */
+#RegionHelp
+{
+	max-width: 400px;
+	text-align: center;
+	margin-bottom: 12px;
+}
+
+.RegionItem:focus-visible
+{
+	outline: 3px solid var(--main-color);
+	outline-offset: -3px;
+}
+
+button.ButtonTypeChoice
+{
+	font-family: inherit;
+	cursor: pointer;
+}
+
+button.ButtonTypeChoice:disabled
+{
+	opacity: 0.45;
+	cursor: default;
+}
+
+/* Unlayered 0.1.6: ten places, one click each. Two columns so the list fits the wizard. */
+#RegionList
+{
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	width: 560px;
+	max-width: 100%;
+}
+
+#RegionList .RegionItem:nth-child(odd)
+{
+	border-right: 1px solid #C7C7C7;
+}
+
+#RegionHelp
+{
+	max-width: 560px;
+}

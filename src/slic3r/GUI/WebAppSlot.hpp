@@ -12,9 +12,7 @@ namespace GUI {
 // Preferences all need to name a slot without pulling the panel's headers in.
 //
 // The three slots, of which two ship switched on:
-//   agent()    -- the "Agent" tab. Holds the print-settings permission, because changing settings
-//                 on the user's behalf is what it is for, and keeps its page across a theme
-//                 toggle (live_theme) because that page holds a conversation.
+//   agent()    -- the second slot. Off in release builds (development edition only).
 //   universe() -- the "Universe" tab: browse models and open one straight onto the plate, and
 //                 publish what is on the plate back. Holds the export permission, not settings.
 //   generic()  -- the "Web application" tab: application-agnostic, hosts whatever a developer
@@ -40,6 +38,11 @@ struct WebAppSlot
     // rather than a reuse of key_allow_settings, so a tab can be allowed to publish what is on
     // the plate without also being allowed to rewrite the print settings, or the other way round.
     const char* key_allow_export;
+    // Gate for slicer.installPrinterPreset: the page may offer a printer profile for the user to
+    // install. Its own key again, because letting a site ADD a preset is a different consent from
+    // letting it read settings or take the plate away -- and even with it on, every install waits
+    // on a native confirmation the page cannot skip or pre-answer.
+    const char* key_allow_install;
     // Records the last one-shot visibility change applied to this slot, in either direction.
     // Deliberately not defaulted in AppConfig, so "never applied" stays distinguishable from any
     // tag. The key is named *_disable_once for the configurations already carrying it.
@@ -59,12 +62,13 @@ struct WebAppSlot
     // leaves the key untouched, which is how a slot ships with no address at all.
     const char* default_url;
     const char* default_title;
-    // The two bridge permissions this build ships with, applied on the same terms the seed file
+    // The bridge permissions this build ships with, applied on the same terms the seed file
     // applies them: settings on a first seed only (a bool has no unset state, so a stored false
-    // cannot be told from the user having switched it off), export whenever the key is absent
-    // (it is newer than the installations it has to reach).
+    // cannot be told from the user having switched it off), export and install whenever the key
+    // is absent (they are newer than the installations they have to reach).
     bool default_allow_settings;
     bool default_allow_export;
+    bool default_allow_install;
     // Hosts this tab may download from beyond the page's own, used when the configuration
     // names none. A leading dot matches any sub-domain. It exists because object storage
     // hands out a host belonging to the deployment rather than to the product, so no fixed

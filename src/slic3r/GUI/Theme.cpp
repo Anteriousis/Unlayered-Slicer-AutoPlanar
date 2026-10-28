@@ -531,8 +531,10 @@ void ThemeManager::select(const std::string& name)
     boost::filesystem::remove(boost::filesystem::path(themes_dir()) / (std::string(".unsaved-") + (theme->dark ? "dark" : "light") + ".json"), ec);
     cfg.save();
     if (theme->dark != wxGetApp().dark_mode()) {
-        if (cfg.get("color_scheme") != "system")
-            wxGetApp().apply_color_scheme(theme->dark ? "dark" : "light"); // re-themes through on_base_changed()
+        // Picking a theme is an explicit choice, so it switches the colour scheme to that theme's base,
+        // also from System. It used to wait for the desktop to change mode when System was selected,
+        // which on every new install (System is the default) looked like the Theme dropdown did nothing.
+        wxGetApp().apply_color_scheme(theme->dark ? "dark" : "light"); // re-themes through on_base_changed()
         return;
     }
     m_working    = *theme;

@@ -1,0 +1,38 @@
+/* Unlayered 0.1.7: the "Settings from other slicers" step (guide 5import), styled like 4unlayered. */
+#Content
+{
+	padding: 0% 15%;
+}
+
+.FeatureText
+{
+	line-height: 26px;
+	margin-top: 4mm;
+}
+
+#AppList
+{
+	margin-top: 4mm;
+}
+
+.CheckArea
+{
+	display: block;
+	margin-top: 3mm;
+	line-height: 30px;
+}
+
+#Summary
+{
+	margin-top: 4mm;
+	white-space: pre-wrap;
+	line-height: 22px;
+	font-size: 13px;
+	max-height: 360px;
+	overflow-y: auto;
+}
+
+[hidden]
+{
+	display: none !important;
+}

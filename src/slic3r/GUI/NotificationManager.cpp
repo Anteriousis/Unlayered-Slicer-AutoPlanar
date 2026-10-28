@@ -2471,6 +2471,57 @@ void NotificationManager::push_orca_sync_conflict_notification(const std::string
 		data, m_id_provider, m_evt_handler, std::move(pull_callback), std::move(force_push_callback), conflict_code), 0);
 }
 
+void NotificationManager::ActionRowNotification::init()
+{
+	PopNotification::init();
+	// One extra line for the row of links under the text.
+	m_lines_count = m_lines_count + 1;
+}
+
+void NotificationManager::ActionRowNotification::render_text(ImGuiWrapper& imgui,
+	const float win_size_x, const float win_size_y,
+	const float win_pos_x, const float win_pos_y)
+{
+	const float x_offset   = m_left_indentation;
+	const float shift_y    = m_line_height;
+	const float starting_y = m_line_height / 2;
+
+	int         last_end = 0;
+	std::string line;
+	for (size_t i = 0; i < m_endlines.size(); i++) {
+		if (m_text1.size() >= m_endlines[i]) {
+			line     = m_text1.substr(last_end, m_endlines[i] - last_end);
+			last_end = m_endlines[i];
+			if (m_text1.size() > m_endlines[i])
+				last_end += (m_text1[m_endlines[i]] == '\n' || m_text1[m_endlines[i]] == ' ' ? 1 : 0);
+			ImGui::SetCursorPosX(x_offset);
+			ImGui::SetCursorPosY(starting_y + i * shift_y);
+			imgui.text(line.c_str());
+		}
+	}
+
+	const float action_y = starting_y + m_endlines.size() * shift_y;
+	float       x        = x_offset;
+	for (size_t i = 0; i < m_actions.size(); ++i) {
+		const std::string &label = m_actions[i].first;
+		const std::string  id    = "##action_row_" + std::to_string(i);
+		render_hyperlink_action(imgui, x, action_y, label, id.c_str(), [this, i] {
+			if (m_actions[i].second && m_actions[i].second(m_evt_handler))
+				close();
+		});
+		x += ImGui::CalcTextSize((label + "   ").c_str()).x;
+	}
+}
+
+void NotificationManager::push_action_row_notification(NotificationType type, NotificationLevel level,
+	const std::string& text, std::vector<ActionLink> actions)
+{
+	close_notification_of_type(type);
+	NotificationData data{ type, level, 0, text };
+	push_notification_data(std::make_unique<NotificationManager::ActionRowNotification>(
+		data, m_id_provider, m_evt_handler, std::move(actions)), 0);
+}
+
 void NotificationManager::PluginMissingNotification::init()
 {
 	PopNotification::init();

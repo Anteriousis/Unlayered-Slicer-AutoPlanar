@@ -1871,7 +1871,7 @@ static void render_planning_breakdown(const CurvedTransition::RegionDecision& r)
         ImGui::Text("Time penalty: %+.1f s (%+.1f%%)",r.time_delta_seconds,r.time_delta_percent);
         ImGui::Text("Support saved: %+.1f mm3 | model added: %+.1f mm3",r.support_saved_mm3,r.model_added_mm3);
         ImGui::Text("Travel: %.1f s | %zu of %zu routes use local clearance",r.travel_seconds,r.local_routes,r.travel_routes);
-    } else ImGui::TextWrapped("%s",_u8L("Benefit/cost breakdown unavailable for this region or older G-code.").c_str());
+    } else ImGui::TextWrapped("%s",_u8L("Benefit/cost breakdown was not evaluated, or is unavailable in this older report.").c_str());
     if(!r.rejection_reason.empty()) ImGui::TextWrapped("%s %s",_u8L("Rejection reason:").c_str(),r.rejection_reason.c_str());
 }
 
@@ -1907,8 +1907,10 @@ void GCodeViewer::render_planning_regions(int width,int height)
         if(ImGui::IsMouseHoveringRect(lo,hi)) {
             ImGui::BeginTooltip();ImGui::PushTextWrapPos(350.f*m_scale);
             ImGui::TextUnformatted(r.reason.c_str());
-            ImGui::Text("%.2f deg | net score %.3f",r.angle,r.gain);
-            ImGui::Text("Motion estimate %.1f s | generated support %.1f mm3",r.motion_seconds,r.support_mm3);
+            if(r.has_breakdown || r.rejection_reason.empty()) {
+                ImGui::Text("%.2f deg | net score %.3f",r.angle,r.gain);
+                ImGui::Text("Motion estimate %.1f s | generated support %.1f mm3",r.motion_seconds,r.support_mm3);
+            } else ImGui::Text("%.2f deg | not evaluated",r.angle);
             render_planning_breakdown(r);
             ImGui::TextUnformatted("XY planning footprint; not a collision or print-quality certificate.");
             ImGui::PopTextWrapPos();ImGui::EndTooltip();
@@ -4370,7 +4372,9 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                 if(ImGui::Selectable(label.c_str(),m_highlight_planning_region==r.id))
                     m_highlight_planning_region=m_highlight_planning_region==r.id?-1:r.id;
                 ImGui::TextWrapped("%s",r.reason.c_str());
-                ImGui::Text("%.2f deg | score %.3f | candidate %.1f s, %.1f mm3 support",r.angle,r.gain,r.motion_seconds,r.support_mm3);
+                if(r.has_breakdown || r.rejection_reason.empty())
+                    ImGui::Text("%.2f deg | score %.3f | candidate %.1f s, %.1f mm3 support",r.angle,r.gain,r.motion_seconds,r.support_mm3);
+                else ImGui::Text("%.2f deg | not evaluated",r.angle);
                 render_planning_breakdown(r);
                 ImGui::PopID();
             }
